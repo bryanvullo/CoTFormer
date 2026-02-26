@@ -1,0 +1,116 @@
+#!/bin/bash
+################################################################################
+# Slurm Job Script Template for Iridis X
+#
+# HOW TO USE:
+#   1. Copy this file into your package directory:
+#        cp job.slurm.example <your_package>/job.slurm
+#   2. Replace every <PKG_NAME> below with your package directory name
+#   3. Adjust resources (GPU type, memory, time) for your workload
+#   4. Submit from the project root (~/dpdl/):
+#        sbatch <your_package>/job.slurm
+#
+# FINDING CLUSTER INFORMATION:
+#   sinfo                                 # List all partitions, nodes, and state
+#   sinfo -p <partition> --Node --long    # Detailed info for a specific partition
+#   sacctmgr show assoc user=$USER        # Your account name (--account below)
+#   scontrol show partition <partition>    # Partition limits (max time, etc.)
+################################################################################
+
+#--- Job identity -------------------------------------------------------
+#SBATCH --job-name=<PKG_NAME>
+
+#--- Partition and account ----------------------------------------------
+# Run 'sinfo' to see all partitions. Key GPU partitions (as of Feb 2026):
+#
+#   ecsstudents_l4   — L4 GPUs (24GB), 1-day max, ECS undergrads (ecsai01-06)
+#   a100             — A100 GPUs (80GB), 2d12h max (rose02-13)
+#   scavenger_l4     — L4 scavenger (12h max, preemptible)
+#   scavenger_4a100  — A100 scavenger (12h max, preemptible)
+#
+# For undergrads, use ecsstudents_l4 (guaranteed access).
+# Check your account with: sacctmgr show assoc user=$USER
+#SBATCH --partition=ecsstudents_l4
+#SBATCH --account=ecsstudents
+
+#--- Node and task layout -----------------------------------------------
+#SBATCH --nodes=1
+#SBATCH --ntasks=1
+
+#--- CPU cores ----------------------------------------------------------
+# Number of CPU cores for your job. Your script can read this value at
+# runtime via the $SLURM_CPUS_PER_TASK environment variable (e.g. for
+# DataLoader num_workers).
+#SBATCH --cpus-per-task=4
+
+#--- GPU request --------------------------------------------------------
+# Format: --gres=gpu:<type>:<count>
+# Available GPU types on Iridis X (check with sinfo):
+#   l4     — NVIDIA L4 (24GB)     on ecsstudents_l4, scavenger_l4
+#   a100   — NVIDIA A100 (80GB)   on a100, scavenger_4a100
+#   h100   — NVIDIA H100          on swarm_h100 (restricted)
+#   h200   — NVIDIA H200          on quad_h200, dual_h200 (restricted)
+# To request 2 GPUs: --gres=gpu:2
+# NOTE: Use --gres=gpu:N (without type). Specifying a type (e.g. gpu:l4:1)
+# may silently fail if the type name doesn't match Slurm's gres config,
+# causing the job to run without GPU access.
+#SBATCH --gres=gpu:1
+
+#--- Memory -------------------------------------------------------------
+# RAM allocated to your job. If your job is killed with "OOM", increase
+# this. Check post-run usage with: seff <job_id>
+#SBATCH --mem=16G
+
+#--- Wall time ----------------------------------------------------------
+# Format: HH:MM:SS. Job is killed if it exceeds this limit.
+# Training jobs may need 12-48 hours. Start conservative and check with
+# seff <job_id> after a run to see actual elapsed time.
+#SBATCH --time=04:00:00
+
+#--- Output logs --------------------------------------------------------
+# %j is replaced by the Slurm job ID. Logs land inside your package dir.
+#SBATCH --output=<PKG_NAME>/slurm_%j.out
+#SBATCH --error=<PKG_NAME>/slurm_%j.err
+
+# --- Package Configuration ---
+PKG_NAME="<PKG_NAME>"
+PROJECT_DIR="${SLURM_SUBMIT_DIR:-$HOME/dpdl}"
+
+echo "========================================="
+echo " Slurm Job: $SLURM_JOB_ID"
+echo " Package:   $PKG_NAME"
+echo " Node:      $(hostname)"
+echo " CPUs:      $SLURM_CPUS_PER_TASK"
+echo " Started:   $(date)"
+echo "========================================="
+
+# --- Load container runtime ---
+# Iridis X provides apptainer as a module. Older clusters may use singularity.
+module load apptainer 2>/dev/null || module load singularity 2>/dev/null || {
+    echo "ERROR: Neither apptainer nor singularity module available"
+    echo "  Run 'module avail' to see available modules"
+    exit 1
+}
+
+cd "$PROJECT_DIR"
+echo "Working directory: $(pwd)"
+
+# --- Run inside container ---
+# --nv:       passes host NVIDIA drivers and GPU devices into the container
+# --unsquash: required on Iridis X compute nodes (they lack fusermount)
+# --bind $PWD: mounts the project directory so the container can see all packages
+#
+# Replace the python3 command below with your own entry point, e.g.:
+#   python3 "${PKG_NAME}/train.py" --epochs 50
+apptainer exec --nv --unsquash --bind "$PWD" \
+    rcotformer.sif \
+    python3 "${PKG_NAME}/your_script.py"
+
+EXIT_CODE=$?
+
+echo "========================================="
+echo " Job finished: $(date)"
+echo " Exit code:    $EXIT_CODE"
+echo "========================================="
+
+exit $EXIT_CODE

@@ -1,0 +1,55 @@
+Running SLURM prolog script on ecsai02
+===============================================================================
+Job started on Tue Feb 24 21:49:11 GMT 2026
+Job ID          : 630456
+Job name        : gpu_test
+WorkDir         : /iridisfs/home/ab3u21/dpdl
+Command         : /iridisfs/home/ab3u21/dpdl/iridis_gpu_test/job.slurm
+Partition       : ecsstudents_l4
+Num hosts       : 1
+Num cores       : 2
+Num of tasks    : 1
+Hosts allocated : ecsai02
+Job Output Follows ...
+===============================================================================
+=========================================
+ Slurm Job: 630456
+ Package:   iridis_gpu_test
+ Node:      ecsai02
+ CPUs:      
+ Started:   Tue Feb 24 21:49:11 GMT 2026
+=========================================
+Working directory: /iridisfs/home/ab3u21/dpdl
+No devices were found
+============================================================
+PyTorch + CUDA Smoke Test
+============================================================
+PyTorch version : 2.5.1+cu121
+CUDA available  : False
+FAIL: CUDA is not available.
+CUDA version    : 12.1
+Device count    : 0
+=========================================
+ Job finished: Tue Feb 24 21:49:49 GMT 2026
+ Exit code:    1
+=========================================
+==============================================================================
+Running epilogue script on ecsai02.
+
+Submit time  : 2026-02-24T21:49:10
+Start time   : 2026-02-24T21:49:11
+End time     : 2026-02-24T21:49:49
+Elapsed time : 00:00:38 (Timelimit=00:10:00)
+
+Job ID: 630456
+Cluster: iridis_x
+User/Group: ab3u21/fp
+State: FAILED (exit code 1)
+Nodes: 1
+Cores per node: 2
+CPU Utilized: 00:01:01
+CPU Efficiency: 80.26% of 00:01:16 core-walltime
+Job Wall-clock time: 00:00:38
+Memory Utilized: 516.23 MB
+Memory Efficiency: 3.15% of 16.00 GB (16.00 GB/node)
+

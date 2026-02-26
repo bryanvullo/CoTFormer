@@ -1,0 +1,72 @@
+################################################################################
+# Apptainer Container Recipe Template
+#
+# HOW TO USE:
+#   1. Copy this file:
+#        cp rcotformer.def.example rcotformer.def
+#   2. Edit the %post section to add your Python dependencies
+#   3. Build the container image (requires sudo — run in WSL, not on Iridis):
+#        sudo apptainer build rcotformer.sif rcotformer.def
+#   4. Upload the .sif to Iridis:
+#        scp rcotformer.sif iridis-x:~/dpdl/
+#
+# WHY CONTAINERS?
+#   Iridis module versions can change or disappear. By baking all
+#   dependencies into a .sif image, your code runs identically on any
+#   machine — your laptop, a colleague's, or a compute node.
+#
+# CHOOSING A BASE IMAGE:
+#   Browse NVIDIA's images at: https://hub.docker.com/r/nvidia/cuda/tags
+#   Pick a tag matching your CUDA version. Common options:
+#     nvidia/cuda:12.1.1-cudnn8-runtime-ubuntu22.04   (smaller, run only)
+#     nvidia/cuda:12.1.1-cudnn8-devel-ubuntu22.04     (larger, includes nvcc)
+#   Use "-devel" only if you need to compile CUDA code (e.g. custom ops).
+################################################################################
+
+# --- Base image ---
+# "Bootstrap: docker" pulls from Docker Hub. "From:" specifies the image tag.
+Bootstrap: docker
+From: nvidia/cuda:12.1.1-cudnn8-runtime-ubuntu22.04
+
+# --- Metadata ---
+%labels
+    Content PyTorch + CUDA 12.1 runtime for RCoTFormer
+
+# --- Build steps (runs once during 'apptainer build') ---
+%post
+    # System packages
+    # Add any system libraries your project needs (e.g. libgl1 for OpenCV).
+    apt-get update && apt-get install -y \
+        python3 \
+        python3-pip \
+        python3-venv \
+    && rm -rf /var/lib/apt/lists/*
+
+    # Python packages
+    # --no-cache-dir keeps the image smaller by not storing pip's download cache.
+    # --index-url points to PyTorch's CUDA 12.1 wheel repository.
+    #
+    # Add your own packages after "torch", for example:
+    #   pip3 install --no-cache-dir \
+    #       torch torchvision --index-url https://download.pytorch.org/whl/cu121
+    #   pip3 install --no-cache-dir transformers datasets wandb
+    pip3 install --no-cache-dir \
+        torch --index-url https://download.pytorch.org/whl/cu121
+    pip3 install --no-cache-dir numpy
+
+# --- Environment variables (set every time the container runs) ---
+%environment
+    export LC_ALL=C
+    # Add any runtime env vars your code needs, e.g.:
+    #   export TRANSFORMERS_CACHE=/tmp/hf_cache
+    #   export WANDB_MODE=offline
+
+# --- Validation (runs automatically at the end of 'apptainer build') ---
+# If any command here exits non-zero, the build fails — catching problems early.
+%test
+    echo "=== Container Validation ==="
+    python3 -c "import torch; print('OK torch', torch.__version__)"
+    # Add checks for your own packages, e.g.:
+    #   python3 -c "import transformers; print('OK transformers', transformers.__version__)"
+    nvidia-smi 2>/dev/null && echo "OK nvidia-smi" || echo "SKIP nvidia-smi (no GPU at build time)"
+    echo "=== All container tests passed ==="

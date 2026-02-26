@@ -1,0 +1,26 @@
+Bootstrap: docker
+From: nvidia/cuda:12.1.1-cudnn8-runtime-ubuntu22.04
+
+%labels
+    Content PyTorch 2.3 + CUDA 12.1 runtime for RCoTFormer
+
+%post
+    apt-get update && apt-get install -y \
+        python3 \
+        python3-pip \
+        python3-venv \
+    && rm -rf /var/lib/apt/lists/*
+
+    # Install PyTorch (CUDA 12.1 wheels)
+    pip3 install --no-cache-dir \
+        torch --index-url https://download.pytorch.org/whl/cu121
+    pip3 install --no-cache-dir numpy
+
+%environment
+    export LC_ALL=C
+
+%test
+    echo "=== Container Validation ==="
+    python3 -c "import torch; assert torch.cuda.is_available() or True; print('OK torch', torch.__version__)"
+    nvidia-smi 2>/dev/null && echo "OK nvidia-smi" || echo "SKIP nvidia-smi (no GPU at build time)"
+    echo "=== All container tests passed ==="

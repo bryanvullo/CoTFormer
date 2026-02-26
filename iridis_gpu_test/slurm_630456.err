@@ -1,0 +1,13 @@
+INFO:    gocryptfs not found, will not be able to use gocryptfs
+INFO:    Converting SIF file to temporary sandbox...
+/usr/local/lib/python3.10/dist-packages/torch/_subclasses/functional_tensor.py:295: UserWarning: Failed to initialize NumPy: No module named 'numpy' (Triggered internally at ../torch/csrc/utils/tensor_numpy.cpp:84.)
+  cpu = _conversion_method_template(device=torch.device("cpu"))
+Traceback (most recent call last):
+  File "/iridisfs/home/ab3u21/dpdl/iridis_gpu_test/test_gpu.py", line 37, in <module>
+    main()
+  File "/iridisfs/home/ab3u21/dpdl/iridis_gpu_test/test_gpu.py", line 27, in main
+    a = torch.randn(1024, 1024, device=device)
+  File "/usr/local/lib/python3.10/dist-packages/torch/cuda/__init__.py", line 319, in _lazy_init
+    torch._C._cuda_init()
+RuntimeError: No CUDA GPUs are available
+INFO:    Cleaning up image...

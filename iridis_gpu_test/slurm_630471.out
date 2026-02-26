@@ -1,0 +1,100 @@
+Running SLURM prolog script on ecsai02
+===============================================================================
+Job started on Tue Feb 24 22:01:38 GMT 2026
+Job ID          : 630471
+Job name        : gpu_test
+WorkDir         : /iridisfs/home/ab3u21/dpdl
+Command         : /iridisfs/home/ab3u21/dpdl/iridis_gpu_test/job.slurm
+Partition       : ecsstudents_l4
+Num hosts       : 1
+Num cores       : 4
+Num of tasks    : 1
+Hosts allocated : ecsai02
+Job Output Follows ...
+===============================================================================
+=========================================
+ Slurm Job: 630471
+ Package:   iridis_gpu_test
+ Node:      ecsai02
+ CPUs:      4
+ Started:   Tue Feb 24 22:01:38 GMT 2026
+=========================================
+Working directory: /iridisfs/home/ab3u21/dpdl
+--- GPU Environment ---
+CUDA_VISIBLE_DEVICES=0
+SLURM_JOB_GPUS=6
+SLURM_GPUS_ON_NODE=1
+crw-rw-rw- 1 root root 507,   0 Feb 19 10:08 /dev/nvidia-uvm
+crw-rw-rw- 1 root root 507,   1 Feb 19 10:08 /dev/nvidia-uvm-tools
+crw-rw-rw- 1 root root 195,   0 Feb 19 10:08 /dev/nvidia0
+crw-rw-rw- 1 root root 195,   1 Feb 19 10:08 /dev/nvidia1
+crw-rw-rw- 1 root root 195,   2 Feb 19 10:08 /dev/nvidia2
+crw-rw-rw- 1 root root 195,   3 Feb 19 10:08 /dev/nvidia3
+crw-rw-rw- 1 root root 195,   4 Feb 19 10:08 /dev/nvidia4
+crw-rw-rw- 1 root root 195,   5 Feb 19 10:08 /dev/nvidia5
+crw-rw-rw- 1 root root 195,   6 Feb 19 10:08 /dev/nvidia6
+crw-rw-rw- 1 root root 195, 255 Feb 19 10:08 /dev/nvidiactl
+
+/dev/nvidia-caps:
+total 0
+drwxr-xr-x  2 root root     80 Feb 19 10:08 .
+drwxr-xr-x 22 root root   3460 Feb 19 10:19 ..
+cr--------  1 root root 510, 1 Feb 19 10:08 nvidia-cap1
+cr--r--r--  1 root root 510, 2 Feb 19 10:08 nvidia-cap2
+Tue Feb 24 22:01:38 2026       
++-----------------------------------------------------------------------------------------+
+| NVIDIA-SMI 590.48.01              Driver Version: 590.48.01      CUDA Version: 13.1     |
++-----------------------------------------+------------------------+----------------------+
+| GPU  Name                 Persistence-M | Bus-Id          Disp.A | Volatile Uncorr. ECC |
+| Fan  Temp   Perf          Pwr:Usage/Cap |           Memory-Usage | GPU-Util  Compute M. |
+|                                         |                        |               MIG M. |
+|=========================================+========================+======================|
+|   0  NVIDIA L4                      On  |   00000000:E1:00.0 Off |                    0 |
+| N/A   26C    P8             16W /   72W |       0MiB /  23034MiB |      0%      Default |
+|                                         |                        |                  N/A |
++-----------------------------------------+------------------------+----------------------+
+
++-----------------------------------------------------------------------------------------+
+| Processes:                                                                              |
+|  GPU   GI   CI              PID   Type   Process name                        GPU Memory |
+|        ID   ID                                                               Usage      |
+|=========================================================================================|
+|  No running processes found                                                             |
++-----------------------------------------------------------------------------------------+
+============================================================
+PyTorch + CUDA Smoke Test
+============================================================
+PyTorch version : 2.5.1+cu121
+CUDA available  : True
+CUDA version    : 12.1
+Device count    : 1
+  [0] NVIDIA L4  |  22.0 GB
+
+Matrix multiply (1024x1024) on NVIDIA L4: OK
+Result norm: 32802.9297
+
+PASS: All checks succeeded.
+=========================================
+ Job finished: Tue Feb 24 22:02:05 GMT 2026
+ Exit code:    0
+=========================================
+==============================================================================
+Running epilogue script on ecsai02.
+
+Submit time  : 2026-02-24T22:01:37
+Start time   : 2026-02-24T22:01:37
+End time     : 2026-02-24T22:02:05
+Elapsed time : 00:00:28 (Timelimit=00:10:00)
+
+Job ID: 630471
+Cluster: iridis_x
+User/Group: ab3u21/fp
+State: COMPLETED (exit code 0)
+Nodes: 1
+Cores per node: 4
+CPU Utilized: 00:01:08
+CPU Efficiency: 60.71% of 00:01:52 core-walltime
+Job Wall-clock time: 00:00:28
+Memory Utilized: 5.85 MB
+Memory Efficiency: 0.04% of 16.00 GB (16.00 GB/node)
+
