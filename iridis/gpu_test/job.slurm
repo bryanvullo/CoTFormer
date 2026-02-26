@@ -3,7 +3,7 @@
 # Slurm Job Script — GPU Smoke Test
 #
 # Submit from the project root (~/dpdl/):
-#   sbatch iridis_gpu_test/job.slurm
+#   sbatch iridis/gpu_test/job.slurm
 ################################################################################
 
 #SBATCH --job-name=gpu_test
@@ -15,11 +15,11 @@
 #SBATCH --gres=gpu:1
 #SBATCH --mem=16G
 #SBATCH --time=00:10:00
-#SBATCH --output=iridis_gpu_test/slurm_%j.out
-#SBATCH --error=iridis_gpu_test/slurm_%j.err
+#SBATCH --output=iridis/gpu_test/slurm_%j.out
+#SBATCH --error=iridis/gpu_test/slurm_%j.err
 
 # --- Package Configuration ---
-PKG_NAME="iridis_gpu_test"
+PKG_NAME="iridis/gpu_test"
 PROJECT_DIR="${SLURM_SUBMIT_DIR:-$HOME/dpdl}"
 
 echo "========================================="
@@ -46,7 +46,7 @@ echo "Working directory: $(pwd)"
 nvidia-smi
 
 apptainer exec --nv --unsquash --bind "$PWD" \
-    rcotformer.sif \
+    iridis/rcotformer.sif \
     python3 "${PKG_NAME}/test_gpu.py"
 
 EXIT_CODE=$?

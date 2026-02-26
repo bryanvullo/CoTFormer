@@ -3,12 +3,12 @@
 # Slurm Job Script Template for Iridis X
 #
 # HOW TO USE:
-#   1. Copy this file into your package directory:
-#        cp job.slurm.example <your_package>/job.slurm
+#   1. Copy this file into your package directory under iridis/:
+#        cp iridis/job.slurm.example iridis/<your_package>/job.slurm
 #   2. Replace every <PKG_NAME> below with your package directory name
 #   3. Adjust resources (GPU type, memory, time) for your workload
 #   4. Submit from the project root (~/dpdl/):
-#        sbatch <your_package>/job.slurm
+#        sbatch iridis/<your_package>/job.slurm
 #
 # FINDING CLUSTER INFORMATION:
 #   sinfo                                 # List all partitions, nodes, and state
@@ -69,11 +69,11 @@
 
 #--- Output logs --------------------------------------------------------
 # %j is replaced by the Slurm job ID. Logs land inside your package dir.
-#SBATCH --output=<PKG_NAME>/slurm_%j.out
-#SBATCH --error=<PKG_NAME>/slurm_%j.err
+#SBATCH --output=iridis/<PKG_NAME>/slurm_%j.out
+#SBATCH --error=iridis/<PKG_NAME>/slurm_%j.err
 
 # --- Package Configuration ---
-PKG_NAME="<PKG_NAME>"
+PKG_NAME="iridis/<PKG_NAME>"
 PROJECT_DIR="${SLURM_SUBMIT_DIR:-$HOME/dpdl}"
 
 echo "========================================="
@@ -103,7 +103,7 @@ echo "Working directory: $(pwd)"
 # Replace the python3 command below with your own entry point, e.g.:
 #   python3 "${PKG_NAME}/train.py" --epochs 50
 apptainer exec --nv --unsquash --bind "$PWD" \
-    rcotformer.sif \
+    iridis/rcotformer.sif \
     python3 "${PKG_NAME}/your_script.py"
 
 EXIT_CODE=$?
