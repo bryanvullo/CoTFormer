@@ -15,9 +15,9 @@
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=4
 #SBATCH --output=slurm_%j.out
-#SBATCH --error=slurm_%j.err
 
 # --- Activate your env ---
+conda init 
 conda activate cotformer-env
 
 # --- Sanity checks (first run) ---
