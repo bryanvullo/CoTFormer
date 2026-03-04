@@ -1,11 +1,8 @@
-# Claude Code agent infrastructure
-.claude/
-.orchestrator/
-
-# Keep the readme
+# Keep the relevant MDs
 ! README.md
+! experiments.md
 
-# But no other MD slop
+# But no other MD notes
 *.md
 
 # Dataset folder
@@ -78,6 +75,8 @@ coverage.xml
 local_settings.py
 db.sqlite3
 db.sqlite3-journal
+.claude/
+.orchestrator/
 
 # Flask stuff:
 instance/
