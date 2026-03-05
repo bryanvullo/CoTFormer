@@ -1,6 +1,7 @@
 # Keep the relevant MDs
 ! README.md
 ! experiments.md
+! reprod_notes.md
 
 # But no other MD notes
 *.md
