@@ -182,50 +182,46 @@ seff <job_id>                       # View post-run efficiency
 
 ## Dataset Setup
 
-Iridis compute nodes **have no internet access**, so the dataset must be downloaded and tokenized on a login node before submitting any training job. Each team member stores data under their own `/scratch/$USER/` directory.
+The dataset is [OpenWebText2](https://openwebtext2.readthedocs.io/en/latest/) (17.1M documents, ~28 GB compressed) from EleutherAI's The Pile. Each team member stores data under their own `/scratch/$USER/` directory.
 
-The dataset is [OpenWebText2](https://openwebtext2.readthedocs.io/en/latest/) (17.1M documents, ~28 GB compressed) from EleutherAI's The Pile. The Python loader (`data/openwebtext2.py`) handles the full pipeline: download tarball, extract, tokenize with GPT-2 BPE, write memmap bins, and cleanup.
+Iridis login nodes **block outbound HTTPS to external hosts**, so the tarball must be downloaded on your local machine and transferred via rsync. The Python tokenizer (`data/openwebtext2.py`) then handles extraction, tokenization, and cleanup on Iridis.
 
-### Quick method (one command)
+### Step 1: Download locally
+
+On your local machine (WSL / laptop):
 
 ```bash
+wget -c https://mystic.the-eye.eu/public/AI/pile_preliminary_components/openwebtext2.jsonl.zst.tar \
+    -P /tmp/
+```
+
+This is ~28 GB and supports resume (`-c`) if interrupted.
+
+### Step 2: Transfer to Iridis
+
+```bash
+rsync -avz --progress /tmp/openwebtext2.jsonl.zst.tar \
+    iridis-x:/scratch/<username>/datasets/openwebtext2/
+```
+
+### Step 3: Extract and tokenize on Iridis
+
+```bash
+ssh iridis-x
 cd ~/CoTFormer
 bash iridis/get_dataset/job.sh
 ```
 
-This sources `iridis/env.sh`, activates conda, creates scratch directories, and runs the full download-tokenize pipeline. Output appears in your terminal.
+The job script sources `iridis/env.sh`, activates conda, and calls the Python tokenizer which:
 
-### Manual method (step by step)
+1. **Extracts** the tarball into `$DATA_DIR/openwebtext2/raw/` (`.jsonl.zst` files)
+2. **Loads** the raw files via `datasets.load_dataset("json", ...)`
+3. **Splits** with `train_test_split(test_size=0.0005, seed=2357)` (matches original CoTFormer)
+4. **Tokenizes** with GPT-2 BPE via tiktoken (`num_proc=40`)
+5. **Writes** `train.bin` (~8 GB) and `val.bin` (~4 MB) as uint16 memmap files
+6. **Cleans up** raw files and tarball automatically (~94 GB freed)
 
-If you prefer to run each step yourself:
-
-```bash
-cd ~/CoTFormer
-source iridis/env.sh
-module load conda && conda activate /scratch/$USER/cotformer-env
-
-# Create scratch directories
-mkdir -p "$DATA_DIR" "$RESULTS_DIR" "$HF_HOME" "$WANDB_DIR"
-
-# Download, tokenize, and cleanup (~28 GB download, ~8 GB final)
-python -c "
-from data.openwebtext2 import get_openwebtext2_data
-import argparse
-get_openwebtext2_data(argparse.Namespace(data_dir='$DATA_DIR'))
-"
-```
-
-### What happens under the hood
-
-1. **Download** — `wget -c` fetches the tarball from `mystic.the-eye.eu` (~28 GB, supports resume)
-2. **Extract** — unpacks `.jsonl.zst` files into `$DATA_DIR/openwebtext2/raw/`
-3. **Load** — `datasets.load_dataset("json", ...)` reads the raw files
-4. **Split** — `train_test_split(test_size=0.0005, seed=2357)` (matches original CoTFormer)
-5. **Tokenize** — GPT-2 BPE via tiktoken, `num_proc=40` (reduce if login node is loaded)
-6. **Write** — `train.bin` (~8 GB) and `val.bin` (~4 MB) as uint16 memmap files
-7. **Cleanup** — raw files and tarball deleted automatically (~94 GB freed)
-
-### Verify
+### Step 4: Verify
 
 ```bash
 ls -lh /scratch/$USER/datasets/openwebtext2/

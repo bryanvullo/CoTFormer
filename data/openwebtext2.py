@@ -1,6 +1,4 @@
 import os
-import subprocess
-import tarfile
 import glob
 import shutil
 from tqdm import tqdm
@@ -19,12 +17,15 @@ def prepare_openwebtext2_data(config):
 
 
 def get_openwebtext2_data(config):
-    """ Downloads, tokenizes, and caches OpenWebText2 as memmap bin files.
+    """ Tokenizes and caches OpenWebText2 as memmap bin files.
 
     Source: https://openwebtext2.readthedocs.io/en/latest/
     The original HuggingFace dataset (the_pile_openwebtext2) is defunct.
-    This function downloads the raw jsonl.zst archive directly from EleutherAI
-    and processes it identically.
+    The raw data must be downloaded separately and placed in <data_path>/raw/
+    before calling this function. See README.md § Dataset Setup.
+
+    Expects: <data_path>/openwebtext2.jsonl.zst.tar  (or pre-extracted raw/*.jsonl.zst)
+    Produces: <data_path>/train.bin, <data_path>/val.bin
     """
     if hasattr(config, 'data_dir') and config.data_dir is not None:
         data_path = os.path.join(config.data_dir, "openwebtext2/")
@@ -38,13 +39,31 @@ def get_openwebtext2_data(config):
         raw_dir = os.path.join(data_path, "raw")
         tarball = os.path.join(data_path, "openwebtext2.jsonl.zst.tar")
 
-        # Step 1: Download tarball if raw files don't exist yet
+        # Step 1: Extract tarball if raw files don't exist yet.
+        #
+        # NOTE: Automatic download is disabled. Iridis login nodes block
+        # outbound HTTPS to external hosts, so the tarball must be downloaded
+        # locally and rsync'd to <data_path>/ before running this function.
+        # See README.md § Dataset Setup for instructions.
+        #
+        # The download logic is preserved below for environments with internet:
+        #
+        # import subprocess
+        # if not os.path.exists(tarball):
+        #     print(f"Downloading OpenWebText2 from {OWT2_SOURCE_URL} (~28 GB)...")
+        #     subprocess.run(["wget", "-c", OWT2_SOURCE_URL, "-O", tarball], check=True)
+
         data_files = sorted(glob.glob(os.path.join(raw_dir, "**/*.jsonl.zst"), recursive=True))
         if not data_files:
             if not os.path.exists(tarball):
-                print(f"Downloading OpenWebText2 from {OWT2_SOURCE_URL} (~28 GB)...")
-                subprocess.run(["wget", "-c", OWT2_SOURCE_URL, "-O", tarball], check=True)
+                raise FileNotFoundError(
+                    f"Tarball not found at {tarball} and no raw files in {raw_dir}.\n"
+                    f"Download the tarball from:\n  {OWT2_SOURCE_URL}\n"
+                    f"Then place it at:\n  {tarball}\n"
+                    "See README.md § Dataset Setup."
+                )
 
+            import tarfile
             print(f"Extracting to {raw_dir}...")
             os.makedirs(raw_dir, exist_ok=True)
             with tarfile.open(tarball) as tf:
