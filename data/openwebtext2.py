@@ -32,35 +32,15 @@ def cache_tiktoken_bpe() -> None:
     print("BPE vocabulary cached.")
 
 
-def download_openwebtext2(data_path: str, reset: bool = False) -> None:
+def download_openwebtext2(data_path: str) -> None:
     """Download the OpenWebText2 tarball from HuggingFace mirror.
 
     Requires internet access — run on a login node.
     Resumes partial downloads via wget -c.
-
-    Args:
-        data_path: Directory to store the tarball and derived files.
-        reset: If True, delete everything (tarball, raw, bins) before downloading.
+    Cleanup of stale state is handled by the calling job.sh script.
     """
     os.makedirs(data_path, exist_ok=True)
     tarball = os.path.join(data_path, "openwebtext2.jsonl.zst.tar")
-
-    if reset:
-        print(f"Resetting {data_path}...")
-        for name in ("raw", "train.bin", "val.bin", "openwebtext2.jsonl.zst.tar"):
-            target = os.path.join(data_path, name)
-            if os.path.isdir(target):
-                shutil.rmtree(target)
-            elif os.path.isfile(target):
-                os.remove(target)
-    else:
-        # Clean up stale intermediate state but preserve the tarball
-        for name in ("raw", "train.bin", "val.bin"):
-            target = os.path.join(data_path, name)
-            if os.path.isdir(target):
-                shutil.rmtree(target)
-            elif os.path.isfile(target):
-                os.remove(target)
 
     if os.path.exists(tarball) and os.path.getsize(tarball) >= MIN_TARBALL_SIZE:
         print(f"Tarball already exists at {tarball} ({os.path.getsize(tarball)} bytes), skipping download.")
