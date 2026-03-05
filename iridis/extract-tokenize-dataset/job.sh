@@ -5,7 +5,7 @@
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=16
-#SBATCH --mem=64G
+#SBATCH --mem=80G
 #SBATCH --time=02:00:00
 #SBATCH --output=iridis/extract-tokenize-dataset/slurm_%j.out
 #SBATCH --error=iridis/extract-tokenize-dataset/slurm_%j.err

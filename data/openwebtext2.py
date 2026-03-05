@@ -30,6 +30,14 @@ def download_openwebtext2(data_path: str) -> None:
     os.makedirs(data_path, exist_ok=True)
     tarball = os.path.join(data_path, "openwebtext2.jsonl.zst.tar")
 
+    # Clean up any stale state from previous runs (raw dir, partial bins, HF cache)
+    for name in ("raw", "train.bin", "val.bin"):
+        target = os.path.join(data_path, name)
+        if os.path.isdir(target):
+            shutil.rmtree(target)
+        elif os.path.isfile(target):
+            os.remove(target)
+
     if os.path.exists(tarball) and os.path.getsize(tarball) >= MIN_TARBALL_SIZE:
         print(f"Tarball already exists at {tarball} ({os.path.getsize(tarball)} bytes), skipping download.")
         return
