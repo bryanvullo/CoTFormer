@@ -4,7 +4,7 @@
 #SBATCH --account=ecsstudents
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
-#SBATCH --cpus-per-task=16
+#SBATCH --cpus-per-task=64
 #SBATCH --mem=80G
 #SBATCH --time=02:00:00
 ################################################################################
@@ -25,8 +25,8 @@ if [ -z "$SLURM_JOB_ID" ]; then
     RUN_DIR=$(next_run_dir "$PACKAGE_DIR")
     echo "Submitting to amd_student, logs → $RUN_DIR/"
     exec sbatch \
-        --output="$RUN_DIR/slurm.out" \
-        --error="$RUN_DIR/slurm.err" \
+        --output="$RUN_DIR/slurm_%j.out" \
+        --error="$RUN_DIR/slurm_%j.err" \
         --export=ALL,REPO_DIR="$REPO_DIR" \
         "$0" "$@"
 fi

@@ -10,7 +10,7 @@ CONDA_ENV_PREFIX="/scratch/$USER/cotformer-env"
 
 # --- Per-user scratch paths ---
 export DATA_DIR="/scratch/$USER/datasets"
-export RESULTS_DIR="/scratch/$USER/cotformer-outputs"
+export RESULTS_DIR="/scratch/$USER/job-outputs"
 
 # --- Caches (keep off home quota) ---
 export TIKTOKEN_CACHE_DIR="/scratch/$USER/.cache/tiktoken"

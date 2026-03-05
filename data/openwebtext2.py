@@ -78,7 +78,7 @@ def extract_and_tokenize_openwebtext2(data_path: str) -> None:
 
     tarball = os.path.join(data_path, "openwebtext2.jsonl.zst.tar")
     raw_dir = os.path.join(data_path, "raw")
-    num_proc = min(os.cpu_count() or 1, 16)
+    num_proc = os.cpu_count() or 1
 
     # Step 1: Extract tarball if raw files don't exist yet
     data_files = sorted(glob.glob(os.path.join(raw_dir, "**/*.jsonl.zst"), recursive=True))
@@ -103,24 +103,25 @@ def extract_and_tokenize_openwebtext2(data_path: str) -> None:
             "Check the tarball contents."
         )
 
-    # Step 2: Stream raw jsonl.zst files into Arrow via generator (low memory)
+    # Step 2: Load raw jsonl.zst files into Arrow (in-memory, needs ~40 GB)
     # NOTE: The original codebase used load_dataset("the_pile_openwebtext2") which
     # loaded a pre-built HF Arrow dataset with a fixed row ordering. That dataset is
     # now defunct. We load from raw files instead, which may produce a different row
     # order and therefore a different train/val split (see docs/reprod_notes.md §2).
     # The document *set* is identical; only the partition may differ.
-    def _iter_documents(file_list):
-        """Yield {"text": ...} dicts from sorted jsonl.zst files."""
-        dctx = zstd.ZstdDecompressor()
-        for fpath in tqdm(file_list, desc="reading jsonl.zst"):
-            with open(fpath, "rb") as fh:
-                reader = dctx.stream_reader(fh)
-                text_stream = io.TextIOWrapper(reader, encoding="utf-8")
-                for line in text_stream:
-                    yield {"text": json.loads(line)["text"]}
+    print(f"Loading {len(data_files)} raw files...")
+    texts = []
+    dctx = zstd.ZstdDecompressor()
+    for fpath in tqdm(data_files, desc="reading jsonl.zst"):
+        with open(fpath, "rb") as fh:
+            reader = dctx.stream_reader(fh)
+            text_stream = io.TextIOWrapper(reader, encoding="utf-8")
+            for line in text_stream:
+                texts.append(json.loads(line)["text"])
 
-    print(f"Loading {len(data_files)} raw files (streaming)...")
-    dataset = Dataset.from_generator(_iter_documents, gen_kwargs={"file_list": data_files})
+    print(f"Loaded {len(texts)} documents. Building Arrow dataset...")
+    dataset = Dataset.from_dict({"text": texts})
+    del texts
 
     split_dataset = dataset.train_test_split(test_size=0.0005, seed=2357, shuffle=True)
     split_dataset['val'] = split_dataset.pop('test')

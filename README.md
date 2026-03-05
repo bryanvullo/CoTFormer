@@ -184,7 +184,7 @@ scancel <job_id>                    # Cancel job
 seff <job_id>                       # View post-run efficiency
 ```
 
-SLURM `.out`/`.err` files land in `iridis/<package>/run_N/`, numbered incrementally per run. Experiment outputs (metrics, checkpoints) go to `/scratch/$USER/cotformer-outputs/`.
+SLURM `.out`/`.err` files land in `iridis/<package>/run_N/`, numbered incrementally per run. Experiment outputs (metrics, checkpoints) go to `/scratch/$USER/job-outputs/`.
 
 ## Dataset Setup
 
