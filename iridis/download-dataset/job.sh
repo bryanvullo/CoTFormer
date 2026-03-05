@@ -6,18 +6,23 @@
 # Usage:  cd ~/CoTFormer && bash iridis/download-dataset/job.sh
 #
 # After this completes, submit the tokenization job:
-#   sbatch iridis/extract-tokenize-dataset/job.sh
+#   bash iridis/extract-tokenize-dataset/job.sh
 ################################################################################
 
 set -eo pipefail
 
-SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-source "$SCRIPT_DIR/../env.sh"
+PACKAGE_DIR="$(cd "$(dirname "$0")" && pwd)"
+REPO_DIR="$(cd "$PACKAGE_DIR/../.." && pwd)"
+source "$REPO_DIR/iridis/env.sh"
+
+RUN_DIR=$(next_run_dir "$PACKAGE_DIR")
+exec > >(tee "$RUN_DIR/output.log") 2> >(tee "$RUN_DIR/error.log" >&2)
 
 echo "========================================="
 echo " OpenWebText2 Download"
 echo " User:     $USER"
 echo " Data dir: $DATA_DIR"
+echo " Run dir:  $RUN_DIR"
 echo " Started:  $(date)"
 echo "========================================="
 
@@ -27,7 +32,7 @@ conda activate "$CONDA_ENV_PREFIX"
 
 mkdir -p "$DATA_DIR"
 
-cd "$SCRIPT_DIR/../.."
+cd "$REPO_DIR"
 python -c "
 from data.openwebtext2 import download_openwebtext2
 download_openwebtext2('$DATA_DIR/openwebtext2')
@@ -36,5 +41,5 @@ download_openwebtext2('$DATA_DIR/openwebtext2')
 echo "========================================="
 echo " Download complete: $(date)"
 echo " Next step:"
-echo "   sbatch iridis/extract-tokenize-dataset/job.sh"
+echo "   bash iridis/extract-tokenize-dataset/job.sh"
 echo "========================================="

@@ -173,14 +173,18 @@ rsync -avz iridis-x:/scratch/<username>/cotformer/exps/ ./exps/
 
 ### Submitting and Monitoring
 
+All jobs are launched with `bash` from the repo root. SLURM jobs self-submit via a wrapper that creates a `run_N/` directory for logs before calling `sbatch`.
+
 ```bash
 ssh iridis-x
 cd ~/CoTFormer
-sbatch iridis/gpu_test/job.sh      # Submit job
+bash iridis/<package>/job.sh        # Submit (or run on login node)
 squeue -u $(whoami)                 # Check job status
 scancel <job_id>                    # Cancel job
 seff <job_id>                       # View post-run efficiency
 ```
+
+SLURM `.out`/`.err` files land in `iridis/<package>/run_N/`, numbered incrementally per run. Experiment outputs (metrics, checkpoints) go to `/scratch/$USER/cotformer-outputs/`.
 
 ## Dataset Setup
 
@@ -211,10 +215,10 @@ rsync -avz --progress /tmp/openwebtext2.jsonl.zst.tar \
 
 ```bash
 cd ~/CoTFormer
-sbatch iridis/extract-tokenize-dataset/job.sh
+bash iridis/extract-tokenize-dataset/job.sh
 ```
 
-Submits to `amd_student` (64 GB RAM, 16 CPUs, 2h limit). The job:
+Self-submits to `amd_student` (80 GB RAM, 16 CPUs, 2h limit). The job:
 
 1. **Extracts** `.jsonl.zst` files from the tarball
 2. **Streams** documents into Arrow via generator (low memory)
