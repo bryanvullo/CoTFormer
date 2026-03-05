@@ -1,4 +1,5 @@
 import os
+import subprocess
 import glob
 import shutil
 from tqdm import tqdm
@@ -8,7 +9,7 @@ from datasets import load_dataset
 
 
 OWT2_DATA_PATH = os.path.join(os.path.dirname(__file__), "datasets/openwebtext2/")
-OWT2_SOURCE_URL = "https://mystic.the-eye.eu/public/AI/pile_preliminary_components/openwebtext2.jsonl.zst.tar"
+OWT2_SOURCE_URL = "https://huggingface.co/datasets/segyges/OpenWebText2/resolve/main/openwebtext2.jsonl.zst.tar"
 tknzr = tiktoken.get_encoding("gpt2")
 
 
@@ -17,14 +18,13 @@ def prepare_openwebtext2_data(config):
 
 
 def get_openwebtext2_data(config):
-    """ Tokenizes and caches OpenWebText2 as memmap bin files.
+    """ Downloads (if needed), tokenizes, and caches OpenWebText2 as memmap bin files.
 
     Source: https://openwebtext2.readthedocs.io/en/latest/
     The original HuggingFace dataset (the_pile_openwebtext2) is defunct.
-    The raw data must be downloaded separately and placed in <data_path>/raw/
-    before calling this function. See README.md § Dataset Setup.
+    Downloads the raw tarball from a HuggingFace mirror of the exact same data.
 
-    Expects: <data_path>/openwebtext2.jsonl.zst.tar  (or pre-extracted raw/*.jsonl.zst)
+    Expects: internet access for first run (or a pre-placed tarball / raw files)
     Produces: <data_path>/train.bin, <data_path>/val.bin
     """
     if hasattr(config, 'data_dir') and config.data_dir is not None:
@@ -39,28 +39,21 @@ def get_openwebtext2_data(config):
         raw_dir = os.path.join(data_path, "raw")
         tarball = os.path.join(data_path, "openwebtext2.jsonl.zst.tar")
 
-        # Step 1: Extract tarball if raw files don't exist yet.
-        #
-        # NOTE: Automatic download is disabled. Iridis login nodes block
-        # outbound HTTPS to external hosts, so the tarball must be downloaded
-        # locally and rsync'd to <data_path>/ before running this function.
-        # See README.md § Dataset Setup for instructions.
-        #
-        # The download logic is preserved below for environments with internet:
-        #
-        # import subprocess
-        # if not os.path.exists(tarball):
-        #     print(f"Downloading OpenWebText2 from {OWT2_SOURCE_URL} (~28 GB)...")
-        #     subprocess.run(["wget", "-c", OWT2_SOURCE_URL, "-O", tarball], check=True)
-
+        # Step 1: Download tarball if raw files don't exist yet
         data_files = sorted(glob.glob(os.path.join(raw_dir, "**/*.jsonl.zst"), recursive=True))
         if not data_files:
-            if not os.path.exists(tarball):
-                raise FileNotFoundError(
-                    f"Tarball not found at {tarball} and no raw files in {raw_dir}.\n"
-                    f"Download the tarball from:\n  {OWT2_SOURCE_URL}\n"
-                    f"Then place it at:\n  {tarball}\n"
-                    "See README.md § Dataset Setup."
+            min_tarball_size = 1_000_000  # 1 MB sanity check
+            if not os.path.exists(tarball) or os.path.getsize(tarball) < min_tarball_size:
+                if os.path.exists(tarball) and os.path.getsize(tarball) < min_tarball_size:
+                    os.remove(tarball)
+                print(f"Downloading OpenWebText2 from {OWT2_SOURCE_URL} (~28 GB)...")
+                subprocess.run(["wget", "-c", OWT2_SOURCE_URL, "-O", tarball], check=True)
+
+            if os.path.getsize(tarball) < min_tarball_size:
+                raise RuntimeError(
+                    f"Tarball at {tarball} is only {os.path.getsize(tarball)} bytes — "
+                    "download likely failed. Delete it and retry, or download locally "
+                    "and rsync to this path."
                 )
 
             import tarfile
