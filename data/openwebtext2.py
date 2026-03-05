@@ -72,7 +72,7 @@ def get_openwebtext2_data(config):
 
         # Step 2: Load raw data and split
         print(f"Loading {len(data_files)} raw files...")
-        dataset = load_dataset("json", data_files=data_files)
+        dataset = load_dataset("json", data_files=data_files, writer_batch_size=100)
 
         split_dataset = dataset["train"].train_test_split(test_size=0.0005, seed=2357, shuffle=True)
         split_dataset['val'] = split_dataset.pop('test')
