@@ -2,8 +2,8 @@
 ################################################################################
 # Download and tokenize OpenWebText2
 #
-# Run interactively on a login node (requires internet).
-# Usage:  cd ~/CoTFormer && bash iridis/get_dataset/run.sh
+# Run on a login node (requires internet access).
+# Usage:  cd ~/CoTFormer && bash iridis/get_dataset/job.sh
 ################################################################################
 
 set -eo pipefail
@@ -18,8 +18,10 @@ echo " Data dir: $DATA_DIR"
 echo " Started:  $(date)"
 echo "========================================="
 
-# Activate environment
+# Activate environment — must source conda's shell hook first,
+# since non-interactive bash doesn't load ~/.bashrc.
 module load conda
+eval "$(conda shell.bash hook)"
 conda activate "$CONDA_ENV_PREFIX"
 
 # Create scratch directories if they don't exist

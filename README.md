@@ -41,7 +41,7 @@
 └── iridis/              ← Iridis X cluster operations
     ├── env.sh           ← Per-user scratch paths (source this)
     ├── get_dataset/     ← Download and tokenize OpenWebText2
-    │   └── run.sh
+    │   └── job.sh
     └── gpu_test/        ← GPU smoke test
         ├── job.sh
         └── test_gpu.py
@@ -190,7 +190,7 @@ The dataset is [OpenWebText2](https://openwebtext2.readthedocs.io/en/latest/) (1
 
 ```bash
 cd ~/CoTFormer
-bash iridis/get_dataset/run.sh
+bash iridis/get_dataset/job.sh
 ```
 
 This sources `iridis/env.sh`, activates conda, creates scratch directories, and runs the full download-tokenize pipeline. Output appears in your terminal.
