@@ -86,6 +86,7 @@ instance/
 .scrapy
 
 # Sphinx documentation
+!docs/ # Keep other docs dirs
 docs/_build/
 
 # PyBuilder
