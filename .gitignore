@@ -1,11 +1,9 @@
-# Keep the relevant MDs
-
+# Ignore all markdown by default, then whitelist specific files
+*.md
 !README.md
 !experiments.md
+!docs/plan.md
 !docs/reprod_notes.md
-
-# But no other MD notes
-*.md
 
 # Dataset folder
 data/datasets/
