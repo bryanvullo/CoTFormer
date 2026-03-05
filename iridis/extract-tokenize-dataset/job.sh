@@ -1,11 +1,11 @@
 #!/bin/bash
-#SBATCH --job-name=owt2_tokenize
+#SBATCH --job-name=owt2_extract_tokenize
 #SBATCH --partition=amd_student
 #SBATCH --account=ecsstudents
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=64
-#SBATCH --mem=80G
+#SBATCH --mem=240G
 #SBATCH --time=02:00:00
 ################################################################################
 # Extract, tokenize, and write OpenWebText2 memmap bins
