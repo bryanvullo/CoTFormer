@@ -34,6 +34,7 @@ fi
 # --- Actual job (runs on compute node) ---
 set -eo pipefail
 
+# Source path pathing logic for structured outputs
 source "$REPO_DIR/iridis/env.sh"
 
 echo "========================================="
@@ -46,14 +47,19 @@ echo " Job ID:   $SLURM_JOB_ID"
 echo " Started:  $(date)"
 echo "========================================="
 
+# Conda stuff
 module load conda
 eval "$(conda shell.bash hook)"
 conda activate "$CONDA_ENV_PREFIX"
 
-mkdir -p "$DATA_DIR" "$HF_HOME"
+# Ensure scratch dirs exist
+mkdir -p "$DATA_DIR" "$HF_HOME" "$TIKTOKEN_CACHE_DIR"
 
+# Change to where executables live
 cd "$REPO_DIR"
-python -c "
+
+# Extract and tokenize dataset with edited openwebtext2.py (CPU node only)
+python -c " 
 from data.openwebtext2 import extract_and_tokenize_openwebtext2
 extract_and_tokenize_openwebtext2('$DATA_DIR/openwebtext2')
 "

@@ -13,6 +13,7 @@ export DATA_DIR="/scratch/$USER/datasets"
 export RESULTS_DIR="/scratch/$USER/cotformer-outputs"
 
 # --- Caches (keep off home quota) ---
+export TIKTOKEN_CACHE_DIR="/scratch/$USER/.cache/tiktoken"
 export HF_HOME="/scratch/$USER/.cache/huggingface"
 export WANDB_DIR="/scratch/$USER/.cache/wandb"
 export PIP_CACHE_DIR="/scratch/$USER/.cache/pip"

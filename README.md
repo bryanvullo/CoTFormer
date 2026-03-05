@@ -197,12 +197,12 @@ The pipeline is split into two jobs because only login nodes have internet acces
 ```bash
 ssh iridis-x
 cd ~/CoTFormer
-bash iridis/download-dataset/job.sh
+bash iridis/download-dataset/job.sh            # interactive prompt
+bash iridis/download-dataset/job.sh --bpe      # cache tiktoken BPE vocab only
+bash iridis/download-dataset/job.sh --reset    # delete everything and re-download
 ```
 
-Downloads the ~28 GB tarball to `/scratch/$USER/datasets/openwebtext2/` with resume support (`wget -c`).
-
-**Fallback** -- if the login node cannot reach `huggingface.co`, download locally and rsync:
+**Fallback** -- if the login node cannot reach `huggingface.co`:
 
 ```bash
 wget -c "https://huggingface.co/datasets/segyges/OpenWebText2/resolve/main/openwebtext2.jsonl.zst.tar" \
@@ -218,14 +218,7 @@ cd ~/CoTFormer
 bash iridis/extract-tokenize-dataset/job.sh
 ```
 
-Self-submits to `amd_student` (80 GB RAM, 16 CPUs, 2h limit). The job:
-
-1. **Extracts** `.jsonl.zst` files from the tarball
-2. **Streams** documents into Arrow via generator (low memory)
-3. **Splits** with `train_test_split(test_size=0.0005, seed=2357)`
-4. **Tokenizes** with GPT-2 BPE via tiktoken
-5. **Writes** `train.bin` (~8 GB) and `val.bin` (~4 MB) as uint16 memmap files
-6. **Cleans up** raw files and tarball (~94 GB freed)
+Self-submits to `amd_student` (80 GB RAM, 16 CPUs, 2h). Produces `train.bin` (~8 GB) and `val.bin` (~4 MB) under `/scratch/$USER/datasets/openwebtext2/`.
 
 ### Verify
 
@@ -233,8 +226,6 @@ Self-submits to `amd_student` (80 GB RAM, 16 CPUs, 2h limit). The job:
 ls -lh /scratch/$USER/datasets/openwebtext2/
 # Expected: train.bin ~8GB, val.bin ~4MB
 ```
-
-Once both `.bin` files exist, training jobs can run without internet access.
 
 ## Training
 

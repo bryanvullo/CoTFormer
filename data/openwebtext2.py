@@ -6,7 +6,6 @@ import glob
 import shutil
 from tqdm import tqdm
 import numpy as np
-import tiktoken
 import zstandard as zstd
 from datasets import Dataset
 
@@ -14,29 +13,54 @@ from datasets import Dataset
 OWT2_DATA_PATH = os.path.join(os.path.dirname(__file__), "datasets/openwebtext2/")
 OWT2_SOURCE_URL = "https://huggingface.co/datasets/segyges/OpenWebText2/resolve/main/openwebtext2.jsonl.zst.tar"
 MIN_TARBALL_SIZE = 1_000_000  # 1 MB sanity check
-tknzr = tiktoken.get_encoding("gpt2")
 
 
 def prepare_openwebtext2_data(config):
     pass
 
 
-def download_openwebtext2(data_path: str) -> None:
+def cache_tiktoken_bpe() -> None:
+    """Pre-cache the GPT-2 BPE vocabulary for offline use on compute nodes.
+
+    tiktoken downloads vocab files on first call to get_encoding().
+    This must run on a node with internet access so the cache is warm
+    before any offline job imports this module.
+    """
+    import tiktoken
+    print("Caching tiktoken GPT-2 BPE vocabulary...")
+    tiktoken.get_encoding("gpt2")
+    print("BPE vocabulary cached.")
+
+
+def download_openwebtext2(data_path: str, reset: bool = False) -> None:
     """Download the OpenWebText2 tarball from HuggingFace mirror.
 
     Requires internet access — run on a login node.
     Resumes partial downloads via wget -c.
+
+    Args:
+        data_path: Directory to store the tarball and derived files.
+        reset: If True, delete everything (tarball, raw, bins) before downloading.
     """
     os.makedirs(data_path, exist_ok=True)
     tarball = os.path.join(data_path, "openwebtext2.jsonl.zst.tar")
 
-    # Clean up any stale state from previous runs (raw dir, partial bins, HF cache)
-    for name in ("raw", "train.bin", "val.bin"):
-        target = os.path.join(data_path, name)
-        if os.path.isdir(target):
-            shutil.rmtree(target)
-        elif os.path.isfile(target):
-            os.remove(target)
+    if reset:
+        print(f"Resetting {data_path}...")
+        for name in ("raw", "train.bin", "val.bin", "openwebtext2.jsonl.zst.tar"):
+            target = os.path.join(data_path, name)
+            if os.path.isdir(target):
+                shutil.rmtree(target)
+            elif os.path.isfile(target):
+                os.remove(target)
+    else:
+        # Clean up stale intermediate state but preserve the tarball
+        for name in ("raw", "train.bin", "val.bin"):
+            target = os.path.join(data_path, name)
+            if os.path.isdir(target):
+                shutil.rmtree(target)
+            elif os.path.isfile(target):
+                os.remove(target)
 
     if os.path.exists(tarball) and os.path.getsize(tarball) >= MIN_TARBALL_SIZE:
         print(f"Tarball already exists at {tarball} ({os.path.getsize(tarball)} bytes), skipping download.")
@@ -62,11 +86,15 @@ def extract_and_tokenize_openwebtext2(data_path: str) -> None:
     """Extract raw files, stream into Arrow, tokenize, and write memmap bins.
 
     Does not require internet — run on a compute node.
+    Requires tiktoken BPE cache to be pre-warmed (see cache_tiktoken_bpe).
     Cleans up raw files and tarball after writing bins.
     """
     if os.path.exists(os.path.join(data_path, 'train.bin')):
         print("train.bin already exists, skipping extraction and tokenization.")
         return
+
+    import tiktoken
+    tknzr = tiktoken.get_encoding("gpt2")
 
     tarball = os.path.join(data_path, "openwebtext2.jsonl.zst.tar")
     raw_dir = os.path.join(data_path, "raw")
@@ -118,9 +146,8 @@ def extract_and_tokenize_openwebtext2(data_path: str) -> None:
     split_dataset['val'] = split_dataset.pop('test')
 
     def process(example):
-        ids = tknzr.encode_ordinary(example['text']) # encode_ordinary ignores any special tokens
-        ids.append(tknzr.eot_token) # add the end of text token, e.g. 50256 for gpt2 bpe
-        # note: I think eot should be prepended not appended... hmm. it's called "eot" though...
+        ids = tknzr.encode_ordinary(example['text'])
+        ids.append(tknzr.eot_token)
         out = {'ids': ids, 'len': len(ids)}
         return out
 
@@ -136,16 +163,14 @@ def extract_and_tokenize_openwebtext2(data_path: str) -> None:
     for split, dset in tokenized.items():
         arr_len = np.sum(dset['len'])
         filename = os.path.join(data_path, f'{split}.bin')
-        dtype = np.uint16 # (can do since enc.max_token_value == 50256 is < 2**16)
+        dtype = np.uint16
         arr = np.memmap(filename, dtype=dtype, mode='w+', shape=(arr_len,))
         total_batches = 1024
 
         idx = 0
         for batch_idx in tqdm(range(total_batches), desc=f'writing {filename}'):
-            # Batch together samples for faster write
             batch = dset.shard(num_shards=total_batches, index=batch_idx, contiguous=True).with_format('numpy')
             arr_batch = np.concatenate(batch['ids'])
-            # Write into mmap
             arr[idx : idx + len(arr_batch)] = arr_batch
             idx += len(arr_batch)
         arr.flush()
@@ -176,7 +201,7 @@ def get_openwebtext2_data(config):
     if not os.path.exists(train_bin) or not os.path.exists(val_bin):
         raise FileNotFoundError(
             f"Missing {train_bin} or {val_bin}. "
-            "Run iridis/download-dataset/job.sh then sbatch iridis/extract-tokenize-dataset/job.sh first."
+            "Run iridis/download-dataset/job.sh then bash iridis/extract-tokenize-dataset/job.sh first."
         )
 
     train_data = np.memmap(train_bin, dtype=np.uint16, mode='r')
