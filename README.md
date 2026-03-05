@@ -39,10 +39,12 @@
 ├── distributed/         ← DDP / single-GPU backends
 │
 └── iridis/              ← Iridis X cluster operations
-    ├── env.sh           ← Per-user scratch paths (source this)
-    ├── get_dataset/     ← Download and tokenize OpenWebText2
+    ├── env.sh                    ← Per-user scratch paths (source this)
+    ├── download-dataset/         ← Download OWT2 tarball (login node)
     │   └── job.sh
-    └── gpu_test/        ← GPU smoke test
+    ├── extract-tokenize-dataset/ ← Extract + tokenize (compute node)
+    │   └── job.sh
+    └── gpu_test/                 ← GPU smoke test
         ├── job.sh
         └── test_gpu.py
 ```
@@ -184,40 +186,42 @@ seff <job_id>                       # View post-run efficiency
 
 The dataset is [OpenWebText2](https://openwebtext2.readthedocs.io/en/latest/) (17.1M documents, ~28 GB compressed) from EleutherAI's The Pile. The original HuggingFace dataset is defunct; we use an [exact mirror on HuggingFace](https://huggingface.co/datasets/segyges/OpenWebText2). Each team member stores data under their own `/scratch/$USER/` directory.
 
-The Python loader (`data/openwebtext2.py`) handles the full pipeline automatically: download, extract, tokenize, write bins, and cleanup.
+The pipeline is split into two jobs because only login nodes have internet access, while compute nodes have the memory and CPU needed for extraction and tokenization.
 
-### Run the job
+### Step 1: Download (login node)
 
 ```bash
 ssh iridis-x
 cd ~/CoTFormer
-bash iridis/get_dataset/job.sh
+bash iridis/download-dataset/job.sh
 ```
 
-This sources `iridis/env.sh`, activates conda, and runs the pipeline which:
+Downloads the ~28 GB tarball to `/scratch/$USER/datasets/openwebtext2/` with resume support (`wget -c`).
 
-1. **Downloads** the tarball from HuggingFace (~28 GB, `wget -c` with resume support)
-2. **Extracts** `.jsonl.zst` files into `$DATA_DIR/openwebtext2/raw/`
-3. **Loads** the raw files via `datasets.load_dataset("json", ...)`
-4. **Splits** with `train_test_split(test_size=0.0005, seed=2357)` (matches original CoTFormer)
-5. **Tokenizes** with GPT-2 BPE via tiktoken (`num_proc=40`)
-6. **Writes** `train.bin` (~8 GB) and `val.bin` (~4 MB) as uint16 memmap files
-7. **Cleans up** raw files and tarball automatically (~94 GB freed)
-
-### Fallback: download locally and rsync
-
-If the login node cannot reach `huggingface.co`, download on your local machine and transfer:
+**Fallback** -- if the login node cannot reach `huggingface.co`, download locally and rsync:
 
 ```bash
-# Local machine:
 wget -c "https://huggingface.co/datasets/segyges/OpenWebText2/resolve/main/openwebtext2.jsonl.zst.tar" \
     -P /tmp/
 rsync -avz --progress /tmp/openwebtext2.jsonl.zst.tar \
     iridis-x:/scratch/<username>/datasets/openwebtext2/
-
-# Then on Iridis (skips download, goes straight to extraction):
-cd ~/CoTFormer && bash iridis/get_dataset/job.sh
 ```
+
+### Step 2: Extract and tokenize (compute node)
+
+```bash
+cd ~/CoTFormer
+sbatch iridis/extract-tokenize-dataset/job.sh
+```
+
+Submits to `amd_student` (64 GB RAM, 16 CPUs, 2h limit). The job:
+
+1. **Extracts** `.jsonl.zst` files from the tarball
+2. **Streams** documents into Arrow via generator (low memory)
+3. **Splits** with `train_test_split(test_size=0.0005, seed=2357)`
+4. **Tokenizes** with GPT-2 BPE via tiktoken
+5. **Writes** `train.bin` (~8 GB) and `val.bin` (~4 MB) as uint16 memmap files
+6. **Cleans up** raw files and tarball (~94 GB freed)
 
 ### Verify
 
