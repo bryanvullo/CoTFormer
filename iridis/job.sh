@@ -1,44 +1,53 @@
-#!/bin/sh
+#!/bin/bash
 
 ################################################################################
 # Job Script — Run main.py
 #
-# sbatch job.sh
+# Usage:  cd ~/CoTFormer && sbatch iridis/job.sh
 ################################################################################
 
-#SBATCH --job-name=base_cotformer
+#SBATCH --job-name=cotformer
 #SBATCH --nodes=1
-#SBATCH -p l4               # partition
-#SBATCH --gres=gpu:1        # request 1 GPU
-#SBATCH --mem=20000         # use 20GB memory
-#SBATCH --time=60:00:00     # max wall time is 60 hrs
+#SBATCH --partition=ecsstudents_l4
+#SBATCH --account=ecsstudents
+#SBATCH --gres=gpu:1
+#SBATCH --mem=20G
+#SBATCH --time=24:00:00
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=4
-#SBATCH --output=slurm_%j.out
+#SBATCH --output=iridis/slurm_%j.out
+#SBATCH --error=iridis/slurm_%j.err
 
-# --- Activate your env ---
-conda init 
-conda activate cotformer-env
+# --- Environment ---
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+source "$SCRIPT_DIR/env.sh"
 
-# --- Sanity checks (first run) ---
-# --- Package Configuration ---
+module load conda
+conda activate "$CONDA_ENV_PREFIX"
+
+# --- Sanity checks ---
 echo "========================================="
 echo " Slurm Job: $SLURM_JOB_ID"
 echo " Node:      $(hostname)"
 echo " CPUs:      $SLURM_CPUS_PER_TASK"
+echo " DATA_DIR:  $DATA_DIR"
+echo " RESULTS:   $RESULTS_DIR"
 echo " Started:   $(date)"
 which python
 python --version
-python -c "import sys; print('PYTHONPATH:', sys.path[:3])"
 echo "========================================="
 
 nvidia-smi
 
 # --- Run ---
 python -u ./main.py \
-# You can add your arguments here, for example:
-    # --arg1 arg1 \
-    # --arg2 arg2 \
+    --data_dir "$DATA_DIR" \
+    --results_base_folder "$RESULTS_DIR" \
+    # Add experiment-specific arguments below, e.g.:
+    # --model base --n_layer 12 --n_embd 768 --n_head 12 \
+    # --batch_size 64 --acc_steps 2 --sequence_length 256 \
+    # --iterations 40000 --dataset owt2 --lr 1e-3 \
+    # --eval_freq 100 --seed 0
 
 # --- End ---
 EXIT_CODE=$?

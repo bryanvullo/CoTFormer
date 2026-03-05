@@ -14,11 +14,16 @@ def prepare_openwebtext2_data(config):
 
 
 def get_openwebtext2_data(config):
-    """ https://openwebtext2.readthedocs.io/en/latest/ 
+    """ https://openwebtext2.readthedocs.io/en/latest/
     """
+    if hasattr(config, 'data_dir') and config.data_dir is not None:
+        data_path = os.path.join(config.data_dir, "openwebtext2/")
+    else:
+        data_path = OWT2_DATA_PATH
+
     num_proc=40
-    if not os.path.exists(os.path.join(OWT2_DATA_PATH, 'train.bin')):
-        os.makedirs(OWT2_DATA_PATH, exist_ok=True)
+    if not os.path.exists(os.path.join(data_path, 'train.bin')):
+        os.makedirs(data_path, exist_ok=True)
         dataset = load_dataset("the_pile_openwebtext2")
 
         split_dataset = dataset["train"].train_test_split(test_size=0.0005, seed=2357, shuffle=True)
@@ -42,7 +47,7 @@ def get_openwebtext2_data(config):
         # concatenate all the ids in each dataset into one large file we can use for training
         for split, dset in tokenized.items():
             arr_len = np.sum(dset['len'])
-            filename = os.path.join(OWT2_DATA_PATH, f'{split}.bin')
+            filename = os.path.join(data_path, f'{split}.bin')
             dtype = np.uint16 # (can do since enc.max_token_value == 50256 is < 2**16)
             arr = np.memmap(filename, dtype=dtype, mode='w+', shape=(arr_len,))
             total_batches = 1024
@@ -57,7 +62,7 @@ def get_openwebtext2_data(config):
                 idx += len(arr_batch)
             arr.flush()
 
-    train_data = np.memmap(os.path.join(OWT2_DATA_PATH, 'train.bin'), dtype=np.uint16, mode='r')
-    val_data = np.memmap(os.path.join(OWT2_DATA_PATH, 'val.bin'), dtype=np.uint16, mode='r')
+    train_data = np.memmap(os.path.join(data_path, 'train.bin'), dtype=np.uint16, mode='r')
+    val_data = np.memmap(os.path.join(data_path, 'val.bin'), dtype=np.uint16, mode='r')
 
     return {'train': train_data, 'val': val_data}

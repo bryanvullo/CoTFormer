@@ -43,6 +43,8 @@ def parse_args(base_parser, args, namespace):
     parser.add_argument('--dataset', default='slimpajama', choices=['slimpajama', 'wikitext', 'pg19', "shakespeare-char", 'arxivmath', 'owt2', "arxiv2000", "arxiv+wiki", 'openwebtext2'])
     parser.add_argument('--vocab_size', default=50304, type=int)
     parser.add_argument('--add_additional_space', default=False, action='store_true', required=False)
+    parser.add_argument('--data_dir', default=None, type=none_or_str,
+                        help='Root directory for datasets (default: data/datasets/ relative to source)')
     parser.add_argument('--data_in_ram', action='store_true')
     # Model params
     parser.add_argument('--model', default='base', choices=models.registered_models())

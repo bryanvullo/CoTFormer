@@ -10,6 +10,7 @@
   - [Uploading and Downloading](#uploading-and-downloading)
   - [GPU Partitions](#gpu-partitions)
   - [Submitting and Monitoring](#submitting-and-monitoring)
+- [Dataset Setup](#dataset-setup)
 - [Training](#training)
 - [Acknowledgements](#acknowledgements)
 
@@ -38,9 +39,10 @@
 ├── distributed/         ← DDP / single-GPU backends
 │
 └── iridis/              ← Cluster deployment config
-    ├── job.slurm.example ← Slurm template for new packages
+    ├── env.sh            ← Per-user scratch paths (source this)
+    ├── job.sh            ← Slurm job template
     └── gpu_test/         ← GPU smoke test package
-        ├── job.slurm
+        ├── job.sh
         └── test_gpu.py
 ```
 
@@ -177,19 +179,72 @@ scancel <job_id>                    # Cancel job
 seff <job_id>                       # View post-run efficiency
 ```
 
-## Training
+## Dataset Setup
 
-All training runs execute `main.py` from the repo root. Ensure your Conda environment is activated before running.
+Iridis compute nodes **have no internet access**, so the dataset must be downloaded and tokenized on a login node before submitting any training job. Each team member stores data under their own `/scratch/$USER/` directory.
+
+### 1. Source the environment config
+
+All scratch paths are defined in `iridis/env.sh`. Source it once per session (or add to your `~/.bash_aliases`):
 
 ```bash
+cd ~/CoTFormer
+source iridis/env.sh
+```
+
+This sets `$DATA_DIR`, `$RESULTS_DIR`, `$HF_HOME`, and cache paths for your user.
+
+### 2. Create scratch directories
+
+```bash
+mkdir -p "$DATA_DIR/openwebtext2" "$RESULTS_DIR" \
+         "$HF_HOME" "$WANDB_DIR" "$PIP_CACHE_DIR" "$CONDA_PKGS_DIRS"
+```
+
+### 3. Download and tokenize (login node only)
+
+This step downloads OpenWebText2 from HuggingFace, tokenizes it with GPT-2 BPE, and writes two memmap files. It must be run from the repo root so Python can find the `data/` package:
+
+```bash
+cd ~/CoTFormer
+module load conda && conda activate /scratch/$USER/cotformer-env
+
+python -c "
+from data.openwebtext2 import get_openwebtext2_data
+import argparse
+get_openwebtext2_data(argparse.Namespace(data_dir='$DATA_DIR'))
+"
+```
+
+> **Note:** This uses `num_proc=40` for tokenization. If the login node is heavily loaded, you may want to reduce this in `data/openwebtext2.py`.
+
+### 4. Verify
+
+```bash
+ls -lh $DATA_DIR/openwebtext2/
+# Expected: train.bin ~8GB, val.bin ~4MB
+```
+
+Once both `.bin` files exist, training jobs can run without internet access.
+
+## Training
+
+All training runs execute `main.py` from the repo root. On Iridis, source `iridis/env.sh` first and pass `--data_dir` and `--results_base_folder` to direct I/O to scratch:
+
+```bash
+source iridis/env.sh
 python main.py \
+    --data_dir "$DATA_DIR" \
+    --results_base_folder "$RESULTS_DIR" \
     --model base --n_layer 12 --n_embd 768 --n_head 12 \
     --batch_size 64 --acc_steps 2 --sequence_length 256 \
     --iterations 40000 --dataset owt2 --lr 1e-3 \
     --eval_freq 100 --seed 0
 ```
 
-See `plan.md` for the full experiment matrix and config cheat sheet.
+For local development (without `--data_dir`), data defaults to `data/datasets/` relative to the repo.
+
+See `experiments.md` for the full experiment matrix and `iridis/job.sh` for the SLURM template.
 
 ## Acknowledgements
 
