@@ -1,11 +1,16 @@
 import os
+import subprocess
+import tarfile
+import glob
+import shutil
 from tqdm import tqdm
 import numpy as np
 import tiktoken
-from datasets import load_dataset 
+from datasets import load_dataset
 
 
 OWT2_DATA_PATH = os.path.join(os.path.dirname(__file__), "datasets/openwebtext2/")
+OWT2_SOURCE_URL = "https://mystic.the-eye.eu/public/AI/pile_preliminary_components/openwebtext2.jsonl.zst.tar"
 tknzr = tiktoken.get_encoding("gpt2")
 
 
@@ -14,21 +19,52 @@ def prepare_openwebtext2_data(config):
 
 
 def get_openwebtext2_data(config):
-    """ https://openwebtext2.readthedocs.io/en/latest/
+    """ Downloads, tokenizes, and caches OpenWebText2 as memmap bin files.
+
+    Source: https://openwebtext2.readthedocs.io/en/latest/
+    The original HuggingFace dataset (the_pile_openwebtext2) is defunct.
+    This function downloads the raw jsonl.zst archive directly from EleutherAI
+    and processes it identically.
     """
     if hasattr(config, 'data_dir') and config.data_dir is not None:
         data_path = os.path.join(config.data_dir, "openwebtext2/")
     else:
         data_path = OWT2_DATA_PATH
 
-    num_proc=40
+    num_proc = 40
     if not os.path.exists(os.path.join(data_path, 'train.bin')):
         os.makedirs(data_path, exist_ok=True)
-        dataset = load_dataset("the_pile_openwebtext2")
+
+        raw_dir = os.path.join(data_path, "raw")
+        tarball = os.path.join(data_path, "openwebtext2.jsonl.zst.tar")
+
+        # Step 1: Download tarball if raw files don't exist yet
+        data_files = sorted(glob.glob(os.path.join(raw_dir, "**/*.jsonl.zst"), recursive=True))
+        if not data_files:
+            if not os.path.exists(tarball):
+                print(f"Downloading OpenWebText2 from {OWT2_SOURCE_URL} (~28 GB)...")
+                subprocess.run(["wget", "-c", OWT2_SOURCE_URL, "-O", tarball], check=True)
+
+            print(f"Extracting to {raw_dir}...")
+            os.makedirs(raw_dir, exist_ok=True)
+            with tarfile.open(tarball) as tf:
+                tf.extractall(raw_dir)
+
+            data_files = sorted(glob.glob(os.path.join(raw_dir, "**/*.jsonl.zst"), recursive=True))
+
+        if not data_files:
+            raise FileNotFoundError(
+                f"No .jsonl.zst files found in {raw_dir} after extraction. "
+                "Check the tarball contents."
+            )
+
+        # Step 2: Load raw data and split
+        print(f"Loading {len(data_files)} raw files...")
+        dataset = load_dataset("json", data_files=data_files)
 
         split_dataset = dataset["train"].train_test_split(test_size=0.0005, seed=2357, shuffle=True)
         split_dataset['val'] = split_dataset.pop('test')
-        
+
         def process(example):
             ids = tknzr.encode_ordinary(example['text']) # encode_ordinary ignores any special tokens
             ids.append(tknzr.eot_token) # add the end of text token, e.g. 50256 for gpt2 bpe
@@ -36,15 +72,15 @@ def get_openwebtext2_data(config):
             out = {'ids': ids, 'len': len(ids)}
             return out
 
-        # tokenize the dataset
+        # Step 3: Tokenize
         tokenized = split_dataset.map(
             process,
-            remove_columns=['text'],
+            remove_columns=split_dataset['train'].column_names,
             desc="tokenizing the splits",
             num_proc=num_proc,
         )
 
-        # concatenate all the ids in each dataset into one large file we can use for training
+        # Step 4: Write memmap bin files
         for split, dset in tokenized.items():
             arr_len = np.sum(dset['len'])
             filename = os.path.join(data_path, f'{split}.bin')
@@ -61,6 +97,12 @@ def get_openwebtext2_data(config):
                 arr[idx : idx + len(arr_batch)] = arr_batch
                 idx += len(arr_batch)
             arr.flush()
+
+        # Step 5: Cleanup raw files and tarball (~94 GB freed)
+        print("Cleaning up raw files and tarball...")
+        shutil.rmtree(raw_dir, ignore_errors=True)
+        if os.path.exists(tarball):
+            os.remove(tarball)
 
     train_data = np.memmap(os.path.join(data_path, 'train.bin'), dtype=np.uint16, mode='r')
     val_data = np.memmap(os.path.join(data_path, 'val.bin'), dtype=np.uint16, mode='r')

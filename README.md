@@ -38,15 +38,16 @@
 ├── optim/               ← Training loop and optimizers
 ├── distributed/         ← DDP / single-GPU backends
 │
-└── iridis/              ← Cluster deployment config
-    ├── env.sh            ← Per-user scratch paths (source this)
-    ├── job.sh            ← Slurm job template
-    └── gpu_test/         ← GPU smoke test package
+└── iridis/              ← Iridis X cluster operations
+    ├── env.sh           ← Per-user scratch paths (source this)
+    ├── get_dataset/     ← Download and tokenize OpenWebText2
+    │   └── run.sh
+    └── gpu_test/        ← GPU smoke test
         ├── job.sh
         └── test_gpu.py
 ```
 
-Python code lives at the repo root (required by bare imports in `main.py`). All Iridis cluster configuration lives under `iridis/`.
+Each operation on Iridis lives in its own package directory under `iridis/`. SLURM `.out`/`.err` files land inside the package dir, keeping the source tree clean. Python code lives at the repo root (required by bare imports in `main.py`).
 
 ## QuickStart
 
@@ -86,7 +87,7 @@ export CONDA_PKGS_DIRS=/scratch/<username>/.conda/pkgs
 
 # Navigation and Activation Aliases
 alias cds="cd /scratch/<username>"
-alias cdp="cd ~/dpdl"
+alias cdp="cd ~/CoTFormer"
 alias act="module load conda && conda activate /scratch/<username>/cotformer-env"
 ```
 
@@ -109,7 +110,7 @@ conda config --add channels conda-forge
 conda create --prefix /scratch/<username>/cotformer-env python=3.11 -y
 ```
 
-**Install Packages:** Run `act` to activate the environment, then `pip install -r ~/dpdl/requirements.txt`.
+**Install Packages:** Run `act` to activate the environment, then `pip install -r ~/CoTFormer/requirements.txt`.
 
 #### Method 2: Standalone Miniforge (Wget)
 
@@ -137,26 +138,26 @@ conda create -n cotformer-env python=3.11 -y
 conda activate cotformer-env
 ```
 
-**Install Packages:** `pip install -r ~/dpdl/requirements.txt`.
+**Install Packages:** `pip install -r ~/CoTFormer/requirements.txt`.
 
 ### Uploading and Downloading
 
 **First time push:**
 
 ```bash
-rsync -avz --exclude='slurm_*' ./ iridis-x:~/dpdl/
+rsync -avz --exclude='slurm_*' ./ iridis-x:~/CoTFormer/
 ```
 
 **Subsequent pushes (code only):**
 
 ```bash
-rsync -avz --exclude='slurm_*' --exclude='data/datasets' ./ iridis-x:~/dpdl/
+rsync -avz --exclude='slurm_*' --exclude='data/datasets' ./ iridis-x:~/CoTFormer/
 ```
 
 **Downloading Results:**
 
 ```bash
-scp iridis-x:~/dpdl/iridis/gpu_test/slurm_<job_id>.{out,err} iridis/gpu_test/
+rsync -avz iridis-x:/scratch/<username>/cotformer/exps/ ./exps/
 ```
 
 ### GPU Partitions
@@ -172,8 +173,8 @@ scp iridis-x:~/dpdl/iridis/gpu_test/slurm_<job_id>.{out,err} iridis/gpu_test/
 
 ```bash
 ssh iridis-x
-cd ~/dpdl
-sbatch iridis/gpu_test/job.slurm   # Submit job
+cd ~/CoTFormer
+sbatch iridis/gpu_test/job.sh      # Submit job
 squeue -u $(whoami)                 # Check job status
 scancel <job_id>                    # Cancel job
 seff <job_id>                       # View post-run efficiency
@@ -183,32 +184,30 @@ seff <job_id>                       # View post-run efficiency
 
 Iridis compute nodes **have no internet access**, so the dataset must be downloaded and tokenized on a login node before submitting any training job. Each team member stores data under their own `/scratch/$USER/` directory.
 
-### 1. Source the environment config
+The dataset is [OpenWebText2](https://openwebtext2.readthedocs.io/en/latest/) (17.1M documents, ~28 GB compressed) from EleutherAI's The Pile. The Python loader (`data/openwebtext2.py`) handles the full pipeline: download tarball, extract, tokenize with GPT-2 BPE, write memmap bins, and cleanup.
 
-All scratch paths are defined in `iridis/env.sh`. Source it once per session (or add to your `~/.bash_aliases`):
+### Quick method (one command)
+
+```bash
+cd ~/CoTFormer
+bash iridis/get_dataset/run.sh
+```
+
+This sources `iridis/env.sh`, activates conda, creates scratch directories, and runs the full download-tokenize pipeline. Output appears in your terminal.
+
+### Manual method (step by step)
+
+If you prefer to run each step yourself:
 
 ```bash
 cd ~/CoTFormer
 source iridis/env.sh
-```
-
-This sets `$DATA_DIR`, `$RESULTS_DIR`, `$HF_HOME`, and cache paths for your user.
-
-### 2. Create scratch directories
-
-```bash
-mkdir -p "$DATA_DIR/openwebtext2" "$RESULTS_DIR" \
-         "$HF_HOME" "$WANDB_DIR" "$PIP_CACHE_DIR" "$CONDA_PKGS_DIRS"
-```
-
-### 3. Download and tokenize (login node only)
-
-This step downloads OpenWebText2 from HuggingFace, tokenizes it with GPT-2 BPE, and writes two memmap files. It must be run from the repo root so Python can find the `data/` package:
-
-```bash
-cd ~/CoTFormer
 module load conda && conda activate /scratch/$USER/cotformer-env
 
+# Create scratch directories
+mkdir -p "$DATA_DIR" "$RESULTS_DIR" "$HF_HOME" "$WANDB_DIR"
+
+# Download, tokenize, and cleanup (~28 GB download, ~8 GB final)
 python -c "
 from data.openwebtext2 import get_openwebtext2_data
 import argparse
@@ -216,12 +215,20 @@ get_openwebtext2_data(argparse.Namespace(data_dir='$DATA_DIR'))
 "
 ```
 
-> **Note:** This uses `num_proc=40` for tokenization. If the login node is heavily loaded, you may want to reduce this in `data/openwebtext2.py`.
+### What happens under the hood
 
-### 4. Verify
+1. **Download** — `wget -c` fetches the tarball from `mystic.the-eye.eu` (~28 GB, supports resume)
+2. **Extract** — unpacks `.jsonl.zst` files into `$DATA_DIR/openwebtext2/raw/`
+3. **Load** — `datasets.load_dataset("json", ...)` reads the raw files
+4. **Split** — `train_test_split(test_size=0.0005, seed=2357)` (matches original CoTFormer)
+5. **Tokenize** — GPT-2 BPE via tiktoken, `num_proc=40` (reduce if login node is loaded)
+6. **Write** — `train.bin` (~8 GB) and `val.bin` (~4 MB) as uint16 memmap files
+7. **Cleanup** — raw files and tarball deleted automatically (~94 GB freed)
+
+### Verify
 
 ```bash
-ls -lh $DATA_DIR/openwebtext2/
+ls -lh /scratch/$USER/datasets/openwebtext2/
 # Expected: train.bin ~8GB, val.bin ~4MB
 ```
 
@@ -244,7 +251,7 @@ python main.py \
 
 For local development (without `--data_dir`), data defaults to `data/datasets/` relative to the repo.
 
-See `experiments.md` for the full experiment matrix and `iridis/job.sh` for the SLURM template.
+See `experiments.md` for the full experiment matrix.
 
 ## Acknowledgements
 
