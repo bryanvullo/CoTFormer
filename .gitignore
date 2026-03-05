@@ -1,4 +1,4 @@
-# Ignore all markdown by default, then whitelist specific files
+# Ignore all markdown by default, whitelist specific files
 *.md
 !README.md
 !experiments.md

@@ -1,11 +1,14 @@
 import os
+import io
+import json
 import subprocess
 import glob
 import shutil
 from tqdm import tqdm
 import numpy as np
 import tiktoken
-from datasets import load_dataset
+import zstandard as zstd
+from datasets import Dataset
 
 
 OWT2_DATA_PATH = os.path.join(os.path.dirname(__file__), "datasets/openwebtext2/")
@@ -70,11 +73,28 @@ def get_openwebtext2_data(config):
                 "Check the tarball contents."
             )
 
-        # Step 2: Load raw data and split
+        # Step 2: Load raw jsonl.zst files directly and split
+        # NOTE: The original codebase used load_dataset("the_pile_openwebtext2") which
+        # loaded a pre-built HF Arrow dataset with a fixed row ordering. That dataset is
+        # now defunct. We load from raw files instead, which may produce a different row
+        # order and therefore a different train/val split (see docs/reprod_notes.md §2).
+        # The document *set* is identical; only the partition may differ.
         print(f"Loading {len(data_files)} raw files...")
-        dataset = load_dataset("json", data_files=data_files, writer_batch_size=100)
+        texts = []
+        dctx = zstd.ZstdDecompressor()
+        for fpath in tqdm(data_files, desc="reading jsonl.zst"):
+            with open(fpath, "rb") as fh:
+                reader = dctx.stream_reader(fh)
+                text_stream = io.TextIOWrapper(reader, encoding="utf-8")
+                for line in text_stream:
+                    doc = json.loads(line)
+                    texts.append(doc["text"])
 
-        split_dataset = dataset["train"].train_test_split(test_size=0.0005, seed=2357, shuffle=True)
+        print(f"Loaded {len(texts)} documents. Building dataset...")
+        dataset = Dataset.from_dict({"text": texts})
+        del texts  # free raw strings
+
+        split_dataset = dataset.train_test_split(test_size=0.0005, seed=2357, shuffle=True)
         split_dataset['val'] = split_dataset.pop('test')
 
         def process(example):

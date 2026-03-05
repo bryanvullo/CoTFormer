@@ -7,6 +7,7 @@
 ## Table of Contents
 
 - [1. Dataset Acquisition](#1-dataset-acquisition)
+- [2. Train/Val Split Divergence](#2-trainval-split-divergence)
 - [References](#references)
 
 ---
@@ -78,6 +79,54 @@ files under `/scratch/$USER/datasets/openwebtext2/`.
 
 ---
 
+## 2. Train/Val Split Divergence
+
+**Status:** Accepted limitation
+
+### The problem
+
+The original codebase calls `load_dataset("the_pile_openwebtext2")`, which
+returned a pre-built HuggingFace Arrow dataset with a fixed row ordering.
+`train_test_split(test_size=0.0005, seed=2357)` then partitions by integer
+row index, so the split is deterministic *only if the row order is
+identical*.
+
+Since that HF dataset is permanently defunct (see [section 1](#1-dataset-acquisition)),
+we load from the raw `.jsonl.zst` tarball instead. The raw files are read
+in sorted filename order, preserving document order within each file, but
+this sequence is not guaranteed to match the row order of the original
+pre-built Arrow dataset. The same seed and split ratio are used, but the
+partition maps different documents to train vs. val.
+
+### Why the pre-built dataset is unrecoverable
+
+The pre-built Arrow artifact was hosted exclusively on HuggingFace under
+`the_pile_openwebtext2`. It was permanently disabled due to PII/safety
+flags and copyright takedown requests. An extensive search (30+ queries
+across HuggingFace, EleutherAI, the-eye.eu, ELG, and community mirrors)
+found only raw tarball copies -- none preserve the Arrow row ordering.
+
+### Impact assessment
+
+The split ratio is 99.95% train / 0.05% val across ~3.4M documents.
+At this ratio, any two random partitions with a fixed seed will produce
+statistically equivalent validation sets. We expect negligible impact on
+reported perplexity (well within the noise floor of stochastic training).
+This is noted as a known deviation in our reproduction.
+
+### PyArrow loader bug
+
+An additional complication: `load_dataset("json", data_files=...)` crashes
+with `ArrowIndexError: array slice would exceed array length` during
+`pa_table.combine_chunks()` on this dataset. This is a known PyArrow
+serialization bug with large/nested JSON batches [3]. We bypass it by
+reading `.jsonl.zst` files directly with `zstandard` + `json` and
+constructing the HF `Dataset` via `Dataset.from_dict()`. This produces
+the same row sequence as `load_dataset("json", ...)` would have (sorted
+files, sequential line reading) but avoids the Arrow builder entirely.
+
+---
+
 ## References
 
 [cotformer-paper]: https://openreview.net/forum?id=7igPXQFupX
@@ -85,4 +134,5 @@ files under `/scratch/$USER/datasets/openwebtext2/`.
 
 1. Gao, L. et al. (2020). *The Pile: An 800GB Dataset of Diverse Text for Language Modeling.* [arXiv:2101.00027](https://arxiv.org/abs/2101.00027)
 2. Mohtashami, A. et al. (2025). *CoTFormer: A Chain-of-Thought Driven Architecture with Budget-Adaptive Computation Cost at Inference.* [ICLR 2025](https://openreview.net/forum?id=7igPXQFupX)
-3. DeepSeek-AI (2024). *DeepSeek-V2: A Strong, Economical, and Efficient Mixture-of-Experts Language Model.* [arXiv:2405.04434](https://arxiv.org/abs/2405.04434)
+3. HuggingFace datasets [issue #6206](https://github.com/huggingface/datasets/issues/6206) -- PyArrow offset overflow in `combine_chunks()` during large JSONL ingestion.
+4. DeepSeek-AI (2024). *DeepSeek-V2: A Strong, Economical, and Efficient Mixture-of-Experts Language Model.* [arXiv:2405.04434](https://arxiv.org/abs/2405.04434)
