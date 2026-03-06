@@ -84,55 +84,53 @@ def extract_and_tokenize_openwebtext2(data_path: str) -> None:
     tarball = os.path.join(data_path, "openwebtext2.jsonl.zst.tar")
     raw_dir = os.path.join(data_path, "raw")
 
-    # Step 1: Extract tarball if raw files don't exist yet
-    data_files = sorted(glob.glob(os.path.join(raw_dir, "**/*.jsonl.zst"), recursive=True))
-    if not data_files:
+    # Step 1: Extract tarball (re-extracts from scratch if raw dir looks incomplete)
+    import tarfile
+
+    def _needs_extraction() -> bool:
+        """Check if extraction is needed by comparing file count against tarball."""
+        existing = glob.glob(os.path.join(raw_dir, "**/*.jsonl.zst"), recursive=True)
+        if not existing:
+            return True
+        if not os.path.exists(tarball) or os.path.getsize(tarball) < MIN_TARBALL_SIZE:
+            return False  # no tarball to compare against — trust existing files
+        with tarfile.open(tarball) as tf:
+            expected = sum(1 for m in tf.getmembers() if m.name.endswith(".jsonl.zst"))
+        if len(existing) < expected:
+            print(f"Incomplete extraction: {len(existing)}/{expected} files. Re-extracting...")
+            return True
+        return False
+
+    if _needs_extraction():
         if not os.path.exists(tarball) or os.path.getsize(tarball) < MIN_TARBALL_SIZE:
             raise FileNotFoundError(
                 f"Tarball not found or too small at {tarball}. "
                 "Run iridis/download-dataset/job.sh on a login node first."
             )
 
-        import tarfile
+        # Wipe partial raw dir to ensure clean extraction
+        if os.path.exists(raw_dir):
+            shutil.rmtree(raw_dir)
+
         print(f"Extracting to {raw_dir}...")
         os.makedirs(raw_dir, exist_ok=True)
         with tarfile.open(tarball) as tf:
             tf.extractall(raw_dir)
 
-        data_files = sorted(glob.glob(os.path.join(raw_dir, "**/*.jsonl.zst"), recursive=True))
-
+    data_files = sorted(glob.glob(os.path.join(raw_dir, "**/*.jsonl.zst"), recursive=True))
     if not data_files:
         raise FileNotFoundError(
             f"No .jsonl.zst files found in {raw_dir} after extraction. "
             "Check the tarball contents."
         )
 
-    # Step 2: Count documents (streaming, minimal memory)
+    # Step 2: Single-pass tokenize — accumulate all tokens + track doc lengths.
+    # This avoids a separate counting pass (which doubled I/O + decompression).
     # NOTE: see docs/reprod_notes.md §2 for train/val split divergence.
-    print(f"Counting documents across {len(data_files)} files...")
-    n_docs = 0
-    dctx = zstd.ZstdDecompressor()
-    for fpath in tqdm(data_files, desc="counting"):
-        with open(fpath, "rb") as fh:
-            reader = dctx.stream_reader(fh)
-            text_stream = io.TextIOWrapper(reader, encoding="utf-8")
-            for _ in text_stream:
-                n_docs += 1
-
-    # Generate train/val split (deterministic, matches test_size=0.0005 seed=2357)
-    n_val = max(1, round(n_docs * 0.0005))
-    rng = np.random.default_rng(2357)
-    perm = rng.permutation(n_docs)
-    val_set = set(perm[:n_val].tolist())
-    print(f"Split: {n_docs} docs -> {n_docs - n_val} train, {n_val} val")
-
-    # Step 3: Tokenize and accumulate into uint16 arrays (~8 GB for train)
-    # Per-file batching leverages tiktoken's internal Rust parallelism.
-    train_tokens = _array.array('H')  # uint16, 2 bytes per token
-    val_tokens = _array.array('H')
+    all_tokens = _array.array('H')  # uint16, ~8 GB for full corpus
+    doc_lengths = []  # token count per document (including EOT)
     encode_batch = getattr(tknzr, 'encode_ordinary_batch', None)
 
-    doc_idx = 0
     dctx = zstd.ZstdDecompressor()
     for fpath in tqdm(data_files, desc="tokenizing"):
         file_texts = []
@@ -150,12 +148,32 @@ def extract_and_tokenize_openwebtext2(data_path: str) -> None:
 
         for ids in ids_batch:
             ids.append(eot)
-            target = val_tokens if doc_idx in val_set else train_tokens
-            target.extend(_array.array('H', ids))
-            doc_idx += 1
+            doc_lengths.append(len(ids))
+            all_tokens.extend(_array.array('H', ids))
         del ids_batch
 
-    # Step 4: Write memmap bin files
+    # Step 3: Generate train/val split now that we know n_docs.
+    n_docs = len(doc_lengths)
+    n_val = max(1, round(n_docs * 0.0005))
+    rng = np.random.default_rng(2357)
+    perm = rng.permutation(n_docs)
+    val_set = set(perm[:n_val].tolist())
+    print(f"Split: {n_docs} docs -> {n_docs - n_val} train, {n_val} val")
+
+    # Step 4: Partition tokens into train/val using doc boundaries.
+    train_tokens = _array.array('H')
+    val_tokens = _array.array('H')
+    offset = 0
+    for doc_idx, length in enumerate(doc_lengths):
+        chunk = all_tokens[offset:offset + length]
+        if doc_idx in val_set:
+            val_tokens.extend(chunk)
+        else:
+            train_tokens.extend(chunk)
+        offset += length
+    del all_tokens, doc_lengths
+
+    # Step 5: Write memmap bin files
     for split, tokens in [('train', train_tokens), ('val', val_tokens)]:
         filename = os.path.join(data_path, f'{split}.bin')
         n = len(tokens)
@@ -166,7 +184,7 @@ def extract_and_tokenize_openwebtext2(data_path: str) -> None:
 
     del train_tokens, val_tokens
 
-    # Step 5: Cleanup raw files and tarball (~94 GB freed)
+    # Step 6: Cleanup raw files and tarball (~94 GB freed)
     print("Cleaning up raw files and tarball...")
     shutil.rmtree(raw_dir, ignore_errors=True)
     if os.path.exists(tarball):

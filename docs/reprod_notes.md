@@ -8,6 +8,7 @@
 
 - [1. Dataset Acquisition](#1-dataset-acquisition)
 - [2. Train/Val Split Divergence](#2-trainval-split-divergence)
+- [3. Token Ordering Within Bins](#3-token-ordering-within-bins)
 - [References](#references)
 
 ---
@@ -53,11 +54,13 @@ We located an exact mirror of the original tarball on HuggingFace:
 This contains the identical `openwebtext2.jsonl.zst.tar` that was
 previously hosted on the-eye.eu.
 
-The download, extraction, tokenization, and cleanup pipeline is
-self-contained in `data/openwebtext2.py`. On Iridis X, it runs via:
+The pipeline is split across two Iridis job scripts due to HPC constraints
+(login nodes have internet, compute nodes do not):
 
 ```bash
-cd ~/CoTFormer && bash iridis/get_dataset/job.sh
+cd ~/CoTFormer
+bash iridis/download-dataset/job.sh              # login node
+bash iridis/extract-tokenize-dataset/job.sh      # compute node (sbatch)
 ```
 
 If the login node cannot reach `huggingface.co`, the tarball can be
@@ -91,12 +94,45 @@ returned a pre-built HuggingFace Arrow dataset with a fixed row ordering.
 row index, so the split is deterministic *only if the row order is
 identical*.
 
-Since that HF dataset is permanently defunct (see [section 1](#1-dataset-acquisition)),
-we load from the raw `.jsonl.zst` tarball instead. The raw files are read
-in sorted filename order, preserving document order within each file, but
-this sequence is not guaranteed to match the row order of the original
-pre-built Arrow dataset. The same seed and split ratio are used, but the
-partition maps different documents to train vs. val.
+Our pipeline diverges from the original in three independent ways, each of
+which changes which documents land in train vs. val:
+
+#### 2a. Document ordering
+
+Since the pre-built HF Arrow dataset is permanently defunct (see
+[section 1](#1-dataset-acquisition)), we load from the raw `.jsonl.zst`
+tarball instead. Files are read in sorted filename order, preserving
+document order within each file, but this sequence is not guaranteed to
+match the row order of the original pre-built Arrow dataset.
+
+#### 2b. Split RNG implementation
+
+The original code uses HuggingFace datasets' `train_test_split()`, which
+internally generates a permutation via numpy. Depending on the library
+version installed when the paper's experiments were run, this could be
+either `np.random.RandomState(seed)` (legacy, `datasets < 2.x`) or
+`np.random.default_rng(seed)` (new Generator API, `datasets >= 2.x`).
+These produce entirely different permutation sequences from the same seed.
+
+Our pipeline bypasses HF datasets entirely and generates the split with:
+
+```python
+rng = np.random.default_rng(2357)
+perm = rng.permutation(n_docs)
+val_set = set(perm[:n_val].tolist())
+```
+
+Even if we somehow recovered the exact original Arrow row ordering, the
+split would still differ unless we matched the exact `datasets` library
+version used by the original authors. Since this version is not recorded
+in their codebase, faithful reproduction of the split is not possible.
+
+#### 2c. Validation set size calculation
+
+The original uses HF's `test_size=0.0005` parameter, whose internal
+rounding (ceiling, floor, or round) determines the exact number of
+validation documents. Our code uses `n_val = max(1, round(n_docs * 0.0005))`,
+which may differ by one document for certain corpus sizes.
 
 ### Why the pre-built dataset is unrecoverable
 
@@ -114,16 +150,57 @@ statistically equivalent validation sets. We expect negligible impact on
 reported perplexity (well within the noise floor of stochastic training).
 This is noted as a known deviation in our reproduction.
 
-### PyArrow loader bug
+### HF datasets elimination
 
-An additional complication: `load_dataset("json", data_files=...)` crashes
-with `ArrowIndexError: array slice would exceed array length` during
-`pa_table.combine_chunks()` on this dataset. This is a known PyArrow
-serialization bug with large/nested JSON batches [3]. We bypass it by
-reading `.jsonl.zst` files directly with `zstandard` + `json` and
-constructing the HF `Dataset` via `Dataset.from_dict()`. This produces
-the same row sequence as `load_dataset("json", ...)` would have (sorted
-files, sequential line reading) but avoids the Arrow builder entirely.
+Early iterations of the pipeline used HF `datasets` with Arrow as an
+intermediary (`load_dataset("json", ...)`, `Dataset.from_dict()`,
+`Dataset.from_generator()`). All Arrow-based approaches encountered
+prohibitive issues on HPC:
+
+- `load_dataset("json", data_files=...)`: PyArrow `combine_chunks()` crash
+  (`ArrowIndexError`) during large JSONL ingestion -- a known bug [3].
+- `Dataset.from_dict()`: required holding the full text corpus (~65 GB)
+  in both Python strings and an Arrow table simultaneously, causing OOM
+  at 210+ GB peak.
+- Chunked `pyarrow.array()` per file: still OOM'd due to memory spikes
+  during Arrow table consolidation (~80-90 GB sampled, but transient
+  peaks exceeded 120-160 GB allocations).
+- `Dataset.from_generator()`: low memory but 3x slower due to
+  single-threaded disk-backed Arrow cache writes.
+
+The final pipeline eliminates HF `datasets` and PyArrow entirely, using
+`zstandard` + `json` for reading, `tiktoken.encode_ordinary_batch()` for
+tokenization (Rust-parallel), and `array.array('H')` for accumulation.
+Peak memory is ~10-20 GB vs 80-210 GB with Arrow. The `datasets` and
+`pyarrow` packages have been removed from `requirements.txt`.
+
+---
+
+## 3. Token Ordering Within Bins
+
+**Status:** Accepted -- no training impact
+
+### The difference
+
+The original pipeline tokenizes each split (train, val) as a separate HF
+dataset via `map()`, then writes tokens to memmap in 1024 sharded batches.
+Because `train_test_split(shuffle=True)` reindexes the dataset, documents
+appear in the bin file in shuffled order.
+
+Our pipeline tokenizes documents in file-encounter order (sorted filenames,
+sequential within each file), routing each document to the train or val
+accumulator inline. The resulting `train.bin` contains tokens in the
+natural file order, not shuffled.
+
+### Why this doesn't matter
+
+The training loop (`optim/base.py`) samples random offsets into the memmap
+file for each batch. The global ordering of tokens within `train.bin` has
+no effect on training -- every position is equally likely to be sampled
+regardless of its physical location in the file. The same applies to
+`val.bin` during evaluation.
+
+This is purely a cosmetic difference in on-disk layout.
 
 ---
 
