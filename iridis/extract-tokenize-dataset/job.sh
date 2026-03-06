@@ -5,7 +5,7 @@
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=16
-#SBATCH --mem=120G
+#SBATCH --mem=160G
 #SBATCH --time=02:00:00
 ################################################################################
 # Extract, tokenize, and write OpenWebText2 memmap bins
