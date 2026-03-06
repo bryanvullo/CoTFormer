@@ -4,8 +4,8 @@
 #SBATCH --account=ecsstudents
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
-#SBATCH --cpus-per-task=64
-#SBATCH --mem=240G
+#SBATCH --cpus-per-task=16
+#SBATCH --mem=230G
 #SBATCH --time=02:00:00
 ################################################################################
 # Extract, tokenize, and write OpenWebText2 memmap bins
@@ -34,7 +34,14 @@ fi
 # --- Actual job (runs on compute node) ---
 set -eo pipefail
 
-# Source path pathing logic for structured outputs
+# REPO_DIR is passed by the self-submitting wrapper via --export.
+# Fallback for direct sbatch invocation (prefer 'bash job.sh' instead).
+if [ -z "$REPO_DIR" ]; then
+    REPO_DIR="$HOME/CoTFormer"
+    echo "WARNING: REPO_DIR not set — falling back to $REPO_DIR"
+    echo "Tip: use 'bash job.sh' instead of 'sbatch job.sh'"
+fi
+
 source "$REPO_DIR/iridis/env.sh"
 
 echo "========================================="

@@ -1,0 +1,35 @@
+Running SLURM prolog script on ruby063
+===============================================================================
+Job started on Thu Mar  5 21:51:27 GMT 2026
+Job ID          : 649177
+Job name        : owt2_extract_tokenize
+WorkDir         : /iridisfs/home/ab3u21/CoTFormer/iridis/extract-tokenize-dataset
+Command         : /iridisfs/home/ab3u21/CoTFormer/iridis/extract-tokenize-dataset/job.sh
+Partition       : amd_student
+Num hosts       : 1
+Num cores       : 16
+Num of tasks    : 1
+Hosts allocated : ruby063
+Job Output Follows ...
+===============================================================================
+/var/spool/slurm/job649177/slurm_script: line 38: /iridis/env.sh: No such file or directory
+==============================================================================
+Running epilogue script on ruby063.
+
+Submit time  : 2026-03-05T21:51:24
+Start time   : 2026-03-05T21:51:27
+End time     : 2026-03-05T21:51:27
+Elapsed time : 00:00:00 (Timelimit=02:00:00)
+
+Job ID: 649177
+Cluster: iridis_x
+User/Group: ab3u21/fp
+State: FAILED (exit code 1)
+Nodes: 1
+Cores per node: 16
+CPU Utilized: 00:00:00
+CPU Efficiency: 0.00% of 00:00:00 core-walltime
+Job Wall-clock time: 00:00:00
+Memory Utilized: 6.62 MB
+Memory Efficiency: 0.00% of 230.00 GB (230.00 GB/node)
+
