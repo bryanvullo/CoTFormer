@@ -150,4 +150,5 @@ dmypy.json
 .pyre/
 
 # Slurm files
-slurm_*
+slurm_*.out
+slurm_*.err

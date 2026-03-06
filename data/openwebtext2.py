@@ -7,6 +7,7 @@ import shutil
 from tqdm import tqdm
 import numpy as np
 import zstandard as zstd
+import pyarrow as pa
 from datasets import Dataset
 
 
@@ -103,25 +104,29 @@ def extract_and_tokenize_openwebtext2(data_path: str) -> None:
             "Check the tarball contents."
         )
 
-    # Step 2: Load raw jsonl.zst files into Arrow (in-memory, needs ~40 GB)
-    # NOTE: The original codebase used load_dataset("the_pile_openwebtext2") which
-    # loaded a pre-built HF Arrow dataset with a fixed row ordering. That dataset is
-    # now defunct. We load from raw files instead, which may produce a different row
-    # order and therefore a different train/val split (see docs/reprod_notes.md §2).
-    # The document *set* is identical; only the partition may differ.
+    # Step 2: Load raw jsonl.zst files into Arrow (chunked, ~65 GB total)
+    # Builds one PyArrow array per file, freeing Python strings after each.
+    # This avoids the 2x memory spike of from_dict() which holds both the
+    # Python list and Arrow table simultaneously (~210 GB peak → OOM).
+    # NOTE: see docs/reprod_notes.md §2 for train/val split divergence.
     print(f"Loading {len(data_files)} raw files...")
-    texts = []
+    n_docs = 0
+    chunks = []
     dctx = zstd.ZstdDecompressor()
     for fpath in tqdm(data_files, desc="reading jsonl.zst"):
+        file_texts = []
         with open(fpath, "rb") as fh:
             reader = dctx.stream_reader(fh)
             text_stream = io.TextIOWrapper(reader, encoding="utf-8")
             for line in text_stream:
-                texts.append(json.loads(line)["text"])
+                file_texts.append(json.loads(line)["text"])
+        chunks.append(pa.array(file_texts, type=pa.string()))
+        n_docs += len(file_texts)
+        del file_texts
 
-    print(f"Loaded {len(texts)} documents. Building Arrow dataset...")
-    dataset = Dataset.from_dict({"text": texts})
-    del texts
+    print(f"Loaded {n_docs} documents. Building Arrow dataset...")
+    dataset = Dataset(pa.table({"text": pa.chunked_array(chunks)}))
+    del chunks
 
     split_dataset = dataset.train_test_split(test_size=0.0005, seed=2357, shuffle=True)
     split_dataset['val'] = split_dataset.pop('test')
