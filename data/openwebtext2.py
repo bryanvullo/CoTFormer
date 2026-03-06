@@ -4,11 +4,10 @@ import json
 import subprocess
 import glob
 import shutil
+import array as _array
 from tqdm import tqdm
 import numpy as np
 import zstandard as zstd
-import pyarrow as pa
-from datasets import Dataset
 
 
 OWT2_DATA_PATH = os.path.join(os.path.dirname(__file__), "datasets/openwebtext2/")
@@ -64,7 +63,10 @@ def download_openwebtext2(data_path: str) -> None:
 
 
 def extract_and_tokenize_openwebtext2(data_path: str) -> None:
-    """Extract raw files, stream into Arrow, tokenize, and write memmap bins.
+    """Extract raw files, tokenize with tiktoken, and write memmap bins.
+
+    Streams documents from .jsonl.zst files without loading everything into
+    memory. No HF datasets or Arrow needed — just tiktoken + numpy memmap.
 
     Does not require internet — run on a compute node.
     Requires tiktoken BPE cache to be pre-warmed (see cache_tiktoken_bpe).
@@ -76,10 +78,11 @@ def extract_and_tokenize_openwebtext2(data_path: str) -> None:
 
     import tiktoken
     tknzr = tiktoken.get_encoding("gpt2")
+    eot = tknzr.eot_token
+    num_threads = os.cpu_count() or 1
 
     tarball = os.path.join(data_path, "openwebtext2.jsonl.zst.tar")
     raw_dir = os.path.join(data_path, "raw")
-    num_proc = os.cpu_count() or 1
 
     # Step 1: Extract tarball if raw files don't exist yet
     data_files = sorted(glob.glob(os.path.join(raw_dir, "**/*.jsonl.zst"), recursive=True))
@@ -104,62 +107,64 @@ def extract_and_tokenize_openwebtext2(data_path: str) -> None:
             "Check the tarball contents."
         )
 
-    # Step 2: Load raw jsonl.zst files into Arrow (chunked, ~65 GB total)
-    # Builds one PyArrow array per file, freeing Python strings after each.
-    # This avoids the 2x memory spike of from_dict() which holds both the
-    # Python list and Arrow table simultaneously (~210 GB peak → OOM).
+    # Step 2: Count documents (streaming, minimal memory)
     # NOTE: see docs/reprod_notes.md §2 for train/val split divergence.
-    print(f"Loading {len(data_files)} raw files...")
+    print(f"Counting documents across {len(data_files)} files...")
     n_docs = 0
-    chunks = []
     dctx = zstd.ZstdDecompressor()
-    for fpath in tqdm(data_files, desc="reading jsonl.zst"):
+    for fpath in tqdm(data_files, desc="counting"):
+        with open(fpath, "rb") as fh:
+            reader = dctx.stream_reader(fh)
+            text_stream = io.TextIOWrapper(reader, encoding="utf-8")
+            for _ in text_stream:
+                n_docs += 1
+
+    # Generate train/val split (deterministic, matches test_size=0.0005 seed=2357)
+    n_val = max(1, round(n_docs * 0.0005))
+    rng = np.random.default_rng(2357)
+    perm = rng.permutation(n_docs)
+    val_set = set(perm[:n_val].tolist())
+    print(f"Split: {n_docs} docs -> {n_docs - n_val} train, {n_val} val")
+
+    # Step 3: Tokenize and accumulate into uint16 arrays (~8 GB for train)
+    # Per-file batching leverages tiktoken's internal Rust parallelism.
+    train_tokens = _array.array('H')  # uint16, 2 bytes per token
+    val_tokens = _array.array('H')
+    encode_batch = getattr(tknzr, 'encode_ordinary_batch', None)
+
+    doc_idx = 0
+    dctx = zstd.ZstdDecompressor()
+    for fpath in tqdm(data_files, desc="tokenizing"):
         file_texts = []
         with open(fpath, "rb") as fh:
             reader = dctx.stream_reader(fh)
             text_stream = io.TextIOWrapper(reader, encoding="utf-8")
             for line in text_stream:
                 file_texts.append(json.loads(line)["text"])
-        chunks.append(pa.array(file_texts, type=pa.string()))
-        n_docs += len(file_texts)
+
+        if encode_batch is not None:
+            ids_batch = encode_batch(file_texts, num_threads=num_threads)
+        else:
+            ids_batch = [tknzr.encode_ordinary(t) for t in file_texts]
         del file_texts
 
-    print(f"Loaded {n_docs} documents. Building Arrow dataset...")
-    dataset = Dataset(pa.table({"text": pa.chunked_array(chunks)}))
-    del chunks
-
-    split_dataset = dataset.train_test_split(test_size=0.0005, seed=2357, shuffle=True)
-    split_dataset['val'] = split_dataset.pop('test')
-
-    def process(example):
-        ids = tknzr.encode_ordinary(example['text'])
-        ids.append(tknzr.eot_token)
-        out = {'ids': ids, 'len': len(ids)}
-        return out
-
-    # Step 3: Tokenize
-    tokenized = split_dataset.map(
-        process,
-        remove_columns=split_dataset['train'].column_names,
-        desc="tokenizing the splits",
-        num_proc=num_proc,
-    )
+        for ids in ids_batch:
+            ids.append(eot)
+            target = val_tokens if doc_idx in val_set else train_tokens
+            target.extend(_array.array('H', ids))
+            doc_idx += 1
+        del ids_batch
 
     # Step 4: Write memmap bin files
-    for split, dset in tokenized.items():
-        arr_len = np.sum(dset['len'])
+    for split, tokens in [('train', train_tokens), ('val', val_tokens)]:
         filename = os.path.join(data_path, f'{split}.bin')
-        dtype = np.uint16
-        arr = np.memmap(filename, dtype=dtype, mode='w+', shape=(arr_len,))
-        total_batches = 1024
-
-        idx = 0
-        for batch_idx in tqdm(range(total_batches), desc=f'writing {filename}'):
-            batch = dset.shard(num_shards=total_batches, index=batch_idx, contiguous=True).with_format('numpy')
-            arr_batch = np.concatenate(batch['ids'])
-            arr[idx : idx + len(arr_batch)] = arr_batch
-            idx += len(arr_batch)
+        n = len(tokens)
+        arr = np.memmap(filename, dtype=np.uint16, mode='w+', shape=(n,))
+        arr[:] = np.frombuffer(tokens, dtype=np.uint16)
         arr.flush()
+        print(f"Wrote {filename}: {n:,} tokens ({n * 2 / 1e9:.2f} GB)")
+
+    del train_tokens, val_tokens
 
     # Step 5: Cleanup raw files and tarball (~94 GB freed)
     print("Cleaning up raw files and tarball...")
