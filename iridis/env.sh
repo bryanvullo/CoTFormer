@@ -1,23 +1,29 @@
 #!/usr/bin/env bash
-# iridis/env.sh — Iridis X environment config
+# iridis/env.sh — Iridis X environment config (shared team setup)
 # Source this file; do not execute it directly.
 #
 # Usage (from job.sh scripts):
 #   source "$REPO_DIR/iridis/env.sh"
+#
+# All team members share ab3u21's scratch for conda env, datasets, and caches.
+# Job outputs are namespaced by $USER: <USER>-<JOB_ID>-<JOB_NAME>/
 
-# --- Conda environment ---
-CONDA_ENV_PREFIX="/scratch/$USER/cotformer-env"
+# --- Shared scratch (ab3u21, read/write granted to team) ---
+SHARED_SCRATCH="/scratch/ab3u21"
 
-# --- Per-user scratch paths ---
-export DATA_DIR="/scratch/$USER/datasets"
-export RESULTS_DIR="/scratch/$USER/job-outputs"
+# --- Conda environment (shared, single install) ---
+CONDA_ENV_PREFIX="$SHARED_SCRATCH/cotformer-env"
 
-# --- Caches (keep off home quota) ---
-export TIKTOKEN_CACHE_DIR="/scratch/$USER/.cache/tiktoken"
-export HF_HOME="/scratch/$USER/.cache/huggingface"
-export WANDB_DIR="/scratch/$USER/.cache/wandb"
-export PIP_CACHE_DIR="/scratch/$USER/.cache/pip"
-export CONDA_PKGS_DIRS="/scratch/$USER/.conda/pkgs"
+# --- Shared data and output paths ---
+export DATA_DIR="$SHARED_SCRATCH/datasets"
+export RESULTS_DIR="$SHARED_SCRATCH/job-outputs"
+
+# --- Caches (shared, keep off home quota) ---
+export TIKTOKEN_CACHE_DIR="$SHARED_SCRATCH/.cache/tiktoken"
+export HF_HOME="$SHARED_SCRATCH/.cache/huggingface"
+export WANDB_DIR="$SHARED_SCRATCH/.cache/wandb"
+export PIP_CACHE_DIR="$SHARED_SCRATCH/.cache/pip"
+export CONDA_PKGS_DIRS="$SHARED_SCRATCH/.conda/pkgs"
 
 # --- Run directory helper ---
 # Creates the next run_N directory inside a package dir.
@@ -30,4 +36,14 @@ next_run_dir() {
     local run_dir="$pkg_dir/run_$next_n"
     mkdir -p "$run_dir"
     echo "$run_dir"
+}
+
+# --- Job output directory helper ---
+# Creates a structured output dir for non-SLURM artifacts (checkpoints, etc.)
+# Format: $RESULTS_DIR/<USER>-<JOB_ID>-<JOB_NAME>/
+# Usage (from within a SLURM job): JOB_OUTPUT_DIR=$(job_output_dir)
+job_output_dir() {
+    local dir="$RESULTS_DIR/${USER}-${SLURM_JOB_ID:-0}-${SLURM_JOB_NAME:-local}"
+    mkdir -p "$dir"
+    echo "$dir"
 }
