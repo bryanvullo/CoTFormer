@@ -4,8 +4,8 @@
 #SBATCH --account=ecsstudents
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
-#SBATCH --cpus-per-task=16
-#SBATCH --mem=40G
+#SBATCH --cpus-per-task=64
+#SBATCH --mem=230G
 #SBATCH --time=02:00:00
 ################################################################################
 # Extract, tokenize, and write OpenWebText2 memmap bins
