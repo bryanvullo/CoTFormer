@@ -1,6 +1,5 @@
 import os
 import io
-import json
 import subprocess
 import glob
 import shutil
@@ -8,6 +7,11 @@ import array as _array
 from tqdm import tqdm
 import numpy as np
 import zstandard as zstd
+
+try:
+    from orjson import loads as json_loads
+except ImportError:
+    from json import loads as json_loads
 
 
 OWT2_DATA_PATH = os.path.join(os.path.dirname(__file__), "datasets/openwebtext2/")
@@ -126,7 +130,7 @@ def extract_and_tokenize_openwebtext2(data_path: str) -> None:
 
     # Step 2: Single-pass tokenize — accumulate all tokens + track doc lengths.
     # This avoids a separate counting pass (which doubled I/O + decompression).
-    # NOTE: see docs/reprod_notes.md §2 for train/val split divergence.
+    # NOTE: see docs/reprod_notes.md for train/val split divergence.
     all_tokens = _array.array('H')  # uint16, ~8 GB for full corpus
     doc_lengths = []  # token count per document (including EOT)
     encode_batch = getattr(tknzr, 'encode_ordinary_batch', None)
@@ -138,7 +142,7 @@ def extract_and_tokenize_openwebtext2(data_path: str) -> None:
             reader = dctx.stream_reader(fh)
             text_stream = io.TextIOWrapper(reader, encoding="utf-8")
             for line in text_stream:
-                file_texts.append(json.loads(line)["text"])
+                file_texts.append(json_loads(line)["text"])
 
         if encode_batch is not None:
             ids_batch = encode_batch(file_texts, num_threads=num_threads)
@@ -146,11 +150,14 @@ def extract_and_tokenize_openwebtext2(data_path: str) -> None:
             ids_batch = [tknzr.encode_ordinary(t) for t in file_texts]
         del file_texts
 
+        # Batch per file: one extend call per file instead of per document.
+        file_all_ids = []
         for ids in ids_batch:
             ids.append(eot)
             doc_lengths.append(len(ids))
-            all_tokens.extend(_array.array('H', ids))
-        del ids_batch
+            file_all_ids.extend(ids)
+        all_tokens.extend(_array.array('H', file_all_ids))
+        del ids_batch, file_all_ids
 
     # Step 3: Generate train/val split now that we know n_docs.
     n_docs = len(doc_lengths)
@@ -160,29 +167,37 @@ def extract_and_tokenize_openwebtext2(data_path: str) -> None:
     val_set = set(perm[:n_val].tolist())
     print(f"Split: {n_docs} docs -> {n_docs - n_val} train, {n_val} val")
 
-    # Step 4: Partition tokens into train/val using doc boundaries.
-    train_tokens = _array.array('H')
-    val_tokens = _array.array('H')
-    offset = 0
-    for doc_idx, length in enumerate(doc_lengths):
-        chunk = all_tokens[offset:offset + length]
-        if doc_idx in val_set:
-            val_tokens.extend(chunk)
-        else:
-            train_tokens.extend(chunk)
-        offset += length
+    # Step 4: Partition tokens into train/val via numpy slicing.
+    # Val is ~0.05% of docs (~1700), so we build ~1700 contiguous train
+    # segments between val gaps — avoids iterating 3.4M docs in Python.
+    all_np = np.frombuffer(all_tokens, dtype=np.uint16)
+    offsets = np.concatenate([[0], np.cumsum(doc_lengths, dtype=np.int64)])
     del all_tokens, doc_lengths
 
+    val_sorted = sorted(val_set)
+    val_np = np.concatenate([all_np[offsets[i]:offsets[i + 1]] for i in val_sorted])
+
+    train_segments = []
+    prev_end = 0
+    for vi in val_sorted:
+        if offsets[vi] > prev_end:
+            train_segments.append(all_np[prev_end:offsets[vi]])
+        prev_end = int(offsets[vi + 1])
+    if prev_end < len(all_np):
+        train_segments.append(all_np[prev_end:])
+    train_np = np.concatenate(train_segments)
+    del all_np, offsets, train_segments
+
     # Step 5: Write memmap bin files
-    for split, tokens in [('train', train_tokens), ('val', val_tokens)]:
+    for split, tokens_np in [('train', train_np), ('val', val_np)]:
         filename = os.path.join(data_path, f'{split}.bin')
-        n = len(tokens)
+        n = len(tokens_np)
         arr = np.memmap(filename, dtype=np.uint16, mode='w+', shape=(n,))
-        arr[:] = np.frombuffer(tokens, dtype=np.uint16)
+        arr[:] = tokens_np
         arr.flush()
         print(f"Wrote {filename}: {n:,} tokens ({n * 2 / 1e9:.2f} GB)")
 
-    del train_tokens, val_tokens
+    del train_np, val_np
 
     # Step 6: Cleanup raw files and tarball (~94 GB freed)
     print("Cleaning up raw files and tarball...")
