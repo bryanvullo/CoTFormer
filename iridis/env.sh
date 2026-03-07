@@ -25,6 +25,10 @@ export WANDB_DIR="$SHARED_SCRATCH/.cache/wandb"
 export PIP_CACHE_DIR="$SHARED_SCRATCH/.cache/pip"
 export CONDA_PKGS_DIRS="$SHARED_SCRATCH/.conda/pkgs"
 
+# --- SLURM email notifications ---
+# Uses Southampton email derived from $USER. Override in ~/.bash_aliases if needed.
+export NOTIFY_EMAIL="${USER}@soton.ac.uk"
+
 # --- Run directory helper ---
 # Creates the next run_N directory inside a package dir.
 # Usage: RUN_DIR=$(next_run_dir "$PACKAGE_DIR")

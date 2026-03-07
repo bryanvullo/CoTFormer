@@ -39,7 +39,7 @@
 ├── distributed/         ← DDP / single-GPU backends
 │
 └── iridis/              ← Iridis X cluster operations
-    ├── env.sh                    ← Per-user scratch paths (source this)
+    ├── env.sh                    ← Shared scratch paths (source this)
     ├── download-dataset/         ← Download OWT2 tarball (login node)
     │   └── job.sh
     ├── extract-tokenize-dataset/ ← Extract + tokenize (compute node)
@@ -72,28 +72,23 @@ Host iridis-x
 
 ### Environment Setup
 
-We utilize `/scratch/<username>` to store environments and datasets to avoid strict home directory quotas. Choose one of the two setup methods below.
+The team shares a single conda environment, dataset, and cache directory under `/scratch/ab3u21/`. All paths are defined in `iridis/env.sh` -- this is the single source of truth.
 
-#### Method 1: Iridis Conda Module (Recommended)
+> **WARNING:** The setup steps below create or rebuild the **shared** environment. Running them affects all team members. Only do this to bootstrap a fresh environment or after a deliberate reset.
 
-This modular approach uses the cluster's pre-installed Conda module while rerouting massive machine learning caches to your scratch space.
-
-**Configure Aliases and Caches:** Create `~/.bash_aliases` and add the following:
+**Configure shell for interactive sessions.** Create `~/.bash_aliases`:
 
 ```bash
-# Reroute ML caches to scratch
-export PIP_CACHE_DIR=/scratch/<username>/.cache/pip
-export HF_HOME=/scratch/<username>/.cache/huggingface
-export WANDB_DIR=/scratch/<username>/.cache/wandb
-export CONDA_PKGS_DIRS=/scratch/<username>/.conda/pkgs
+# Source shared env config (all scratch paths + helpers)
+source ~/CoTFormer/iridis/env.sh
 
-# Navigation and Activation Aliases
-alias cds="cd /scratch/<username>"
+# Convenience aliases
+alias cds="cd /scratch/ab3u21"
 alias cdp="cd ~/CoTFormer"
-alias act="module load conda && conda activate /scratch/<username>/cotformer-env"
+alias act="module load conda && conda activate $CONDA_ENV_PREFIX"
 ```
 
-**Link to bashrc:** Append this to your `~/.bashrc`:
+**Link to bashrc.** Append this to `~/.bashrc` (if not already present):
 
 ```bash
 if [ -f ~/.bash_aliases ]; then
@@ -101,46 +96,24 @@ if [ -f ~/.bash_aliases ]; then
 fi
 ```
 
-**Initialize Space:** Run `source ~/.bashrc` and create the cache directories in scratch (`mkdir -p ...`).
-
-**Build Environment:**
+**Build the shared environment** (one-time, affects all team members):
 
 ```bash
+source ~/.bashrc
 module load conda
 conda config --add channels defaults
 conda config --add channels conda-forge
-conda create --prefix /scratch/<username>/cotformer-env python=3.11 -y
+conda create --prefix /scratch/ab3u21/cotformer-env python=3.11 -y
+act
+pip install -r ~/CoTFormer/requirements.txt
 ```
 
-**Install Packages:** Run `act` to activate the environment, then `pip install -r ~/CoTFormer/requirements.txt`.
-
-#### Method 2: Standalone Miniforge (Wget)
-
-Use this method if you prefer to manage a localized installation of Miniforge entirely within your scratch directory.
-
-**Download and Install:**
+**Update packages** (after `requirements.txt` changes):
 
 ```bash
-cd /scratch/<username>
-wget https://github.com/conda-forge/miniforge/releases/latest/download/Miniforge3-Linux-x86_64.sh
-bash Miniforge3-Linux-x86_64.sh -b -p ./mambaforge
+act
+pip install -r ~/CoTFormer/requirements.txt
 ```
-
-**Initialize:**
-
-```bash
-echo 'source /scratch/<username>/mambaforge/etc/profile.d/conda.sh' >> ~/.bashrc
-source ~/.bashrc
-```
-
-**Build Environment:**
-
-```bash
-conda create -n cotformer-env python=3.11 -y
-conda activate cotformer-env
-```
-
-**Install Packages:** `pip install -r ~/CoTFormer/requirements.txt`.
 
 ### Uploading and Downloading
 
@@ -159,7 +132,7 @@ rsync -avz --exclude='slurm_*' --exclude='data/datasets' ./ iridis-x:~/CoTFormer
 **Downloading Results:**
 
 ```bash
-rsync -avz iridis-x:/scratch/<username>/cotformer/exps/ ./exps/
+rsync -avz iridis-x:/scratch/ab3u21/job-outputs/ ./job-outputs/
 ```
 
 ### GPU Partitions
@@ -184,11 +157,13 @@ scancel <job_id>                    # Cancel job
 seff <job_id>                       # View post-run efficiency
 ```
 
-SLURM `.out`/`.err` files land in `iridis/<package>/run_N/`, numbered incrementally per run. Experiment outputs (metrics, checkpoints) go to `/scratch/$USER/job-outputs/`.
+SLURM `.out`/`.err` files land in `iridis/<package>/run_N/`, numbered incrementally per run. Non-SLURM outputs (checkpoints, metrics) go to `/scratch/ab3u21/job-outputs/<USER>-<JOB_ID>-<JOB_NAME>/`.
+
+**Email notifications:** SLURM jobs email `<username>@soton.ac.uk` on completion or failure. To override, set `NOTIFY_EMAIL` in `~/.bash_aliases` before sourcing `env.sh`.
 
 ## Dataset Setup
 
-The dataset is [OpenWebText2](https://openwebtext2.readthedocs.io/en/latest/) (17.1M documents, ~28 GB compressed) from EleutherAI's The Pile. The original HuggingFace dataset is defunct; we use an [exact mirror on HuggingFace](https://huggingface.co/datasets/segyges/OpenWebText2). Each team member stores data under their own `/scratch/$USER/` directory.
+The dataset is [OpenWebText2](https://openwebtext2.readthedocs.io/en/latest/) (17.1M documents, ~28 GB compressed) from EleutherAI's The Pile. The original HuggingFace dataset is defunct; we use an [exact mirror on HuggingFace](https://huggingface.co/datasets/segyges/OpenWebText2). The dataset is stored once under `/scratch/ab3u21/datasets/` and shared by all team members.
 
 The pipeline is split into two jobs because only login nodes have internet access, while compute nodes have the memory and CPU needed for extraction and tokenization.
 
@@ -208,7 +183,7 @@ bash iridis/download-dataset/job.sh --reset    # delete everything and re-downlo
 wget -c "https://huggingface.co/datasets/segyges/OpenWebText2/resolve/main/openwebtext2.jsonl.zst.tar" \
     -P /tmp/
 rsync -avz --progress /tmp/openwebtext2.jsonl.zst.tar \
-    iridis-x:/scratch/<username>/datasets/openwebtext2/
+    iridis-x:/scratch/ab3u21/datasets/openwebtext2/
 ```
 
 ### Step 2: Extract and tokenize (compute node)
@@ -218,12 +193,12 @@ cd ~/CoTFormer
 bash iridis/extract-tokenize-dataset/job.sh
 ```
 
-Self-submits to `amd_student` (80 GB RAM, 16 CPUs, 2h). Produces `train.bin` (~8 GB) and `val.bin` (~4 MB) under `/scratch/$USER/datasets/openwebtext2/`.
+Self-submits to `amd_student` (40 GB RAM, 16 CPUs, 3h). Produces `train.bin` (~8 GB) and `val.bin` (~4 MB) under `/scratch/ab3u21/datasets/openwebtext2/`.
 
 ### Verify
 
 ```bash
-ls -lh /scratch/$USER/datasets/openwebtext2/
+ls -lh /scratch/ab3u21/datasets/openwebtext2/
 # Expected: train.bin ~8GB, val.bin ~4MB
 ```
 

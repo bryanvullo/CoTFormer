@@ -5,7 +5,7 @@
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=16
-#SBATCH --mem=40G
+#SBATCH --mem=100G
 #SBATCH --time=03:00:00
 ################################################################################
 # Extract, tokenize, and write OpenWebText2 memmap bins
@@ -27,6 +27,8 @@ if [ -z "$SLURM_JOB_ID" ]; then
     exec sbatch \
         --output="$RUN_DIR/slurm_%j.out" \
         --error="$RUN_DIR/slurm_%j.err" \
+        --mail-type=END,FAIL \
+        --mail-user="$NOTIFY_EMAIL" \
         --export=ALL,REPO_DIR="$REPO_DIR" \
         "$0" "$@"
 fi

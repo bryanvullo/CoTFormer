@@ -3,11 +3,12 @@ import io
 import subprocess
 import glob
 import shutil
-import array as _array
 from tqdm import tqdm
 import numpy as np
 import zstandard as zstd
 
+# orjson (Rust) is 2-6x faster than stdlib json for loads().
+# Falls back gracefully — output is identical either way.
 try:
     from orjson import loads as json_loads
 except ImportError:
@@ -50,6 +51,7 @@ def download_openwebtext2(data_path: str) -> None:
         print(f"Tarball already exists at {tarball} ({os.path.getsize(tarball)} bytes), skipping download.")
         return
 
+    # Remove truncated/corrupt tarball before retrying
     if os.path.exists(tarball) and os.path.getsize(tarball) < MIN_TARBALL_SIZE:
         os.remove(tarball)
 
@@ -67,10 +69,10 @@ def download_openwebtext2(data_path: str) -> None:
 
 
 def extract_and_tokenize_openwebtext2(data_path: str) -> None:
-    """Extract raw files, tokenize with tiktoken, and write memmap bins.
+    """Extract raw .jsonl.zst files, tokenize with tiktoken, write memmap bins.
 
-    Streams documents from .jsonl.zst files without loading everything into
-    memory. No HF datasets or Arrow needed — just tiktoken + numpy memmap.
+    Single-pass pipeline: decompress → parse JSON → tokenize → accumulate.
+    No HF datasets or Arrow — just tiktoken + numpy memmap.
 
     Does not require internet — run on a compute node.
     Requires tiktoken BPE cache to be pre-warmed (see cache_tiktoken_bpe).
@@ -82,22 +84,25 @@ def extract_and_tokenize_openwebtext2(data_path: str) -> None:
 
     import tiktoken
     tknzr = tiktoken.get_encoding("gpt2")
-    eot = tknzr.eot_token
+    eot = tknzr.eot_token  # end-of-text token (50256), appended after each doc
     num_threads = os.cpu_count() or 1
 
     tarball = os.path.join(data_path, "openwebtext2.jsonl.zst.tar")
     raw_dir = os.path.join(data_path, "raw")
 
-    # Step 1: Extract tarball (re-extracts from scratch if raw dir looks incomplete)
+    # --- Step 1: Extract tarball ---
+    # Validates extraction completeness by comparing file count against tarball.
+    # Re-extracts from scratch if the raw dir is missing or incomplete (e.g. prior
+    # crash mid-extraction). Safe to retry without manual cleanup.
     import tarfile
 
     def _needs_extraction() -> bool:
-        """Check if extraction is needed by comparing file count against tarball."""
         existing = glob.glob(os.path.join(raw_dir, "**/*.jsonl.zst"), recursive=True)
         if not existing:
             return True
+        # No tarball to compare against — trust whatever files we have
         if not os.path.exists(tarball) or os.path.getsize(tarball) < MIN_TARBALL_SIZE:
-            return False  # no tarball to compare against — trust existing files
+            return False
         with tarfile.open(tarball) as tf:
             expected = sum(1 for m in tf.getmembers() if m.name.endswith(".jsonl.zst"))
         if len(existing) < expected:
@@ -112,7 +117,7 @@ def extract_and_tokenize_openwebtext2(data_path: str) -> None:
                 "Run iridis/download-dataset/job.sh on a login node first."
             )
 
-        # Wipe partial raw dir to ensure clean extraction
+        # Wipe partial raw dir before re-extracting
         if os.path.exists(raw_dir):
             shutil.rmtree(raw_dir)
 
@@ -128,15 +133,20 @@ def extract_and_tokenize_openwebtext2(data_path: str) -> None:
             "Check the tarball contents."
         )
 
-    # Step 2: Single-pass tokenize — accumulate all tokens + track doc lengths.
-    # This avoids a separate counting pass (which doubled I/O + decompression).
+    # --- Step 2: Single-pass tokenize ---
+    # Each file -> decompress -> JSON parse -> batch tokenize -> numpy uint16 array.
+    # We store one numpy array per file (179 arrays, ~8 GB total) instead of one
+    # growing array.array, which doubles its allocation and caused OOM at 36 GB.
     # NOTE: see docs/reprod_notes.md for train/val split divergence.
-    all_tokens = _array.array('H')  # uint16, ~8 GB for full corpus
-    doc_lengths = []  # token count per document (including EOT)
+    file_arrays = []
+    doc_lengths = []  # tokens per doc (incl. EOT) — needed for split partitioning
+
+    # encode_ordinary_batch uses Rust threads (num_threads) for parallel BPE encoding
     encode_batch = getattr(tknzr, 'encode_ordinary_batch', None)
 
     dctx = zstd.ZstdDecompressor()
     for fpath in tqdm(data_files, desc="tokenizing"):
+        # Decompress + parse: stream zstd → lines → JSON → extract "text" field
         file_texts = []
         with open(fpath, "rb") as fh:
             reader = dctx.stream_reader(fh)
@@ -144,22 +154,27 @@ def extract_and_tokenize_openwebtext2(data_path: str) -> None:
             for line in text_stream:
                 file_texts.append(json_loads(line)["text"])
 
+        # Tokenize all docs in this file as one batch (Rust-parallel)
         if encode_batch is not None:
             ids_batch = encode_batch(file_texts, num_threads=num_threads)
         else:
             ids_batch = [tknzr.encode_ordinary(t) for t in file_texts]
         del file_texts
 
-        # Batch per file: one extend call per file instead of per document.
+        # Flatten all doc tokens into one list, tracking per-doc lengths.
+        # One np.array() call per file avoids 3.4M individual allocations.
         file_all_ids = []
         for ids in ids_batch:
             ids.append(eot)
             doc_lengths.append(len(ids))
             file_all_ids.extend(ids)
-        all_tokens.extend(_array.array('H', file_all_ids))
+        file_arrays.append(np.array(file_all_ids, dtype=np.uint16))
         del ids_batch, file_all_ids
 
-    # Step 3: Generate train/val split now that we know n_docs.
+    # --- Step 3: Generate train/val split ---
+    # Deterministic split using numpy RNG. We now know n_docs from the single pass.
+    # The split differs from the original paper's HF train_test_split() — see
+    # docs/reprod_notes.md §1 for why this is unavoidable and negligible.
     n_docs = len(doc_lengths)
     n_val = max(1, round(n_docs * 0.0005))
     rng = np.random.default_rng(2357)
@@ -167,16 +182,20 @@ def extract_and_tokenize_openwebtext2(data_path: str) -> None:
     val_set = set(perm[:n_val].tolist())
     print(f"Split: {n_docs} docs -> {n_docs - n_val} train, {n_val} val")
 
-    # Step 4: Partition tokens into train/val via numpy slicing.
-    # Val is ~0.05% of docs (~1700), so we build ~1700 contiguous train
-    # segments between val gaps — avoids iterating 3.4M docs in Python.
-    all_np = np.frombuffer(all_tokens, dtype=np.uint16)
+    # --- Step 4: Partition tokens into train/val ---
+    # Concatenate per-file arrays into one contiguous buffer, then slice by doc
+    # boundaries. Since val is only ~0.05% (~1700 docs), we iterate ~1700 gaps
+    # to build contiguous train segments rather than looping over 3.4M docs.
+    all_np = np.concatenate(file_arrays)
+    del file_arrays
     offsets = np.concatenate([[0], np.cumsum(doc_lengths, dtype=np.int64)])
-    del all_tokens, doc_lengths
+    del doc_lengths
 
+    # Val: gather ~1700 doc slices (numpy views, no copy until concatenate)
     val_sorted = sorted(val_set)
     val_np = np.concatenate([all_np[offsets[i]:offsets[i + 1]] for i in val_sorted])
 
+    # Train: collect contiguous segments between val doc gaps
     train_segments = []
     prev_end = 0
     for vi in val_sorted:
@@ -188,7 +207,9 @@ def extract_and_tokenize_openwebtext2(data_path: str) -> None:
     train_np = np.concatenate(train_segments)
     del all_np, offsets, train_segments
 
-    # Step 5: Write memmap bin files
+    # --- Step 5: Write memmap bin files ---
+    # uint16 memmap: training code reads these with .astype(np.int64) → torch tensor.
+    # Max token ID is 50256 (EOT) which fits in uint16 (max 65535).
     for split, tokens_np in [('train', train_np), ('val', val_np)]:
         filename = os.path.join(data_path, f'{split}.bin')
         n = len(tokens_np)
@@ -199,7 +220,8 @@ def extract_and_tokenize_openwebtext2(data_path: str) -> None:
 
     del train_np, val_np
 
-    # Step 6: Cleanup raw files and tarball (~94 GB freed)
+    # --- Step 6: Cleanup ---
+    # Remove raw .jsonl.zst files and tarball (~94 GB freed).
     print("Cleaning up raw files and tarball...")
     shutil.rmtree(raw_dir, ignore_errors=True)
     if os.path.exists(tarball):
