@@ -6,7 +6,7 @@
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=16
 #SBATCH --gres=gpu:2
-#SBATCH --mem=48G
+#SBATCH --mem=96G
 #SBATCH --time=24:00:00
 ################################################################################
 # Adaptive LN-CoTFormer (ADM) Training — iridis/adm-train
