@@ -29,24 +29,29 @@
 
 ```text
 .
-├── main.py              ← Training entry point
-├── eval.py              ← Evaluation
-├── get_ppl_per_mac.py   ← MACs-aware PPL evaluation
-├── config/              ← Argument parsing and defaults
-├── data/                ← Dataset loaders (OpenWebText2)
-├── models/              ← All model definitions
-├── optim/               ← Training loop and optimizers
-├── distributed/         ← DDP / single-GPU backends
+├── main.py                      ← Training entry point
+├── eval.py                      ← Evaluation
+├── get_ppl_per_mac.py           ← MACs-aware PPL evaluation (Figure 4)
+├── get_router_weights.py        ← Extract ADM router weights from checkpoint
+├── analyze_kv_compression.py    ← KV cache SVD analysis for MLA design
+├── config/                      ← Argument parsing and defaults
+├── data/                        ← Dataset loaders (OpenWebText2)
+├── models/                      ← All model definitions
+├── optim/                       ← Training loop and optimizers
+├── distributed/                 ← DDP / single-GPU backends
 │
-└── iridis/              ← Iridis X cluster operations
-    ├── env.sh                    ← Shared scratch paths (source this)
-    ├── download-dataset/         ← Download OWT2 tarball (login node)
+└── iridis/                      ← Iridis X cluster operations
+    ├── env.sh                         ← Shared scratch paths (source this)
+    ├── download-dataset/              ← Step 1: Download OWT2 (login node)
     │   └── job.sh
-    ├── extract-tokenize-dataset/ ← Extract + tokenize (compute node)
+    ├── extract-tokenize-dataset/      ← Step 2: Tokenize (compute node)
     │   └── job.sh
-    └── gpu_test/                 ← GPU smoke test
-        ├── job.sh
-        └── test_gpu.py
+    ├── lncot-train/                   ← Train LN-CoTFormer (Table 2)
+    │   └── job.sh
+    ├── adm-train/                     ← Train Adaptive LN-CoTFormer (Figure 4)
+    │   └── job.sh
+    └── lncot-exp4/                    ← Evaluate Figure 4 (post-training)
+        └── job.sh
 ```
 
 Each operation on Iridis lives in its own package directory under `iridis/`. SLURM `.out`/`.err` files land inside the package dir, keeping the source tree clean. Python code lives at the repo root (required by bare imports in `main.py`).
@@ -204,22 +209,106 @@ ls -lh /scratch/ab3u21/datasets/openwebtext2/
 
 ## Training
 
-All training runs execute `main.py` from the repo root. On Iridis, source `iridis/env.sh` first and pass `--data_dir` and `--results_base_folder` to direct I/O to scratch:
+All training runs execute `main.py` from the repo root. On Iridis, use the self-submitting job packages under `iridis/`. Each package handles conda activation, GPU allocation, WandB offline mode, and email notifications automatically.
+
+### Training Packages
+
+| Package | Model | Steps | Purpose |
+|---------|-------|-------|---------|
+| `iridis/lncot-train/` | LN-CoTFormer (24L, 5 repeats) | 40k | Table 2 perplexity baseline |
+| `iridis/adm-train/` | Adaptive LN-CoTFormer + Router | 60k | Figure 4 (MACs vs perplexity) |
+| `iridis/lncot-exp4/` | Evaluation only | -- | Reproduce Figure 4 curves |
+
+Submit from the repo root on Iridis:
+
+```bash
+cd ~/CoTFormer
+bash iridis/lncot-train/job.sh     # LN-CoTFormer (Table 2)
+bash iridis/adm-train/job.sh       # Adaptive model (Figure 4)
+bash iridis/lncot-exp4/job.sh      # Evaluate Figure 4 (after adm-train completes)
+```
+
+Both training packages use 2x L4 GPUs with DDP. Adjust `N_GPUS` and `#SBATCH --gres=gpu:N` at the top of each `job.sh` if needed.
+
+### Checkpointing and Job Chaining
+
+Training on L4 GPUs may not finish in a single 24-hour job. The packages are designed for **seamless multi-job chaining**:
+
+1. **Automatic checkpoints** every 2000 steps to `/scratch/ab3u21/exps/` (off home quota)
+2. **Auto-resume**: `--use_pretrained auto` finds the latest `ckpt_N.pt` on restart
+3. **To continue**: just resubmit the same job — `bash iridis/<package>/job.sh`
+4. **Completion signal**: when training finishes, `summary.json` is written to the checkpoint directory
+
+Checkpoint path: `/scratch/ab3u21/exps/owt2/<model_name>_<hyperparams>/`
+
+Each checkpoint is ~1.5 GB (model + AdamW states + RNG states). With `save_checkpoint_freq=2000` over 40k steps, expect ~30 GB of checkpoints per run. Old intermediary checkpoints can be deleted manually after training completes — only `ckpt.pt` (the final checkpoint) is needed for evaluation.
+
+### Configuration
+
+Both training packages have a configuration block at the top of `job.sh`:
+
+```bash
+N_GPUS=2          # Must match --gres=gpu:N in SBATCH directives
+N_LAYER=24        # 24 for paper reproduction, 12 for faster experiments
+N_REPEAT=5        # Number of block repeats
+ITERATIONS=40000  # Training steps (60000 for adm-train)
+BATCH_SIZE=32     # Per-GPU micro-batch size
+ACC_STEPS=4       # Gradient accumulation steps
+CKPT_FREQ=2000    # Checkpoint frequency
+```
+
+Effective batch size = `BATCH_SIZE * ACC_STEPS` = 128 (matching the paper).
+
+### Manual Training (without job packages)
+
+For local development or custom experiments:
 
 ```bash
 source iridis/env.sh
 python main.py \
     --data_dir "$DATA_DIR" \
-    --results_base_folder "$RESULTS_DIR" \
+    --results_base_folder /scratch/ab3u21/exps \
     --model base --n_layer 12 --n_embd 768 --n_head 12 \
     --batch_size 64 --acc_steps 2 --sequence_length 256 \
     --iterations 40000 --dataset owt2 --lr 1e-3 \
     --eval_freq 100 --seed 0
 ```
 
-For local development (without `--data_dir`), data defaults to `data/datasets/` relative to the repo.
+Without `--data_dir`, data defaults to `data/datasets/` relative to the repo.
 
 See `experiments.md` for the full experiment matrix.
+
+### Training Diagnostics
+
+The training loop logs gradient norms alongside loss/perplexity metrics. These help diagnose the "benign spikes" documented in the paper for LN-CoTFormer (Section 3.3).
+
+**Logged every `eval_freq` steps** (printed to SLURM stdout + WandB):
+- `grad_norm`: current gradient L2 norm
+- `max_grad_norm`: maximum gradient norm since last eval
+- `mean_grad_norm`: mean gradient norm since last eval
+- Spike warnings when `max_grad_norm > 5x mean`
+
+**WandB sync** (after job completes, from login node):
+
+```bash
+wandb sync /scratch/ab3u21/.cache/wandb/<offline-run-*>
+```
+
+### KV Compression Analysis (for MLA Extension)
+
+After training the LN-CoTFormer, run the KV compression analysis to inform MLA design:
+
+```bash
+# Weight-level analysis (fast, no GPU needed):
+python analyze_kv_compression.py --checkpoint /scratch/ab3u21/exps/owt2/<model_dir>/ \
+    --target-rank 192
+
+# Full analysis with activation-level SVD (needs GPU + data):
+python analyze_kv_compression.py --checkpoint /scratch/ab3u21/exps/owt2/<model_dir>/ \
+    --compute-activations --data_dir /scratch/ab3u21/datasets --target-rank 192
+```
+
+Outputs per-layer effective rank plots and determines whether the planned `kv_lora_rank=192` is sufficient for each layer.
 
 ## Acknowledgements
 

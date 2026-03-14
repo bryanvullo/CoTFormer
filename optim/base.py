@@ -43,6 +43,12 @@ def train_base(model, opt, data, data_seed, scheduler, iterations, acc_steps, ba
 
     stats = {"train_loss": [], "val_loss": [], "val_pp": [], "val_acc": []}
 
+    # --- Gradient norm tracking for spike detection ---
+    # LN-CoTFormer exhibits "benign spikes" (paper §3.3). Tracking grad norms
+    # helps diagnose whether spikes originate from exploding gradients (attention)
+    # or data anomalies, which informs MLA compression design.
+    grad_norm_accumulator = []
+
    
     if extra_args.compile:
         print(f"Compiling model ...")
@@ -89,8 +95,13 @@ def train_base(model, opt, data, data_seed, scheduler, iterations, acc_steps, ba
                 data_train_iter = iter(data_train)
 
 
+        # Compute gradient norm (before clipping) for diagnostics
         if extra_args.grad_clip != 0.0:
-            torch.nn.utils.clip_grad_norm_(model.parameters(), extra_args.grad_clip)
+            grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), extra_args.grad_clip)
+        else:
+            grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), float('inf'))
+        grad_norm = grad_norm.item() if isinstance(grad_norm, torch.Tensor) else grad_norm
+        grad_norm_accumulator.append(grad_norm)
         opt.step()
         scheduler.step()
         opt.zero_grad(set_to_none=True)
@@ -120,11 +131,22 @@ def train_base(model, opt, data, data_seed, scheduler, iterations, acc_steps, ba
                     ctx=type_ctx,
                 )
 
+                # Gradient norm stats over the eval interval
+                recent_norms = grad_norm_accumulator[-eval_freq:]
+                cur_grad_norm = recent_norms[-1] if recent_norms else 0.0
+                max_grad_norm = max(recent_norms) if recent_norms else 0.0
+                mean_grad_norm = sum(recent_norms) / len(recent_norms) if recent_norms else 0.0
+
                 print_string = f"{epoch}/{itr} [train] loss={train_loss:.3f} [val] loss={val_loss:.3f}, pp={val_perplexity:.2f}, acc={val_acc:3f}, avg_depth={(avg_depth or extra_args.n_layer):.3f}"
                 print_string += f" [time per itr] {dt*1000/eval_freq:.2f}ms"
                 if scheduler is not None:
                     print_string += f" [lr] {current_lr:.5f}"
+                print_string += f" [grad_norm] {cur_grad_norm:.4f} [max_grad_norm] {max_grad_norm:.4f}"
                 print(print_string)
+
+                # Flag spikes: grad norm > 5x running mean (benign spikes in LN-CoTFormer)
+                if len(grad_norm_accumulator) > eval_freq and max_grad_norm > 5 * mean_grad_norm:
+                    print(f"  >> SPIKE WARNING: max_grad_norm={max_grad_norm:.4f} is {max_grad_norm/mean_grad_norm:.1f}x the mean ({mean_grad_norm:.4f})")
 
                 if extra_args.wandb:
                     logs = {
@@ -135,6 +157,9 @@ def train_base(model, opt, data, data_seed, scheduler, iterations, acc_steps, ba
                         "val/acc": val_acc,
                         "val/avg_depth": avg_depth or extra_args.n_layer,
                         "lr": current_lr,
+                        "train/grad_norm": cur_grad_norm,
+                        "train/max_grad_norm": max_grad_norm,
+                        "train/mean_grad_norm": mean_grad_norm,
                     }
 
                     if itr == iterations:

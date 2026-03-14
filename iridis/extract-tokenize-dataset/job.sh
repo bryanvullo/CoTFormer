@@ -14,7 +14,7 @@
 # Requires: tarball already downloaded (see iridis/download-dataset/job.sh)
 #
 # Self-submitting: run with bash, it creates a run_N dir and calls sbatch.
-################################################################################
+##################################################q##############################
 
 # --- Self-submitting wrapper (runs on login node) ---
 if [ -z "$SLURM_JOB_ID" ]; then
@@ -27,7 +27,7 @@ if [ -z "$SLURM_JOB_ID" ]; then
     exec sbatch \
         --output="$RUN_DIR/slurm_%j.out" \
         --error="$RUN_DIR/slurm_%j.err" \
-        --mail-type=END,FAIL \
+        --mail-type=ALL \
         --mail-user="$NOTIFY_EMAIL" \
         --export=ALL,REPO_DIR="$REPO_DIR" \
         "$0" "$@"
@@ -35,6 +35,7 @@ fi
 
 # --- Actual job (runs on compute node) ---
 set -eo pipefail
+export PYTHONUNBUFFERED=1  # flush prints immediately to SLURM logs
 
 # REPO_DIR is passed by the self-submitting wrapper via --export.
 # Fallback for direct sbatch invocation (prefer 'bash job.sh' instead).
