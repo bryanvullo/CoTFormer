@@ -3,7 +3,8 @@
 #SBATCH --partition=ecsstudents_l4
 #SBATCH --account=ecsstudents
 #SBATCH --nodes=1
-#SBATCH --cpus-per-gpu=8
+#SBATCH --ntasks=1
+#SBATCH --cpus-per-task=16
 #SBATCH --gres=gpu:2
 #SBATCH --mem=48G
 #SBATCH --time=24:00:00
