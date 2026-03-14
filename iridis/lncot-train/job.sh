@@ -4,8 +4,8 @@
 #SBATCH --account=ecsstudents
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
-#SBATCH --cpus-per-task=16
-#SBATCH --gres=gpu:2
+#SBATCH --cpus-per-task=32
+#SBATCH --gres=gpu:4
 #SBATCH --mem=48G
 #SBATCH --time=24:00:00
 ################################################################################
@@ -40,7 +40,7 @@
 # ========================= CONFIGURATION ====================================
 # Adjust these to match your --gres and architecture choices.
 
-N_GPUS=2          # Must match --gres=gpu:N above
+N_GPUS=4          # Must match --gres=gpu:N above
 N_LAYER=24        # Paper uses 24 for LN-CoTFormer (Table 2). Change to 12 if needed.
 N_REPEAT=5        # Number of block repeats
 ITERATIONS=40000  # Training steps

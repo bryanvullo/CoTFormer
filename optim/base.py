@@ -107,6 +107,14 @@ def train_base(model, opt, data, data_seed, scheduler, iterations, acc_steps, ba
         opt.zero_grad(set_to_none=True)
         itr += 1
 
+        # Lightweight progress line between full evals (every 10 steps)
+        if itr % 10 == 0 and itr % eval_freq != 0 and distributed_backend.is_master_process():
+            elapsed = time.time() - t0
+            ms_per_step = elapsed * 1000 / (itr % eval_freq or 10)
+            steps_left = iterations - itr
+            eta_h = (steps_left * ms_per_step) / 3.6e6
+            print(f"  step {itr}/{iterations}  loss={loss.item() * acc_steps:.3f}  grad={grad_norm:.3f}  {ms_per_step:.0f}ms/step  ETA ~{eta_h:.1f}h", flush=True)
+
         if itr % eval_freq == 0 or itr == iterations: # from here it's only evaluation code, all the training is above
             if distributed_backend.is_master_process():
                 t1 = time.time()
