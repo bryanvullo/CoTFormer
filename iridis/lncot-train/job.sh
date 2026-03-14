@@ -44,9 +44,9 @@ N_GPUS=2          # Must match --gres=gpu:N above
 N_LAYER=24        # Paper uses 24 for LN-CoTFormer (Table 2). Change to 12 if needed.
 N_REPEAT=5        # Number of block repeats
 ITERATIONS=40000  # Training steps
-BATCH_SIZE=32     # Per-GPU batch size (DDP divides this further)
-ACC_STEPS=4       # Gradient accumulation steps (DDP divides this further)
-                  # Effective batch size = BATCH_SIZE * ACC_STEPS = 128
+BATCH_SIZE=16     # Per-GPU batch size (DDP does NOT divide this — it halves acc_steps)
+ACC_STEPS=8       # Gradient accumulation steps (DDP halves: per-GPU=4)
+                  # Effective batch size = BATCH_SIZE * (ACC_STEPS/world_size) * world_size = 128
 CKPT_FREQ=2000    # Save checkpoint every N steps
 
 # Reserved layers (prefix/suffix not repeated):
