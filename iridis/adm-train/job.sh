@@ -4,8 +4,8 @@
 #SBATCH --account=ecsstudents
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
-#SBATCH --cpus-per-task=8
-#SBATCH --gres=gpu:4
+#SBATCH --cpus-per-task=16
+#SBATCH --gres=gpu:2
 #SBATCH --mem=48G
 #SBATCH --time=24:00:00
 ################################################################################
@@ -35,7 +35,7 @@
 
 # ========================= CONFIGURATION ====================================
 
-N_GPUS=4          # Must match --gres=gpu:N above
+N_GPUS=2          # Must match --gres=gpu:N above
 N_LAYER=24        # Paper uses 24 for adaptive model
 N_REPEAT=5        # Max repeats (router decides per-token)
 ITERATIONS=60000  # 60k steps (paper Section 4.2)
