@@ -1,3 +1,4 @@
+numpy<2  # PyTorch 2.2 C API requires NumPy 1.x (_ARRAY_API not found with NumPy 2.x)
 orjson
 tiktoken
 --find-links https://download.pytorch.org/whl/torch_stable.html
