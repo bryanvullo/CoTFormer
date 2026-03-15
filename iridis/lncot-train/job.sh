@@ -6,7 +6,7 @@
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=16
 #SBATCH --gres=gpu:2
-#SBATCH --mem=96G
+#SBATCH --mem=128G
 #SBATCH --time=24:00:00
 ################################################################################
 # LN-CoTFormer Training — iridis/lncot-train
@@ -44,8 +44,8 @@ N_GPUS=2          # Must match --gres=gpu:N above
 N_LAYER=24        # Paper uses 24 for LN-CoTFormer (Table 2). Change to 12 if needed.
 N_REPEAT=5        # Number of block repeats
 ITERATIONS=40000  # Training steps
-BATCH_SIZE=16     # Per-GPU batch size (DDP does NOT divide this — it halves acc_steps)
-ACC_STEPS=8       # Gradient accumulation steps (DDP halves: per-GPU=4)
+BATCH_SIZE=8      # Per-GPU micro-batch (L4 24GB OOMs at 16 with 108 effective layers)
+ACC_STEPS=16      # Gradient accumulation steps (DDP halves: per-GPU=8)
                   # Effective batch size = BATCH_SIZE * (ACC_STEPS/world_size) * world_size = 128
 CKPT_FREQ=2000    # Save checkpoint every N steps
 
@@ -171,6 +171,9 @@ TRAIN_ARGS=(
 )
 
 # --- Launch ---
+# Reduce VRAM fragmentation (1.78 GiB reserved-but-unallocated caused OOM at batch=16)
+export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+
 if [ "$N_GPUS" -gt 1 ]; then
     export OMP_NUM_THREADS=1
     RDZV_HOST=$(hostname)

@@ -6,7 +6,7 @@
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=16
 #SBATCH --gres=gpu:2
-#SBATCH --mem=96G
+#SBATCH --mem=128G
 #SBATCH --time=24:00:00
 ################################################################################
 # Adaptive LN-CoTFormer (ADM) Training — iridis/adm-train
@@ -39,8 +39,8 @@ N_GPUS=2          # Must match --gres=gpu:N above
 N_LAYER=24        # Paper uses 24 for adaptive model
 N_REPEAT=5        # Max repeats (router decides per-token)
 ITERATIONS=60000  # 60k steps (paper Section 4.2)
-BATCH_SIZE=16     # Smaller batch — router + cross-repeat caching uses more VRAM
-ACC_STEPS=8       # Gradient accumulation (eff BS = 16 * 8 = 128)
+BATCH_SIZE=8      # Per-GPU micro-batch (L4 24GB OOMs at 16 with 108 effective layers)
+ACC_STEPS=16      # Gradient accumulation (DDP halves: per-GPU=8, eff BS = 8*16 = 128)
 CKPT_FREQ=2000    # Save every 2000 steps
 
 # Reserved layers:
@@ -159,6 +159,9 @@ TRAIN_ARGS=(
 )
 
 # --- Launch ---
+# Reduce VRAM fragmentation (L4 24GB is tight for 108 effective layers)
+export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+
 if [ "$N_GPUS" -gt 1 ]; then
     export OMP_NUM_THREADS=1
     RDZV_HOST=$(hostname)

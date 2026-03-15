@@ -79,6 +79,50 @@ offsets into the memmap file, making physical token ordering irrelevant.
 
 ---
 
+## 3. Micro-Batch Size (Hardware-Constrained)
+
+**Impact:** Negligible (statistically equivalent gradients)
+
+The original codebase was developed on A100 80 GB GPUs. Our training runs on
+2x NVIDIA L4 (24 GB each) via DDP, which constrains the per-GPU micro-batch
+size.
+
+### What changed
+
+The effective batch size is preserved at 128 tokens/step, but the micro-batch
+/ accumulation split differs:
+
+| Setting | Paper (assumed A100) | Ours (2x L4 24 GB) |
+|---------|---------------------|---------------------|
+| `batch_size` (per GPU) | Unspecified (likely 32+) | 8 |
+| `acc_steps` (per GPU) | Unspecified | 8 (16 before DDP halving) |
+| Effective batch size | 128 | 128 |
+
+### Why it diverges numerically
+
+With loss normalisation `loss = outputs['loss'] / acc_steps`, gradient
+accumulation is mathematically equivalent regardless of micro-batch size.
+However, floating-point addition is non-associative: accumulating 8
+micro-batches of 8 samples produces different rounding than 4 micro-batches
+of 16 samples (or any other decomposition). Under bfloat16 autocast, these
+rounding differences are amplified compared to float32.
+
+### Impact assessment
+
+The expected gradient is identical. Only the accumulation noise floor changes,
+and it is dwarfed by stochastic minibatch sampling noise. No measurable effect
+on final perplexity.
+
+### Additional hardware-driven settings
+
+| Setting | Value | Reason |
+|---------|-------|--------|
+| `PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True` | Enabled | Reduces VRAM fragmentation on 24 GB GPUs |
+| `find_unused_parameters` (DDP) | `False` | No unused params; avoids extra autograd traversal |
+| `--mem` (SLURM) | 128 GB | `--data_in_ram` with 2 DDP workers needs >96 GB system RAM |
+
+---
+
 ## References
 
 [cotformer-paper]: https://openreview.net/forum?id=7igPXQFupX
