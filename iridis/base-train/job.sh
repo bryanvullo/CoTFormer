@@ -10,7 +10,7 @@
 #SBATCH --nodes=1
 #SBATCH -p l4               # partition
 #SBATCH --gres=gpu:1        # request 1 GPU
-#SBATCH --mem=20000         # use 20GB memory
+#SBATCH --mem=128G          # use 20GB memory
 #SBATCH --time=60:00:00     # max wall time is 60 hrs
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=4
@@ -19,7 +19,12 @@
 # --- Activate your env ---
 REPO_DIR="$HOME/CoTFormer"
 source "$REPO_DIR/iridis/env.sh"
-conda activate /scratch/bv1g22/cotformer-env  
+module load conda
+eval "$(conda shell.bash hook)"
+conda activate /scratch/ab3u21/cotformer-env 
+
+# WandB offline (compute nodes have no internet)
+export WANDB_MODE=offline
 
 # --- Sanity checks (first run) ---
 # --- Package Configuration ---
@@ -54,11 +59,11 @@ TRAIN_ARGS=(
     --n_embd 768
     --n_head 12
     --n_layer 12
-    --n_repeat 3
-    --batch_size 128
+    --batch_size 64
     --sequence_length 256
-    --acc_steps 16
+    --acc_steps 2
     --dropout 0.0
+    --compile
     --iterations 40000
     --dataset owt2
     --data_dir "$DATA_DIR"
