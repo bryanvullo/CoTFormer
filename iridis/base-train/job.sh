@@ -19,6 +19,7 @@
 # --- Activate your env ---
 REPO_DIR="$HOME/CoTFormer"
 source "$REPO_DIR/iridis/env.sh"
+conda activate /scratch/bv1g22/cotformer-env  
 
 # --- Sanity checks (first run) ---
 # --- Package Configuration ---
