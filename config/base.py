@@ -123,9 +123,9 @@ def parse_args(base_parser, args, namespace):
         parser.set_defaults(data_seed=args.seed)
     
     if args.exp_name is None:
-        special_name_handle_fields = {"model", "lr", "batch_size", 
-                                      "acc_steps", "seed", "exp_name", 
-                                      "wandb", "wandb_project", "eval_seq_prefix", 
+        special_name_handle_fields = {"model", "lr", "batch_size",
+                                      "acc_steps", "seed", "exp_name",
+                                      "wandb", "wandb_project", "eval_seq_prefix",
                                       "run_prefix", "distributed_backend", "config_format",
                                       "sequence_length", "remove_intermediary_checkpoints_at_end"}
         overriden_values = []

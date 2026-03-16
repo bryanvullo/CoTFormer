@@ -164,6 +164,7 @@ TRAIN_ARGS=(
     --depth_embedding linear_learned
     --save_checkpoint_freq "$CKPT_FREQ"
     --results_base_folder "$EXPS_DIR"
+    --exp_name "cotformer_full_depth_lnmid_depthemb_lr0.001_bs${BATCH_SIZE}x${ACC_STEPS}_seqlen256"
     --use_pretrained auto
     --wandb
     --wandb_project rcotformer
