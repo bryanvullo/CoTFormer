@@ -19,6 +19,7 @@
 # --- Activate your env ---
 REPO_DIR="$HOME/CoTFormer"
 source "$REPO_DIR/iridis/env.sh"
+conda activate /scratch/bv1g22/cotformer-env  
 
 # --- Sanity checks (first run) ---
 # --- Package Configuration ---
@@ -49,7 +50,7 @@ fi
 # --- Build training args ---
 TRAIN_ARGS=(
     --config_format base
-    --model cotformer_base
+    --model base
     --n_embd 768
     --n_head 12
     --n_layer 12
