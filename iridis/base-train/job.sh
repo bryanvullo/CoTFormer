@@ -49,7 +49,7 @@ fi
 # --- Build training args ---
 TRAIN_ARGS=(
     --config_format base
-    --model cotformer_base
+    --model base
     --n_embd 768
     --n_head 12
     --n_layer 12
