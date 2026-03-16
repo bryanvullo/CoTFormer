@@ -10,6 +10,7 @@
 - [2. Token Ordering Within Bins](#2-token-ordering-within-bins)
 - [3. Micro-Batch Size (Hardware-Constrained)](#3-micro-batch-size-hardware-constrained)
 - [4. RNG State Restoration on DDP Resume (ADM)](#4-rng-state-restoration-on-ddp-resume-adm)
+- [5. Base Model changes](#5-base-discrepancy)
 - [References](#references)
 
 ---
@@ -176,6 +177,10 @@ torch.cuda.set_rng_state(checkpoint[f"gpu_rng_state_{local_rank}"])
 
 Until this is implemented, ADM job chaining across SLURM timeouts will
 have non-reproducible dropout/depth sequences at resume boundaries.
+
+## 5. Base Model Changes
+
+discrepancy found between the paper and `experiments.md` file. Paper states they use a batch size of 128 where as the `md` file states 64. I opted to use a size of 64 due to GPU memory constraints. 
 
 ---
 
