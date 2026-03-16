@@ -8,6 +8,8 @@
 
 - [1. Train/Val Split Divergence](#1-trainval-split-divergence)
 - [2. Token Ordering Within Bins](#2-token-ordering-within-bins)
+- [3. Micro-Batch Size (Hardware-Constrained)](#3-micro-batch-size-hardware-constrained)
+- [4. RNG State Restoration on DDP Resume (ADM)](#4-rng-state-restoration-on-ddp-resume-adm)
 - [References](#references)
 
 ---
@@ -120,6 +122,60 @@ on final perplexity.
 | `PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True` | Enabled | Reduces VRAM fragmentation on 24 GB GPUs |
 | `find_unused_parameters` (DDP) | `False` | No unused params; avoids extra autograd traversal |
 | `--mem` (SLURM) | 128 GB | `--data_in_ram` with 2 DDP workers needs >96 GB system RAM |
+
+---
+
+## 4. RNG State Restoration on DDP Resume (ADM)
+
+**Impact:** None for LN-CoTFormer; potential divergence for ADM training
+
+**Status:** Open — to be resolved before ADM training begins.
+
+### Background
+
+Checkpoint saving (`optim/base.py:207-210`) records four RNG states:
+`cpu_rng_state`, `gpu_rng_state`, `numpy_rng_state`, `py_rng_state`.
+On resume, these are loaded (`main.py:152-162`) but **never restored** —
+the calls in `optim/base.py:63-67` are commented out.
+
+### Why it doesn't affect LN-CoTFormer
+
+The LN-CoTFormer (`cotformer_full_depth_lnmid_depthemb`) has no runtime
+randomness: `dropout=0.0` (all `nn.Dropout` are no-ops) and a fixed
+repeat loop (`range(1, n_repeat+1)`). The `depth_random_method` arg is
+unused by this model variant. Training is fully deterministic modulo cuDNN
+kernel selection.
+
+### Why it will affect ADM training
+
+The ADM model (`but_full_depth` / adaptive variants) uses `torch.randint`
+for depth sampling during forward passes (via `_predict_depth`), and will
+likely train with `dropout > 0`. Both consume CUDA RNG state, so a resume
+without RNG restoration produces different dropout masks and depth
+schedules than a continuous run.
+
+### DDP bug preventing naive fix
+
+Simply uncommenting lines 63-67 is **incorrect** under DDP. The checkpoint
+is saved only by rank 0 (`if distributed_backend.is_master_process()`), so
+the stored `gpu_rng_state` belongs to GPU 0. On resume, all ranks load the
+same file — rank 1 would receive rank 0's CUDA state, giving both GPUs
+identical dropout masks and breaking statistical independence.
+
+### Fix required (before ADM training)
+
+Save per-rank RNG states by writing one checkpoint per rank, or embedding
+a dict keyed by rank:
+
+```python
+# Save (rank-aware)
+rng_states = {f"gpu_rng_state_{rank}": torch.cuda.get_rng_state(rank) for rank in range(world_size)}
+# Restore (rank-aware)
+torch.cuda.set_rng_state(checkpoint[f"gpu_rng_state_{local_rank}"])
+```
+
+Until this is implemented, ADM job chaining across SLURM timeouts will
+have non-reproducible dropout/depth sequences at resume boundaries.
 
 ---
 
