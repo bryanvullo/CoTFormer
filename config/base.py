@@ -139,11 +139,11 @@ def parse_args(base_parser, args, namespace):
         for chunk_id in range(0, len(overriden_values), chunk_len):
             overriden_values_str = "_".join(["{}={}".format(key, value) for key, value in overriden_values[chunk_id:chunk_id+chunk_len]])
             overriden_values_str_parts.append(overriden_values_str)
-        overriden_values_str = "/".join(overriden_values_str_parts)
+        overriden_values_str = "__".join(overriden_values_str_parts)
         exp_name = ""
         if args.run_prefix is not None:
             exp_name += f"{args.run_prefix}_"
-        exp_name += f"{args.model}_lr{args.lr}_bs{args.batch_size}x{args.acc_steps}_seqlen{args.sequence_length}/{overriden_values_str}_seed={args.seed}"
+        exp_name += f"{args.model}_lr{args.lr}_bs{args.batch_size}x{args.acc_steps}_seqlen{args.sequence_length}__{overriden_values_str}_seed={args.seed}"
         args.exp_name = exp_name
 
     if args.dtype == "torch.bfloat16":
