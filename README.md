@@ -262,6 +262,8 @@ CKPT_FREQ=2000    # Checkpoint frequency
 
 Effective batch size = `BATCH_SIZE * ACC_STEPS` = 128 (matching the paper). DDP divides `ACC_STEPS` by the world size, not `BATCH_SIZE` — each GPU processes the full micro-batch.
 
+> **GPU memory allocator:** `PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True` is set in `iridis/env.sh` and applies to all GPU jobs. It reduces VRAM fragmentation on L4 24 GB GPUs. No action needed — it is sourced automatically.
+
 ### Manual Training (without job packages)
 
 For local development or custom experiments:

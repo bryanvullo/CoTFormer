@@ -160,9 +160,6 @@ TRAIN_ARGS=(
 )
 
 # --- Launch ---
-# Reduce VRAM fragmentation (L4 24GB is tight for 108 effective layers)
-export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
-
 if [ "$N_GPUS" -gt 1 ]; then
     export OMP_NUM_THREADS=1
     RDZV_HOST=$(hostname)

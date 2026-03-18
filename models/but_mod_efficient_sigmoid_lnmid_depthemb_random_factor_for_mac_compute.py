@@ -328,7 +328,7 @@ class GPTBase(nn.Module):
                 for _ in range(config.n_layer - config.n_layer_end, config.n_layer)]),
             ln_f = LayerNorm(config.n_embd, bias=config.bias),
             ln_mid = nn.Identity() if config.disable_ln_mid else LayerNorm(config.n_embd, bias=config.bias),
-            mod = nn.ModuleList([MoDBlock(config) for _ in range(self.n_repeat)])
+            mod = nn.ModuleList([MoDBlock(config) for _ in range(self.n_repeat - 1)])
         ))
 
         self.lm_head = nn.Linear(config.n_embd, config.vocab_size, bias=False)

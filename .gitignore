@@ -25,6 +25,9 @@ __pycache__/
 # BIG images
 *.sif
 
+# Reference PDFs (paper, etc.)
+refs/
+
 # Distribution / packaging
 .Python
 build/

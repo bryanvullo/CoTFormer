@@ -25,6 +25,11 @@ export WANDB_DIR="$SHARED_SCRATCH/.cache/wandb"
 export PIP_CACHE_DIR="$SHARED_SCRATCH/.cache/pip"
 export CONDA_PKGS_DIRS="$SHARED_SCRATCH/.conda/pkgs"
 
+# --- GPU memory allocator (PyTorch) ---
+# Reduces VRAM fragmentation on L4 24 GB (1.78 GiB reserved-but-unallocated
+# without it). Harmless on CPU-only jobs — PyTorch ignores it without CUDA.
+export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+
 # --- SLURM email notifications ---
 # Uses Southampton email derived from $USER. Override in ~/.bash_aliases if needed.
 export NOTIFY_EMAIL="${USER}@soton.ac.uk"

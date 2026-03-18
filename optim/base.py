@@ -60,11 +60,13 @@ def train_base(model, opt, data, data_seed, scheduler, iterations, acc_steps, ba
 
     t0 = time.time()
     
-    #if rng_state_dict is not  None:
-    #    torch.set_rng_state(rng_state_dict["cpu_rng_state"])
-    #    torch.cuda.set_rng_state(rng_state_dict["gpu_rng_state"])
-    #    np.random.set_state(rng_state_dict["numpy_rng_state"])
-    #    random.setstate(rng_state_dict["py_rng_state"])
+    if rng_state_dict is not None:
+        torch.set_rng_state(rng_state_dict["cpu_rng_state"])
+        np.random.set_state(rng_state_dict["numpy_rng_state"])
+        random.setstate(rng_state_dict["py_rng_state"])
+        # GPU RNG: NOT restored here — checkpoint only has rank 0's state.
+        # Restoring it on all ranks would collapse CUDA RNG independence.
+        # See docs/reprod-notes.md B4 § "DDP complication".
     for _ in range(substep % num_substeps_per_epoch):
         get_batch(data_train_iter, device=extra_args.device)
 
@@ -223,6 +225,11 @@ def train_base(model, opt, data, data_seed, scheduler, iterations, acc_steps, ba
                         opt=opt,
                         scheduler=scheduler,
                         itr=itr,
+                        cpu_rng_state=torch.get_rng_state(),
+                        gpu_rng_state=torch.cuda.get_rng_state(),
+                        numpy_rng_state=np.random.get_state(),
+                        py_rng_state=random.getstate(),
+                        train_sampler_state=sampler_state_before_iter,
                         ckpt_path=f"{ckpt_path}/ckpt.pt")
         if extra_args.remove_intermediary_checkpoints_at_end:
             for file_ in os.listdir(ckpt_path):

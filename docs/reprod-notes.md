@@ -17,6 +17,9 @@
   - [B3. Micro-Batch Size (Hardware-Constrained)](#b3-micro-batch-size-hardware-constrained)
   - [B4. RNG State Restoration on DDP Resume (ADM)](#b4-rng-state-restoration-on-ddp-resume-adm)
   - [B5. Base Model Batch Size](#b5-base-model-batch-size)
+  - [B6. Orphan MoDBlock in Adaptive/MoD Models — Resolved](#b6-orphan-modblock-in-adaptivemod-models--resolved)
+  - [B7. Training Summary Metrics Never Recorded (Original Code Bug) — Resolved](#b7-training-summary-metrics-never-recorded-original-code-bug--resolved)
+  - [B8. Missing `nullcontext` Import in `eval.py` (Original Code Bug) — Resolved](#b8-missing-nullcontext-import-in-evalpy-original-code-bug--resolved)
 - [References](#references)
 
 ---
@@ -192,7 +195,7 @@ on final perplexity.
 | Setting | Value | Reason |
 |---------|-------|--------|
 | `PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True` | Enabled | Reduces VRAM fragmentation on 24 GB GPUs |
-| `find_unused_parameters` (DDP) | `False` | No unused params; avoids extra autograd traversal |
+| `find_unused_parameters` (DDP) | `False` | No unused params after B6 fix; avoids extra autograd traversal |
 | `--mem` (SLURM) | 128 GB | `--data_in_ram` with 2 DDP workers needs >96 GB system RAM |
 
 ---
@@ -238,6 +241,16 @@ the stored `gpu_rng_state` belongs to GPU 0. On resume, all ranks load the
 same file — rank 1 would receive rank 0's CUDA state, giving both GPUs
 identical random sequences and breaking statistical independence.
 
+### Final checkpoint omits RNG states entirely
+
+The intermediary checkpoint (`optim/base.py:207-215`) saves all four RNG
+states, but the final end-of-training checkpoint (`optim/base.py:219-226`)
+omits them entirely. If a final checkpoint were used for continued training
+(e.g., extending past the iteration limit), `main.py:152-162` would
+`KeyError` on `cpu_rng_state`. Currently low risk since final checkpoints
+are not resumed in our workflow, but creates an asymmetry with intermediary
+checkpoints that would surface if the training schedule were ever extended.
+
 ### Practical impact
 
 At 60k steps with ~24h SLURM wall limit, the ADM requires 2-3 submissions.
@@ -257,6 +270,121 @@ job boundaries is not achievable.
 Discrepancy found between the paper and `experiments.md` file. Paper states
 they use a batch size of 128 whereas the `md` file states 64. We opted to
 use a size of 64 due to GPU memory constraints.
+
+---
+
+## B6. Orphan MoDBlock in Adaptive/MoD Models — Resolved
+
+**Impact:** Fatal crash under DDP; no impact on single-GPU training
+**Status:** Resolved and verified under 2-GPU DDP.
+
+### Background
+
+All model variants using `MoDBlock` (the Mixture-of-Repeats router) create
+`n_repeat` router modules in `__init__`:
+
+```python
+mod = nn.ModuleList([MoDBlock(config) for _ in range(self.n_repeat)])
+```
+
+However, the forward loop only routes tokens for repeats 1 through
+`n_repeat - 1`. The final repeat has no routing decision — all remaining
+tokens are unconditionally "final". As a result, `mod[n_repeat - 1]` is
+never called and its `mod_router.weight` parameter (768 floats) never
+participates in the autograd graph.
+
+### Why the original codebase doesn't crash
+
+The paper's experiments were run on single NVIDIA A100 80 GB GPUs (no DDP).
+PyTorch only enforces gradient reduction checks in
+`DistributedDataParallel`. On single-GPU, unused parameters are silently
+ignored.
+
+### How it manifests under DDP
+
+With `find_unused_parameters=False` (set in `distributed/ddp.py`), DDP
+detects on iteration 2 that parameter index 152 did not receive a gradient
+in the prior iteration and raises:
+
+```
+RuntimeError: Expected to have finished reduction in the prior iteration
+before starting a new one. [...] Parameter indices which did not receive
+grad for rank 0: 152
+```
+
+Index 152 corresponds to `transformer.mod[4].mod_router.weight` for the
+24-layer adaptive model with `n_repeat=5`.
+
+### Fix
+
+Changed `range(self.n_repeat)` to `range(self.n_repeat - 1)` in all 5
+affected model files. This removes the orphan router module without
+changing model behaviour — the removed module was never executed.
+
+DDP training with `find_unused_parameters=False` now completes without
+the parameter index 152 error. The `length_factors` generation (which
+already used `n_repeat - 1` elements) is unaffected by the change.
+
+### Affected files (all from original commit `2723e30`)
+
+1. `models/adaptive_cotformer_mod_efficient_sigmoid_crw_lnmid_de_random_factor_single_final.py`
+2. `models/but_mod_efficient_sigmoid_lnmid_depthemb_random_factor.py`
+3. `models/but_mod_efficient_sigmoid_lnmid_depthemb_random_factor_for_mac_compute.py`
+4. `models/models/adaptive_cotformer_mod_efficient_sigmoid_crw_lnmid_de_random_factor_single_final.py`
+5. `models/models/but_mod_efficient_sigmoid_lnmid_depthemb_random_factor_for_mac_compute.py`
+
+---
+
+## B7. Training Summary Metrics Never Recorded (Original Code Bug) — Resolved
+
+**Impact:** Training curve data lost in `summary.json`; no effect on model
+quality or training correctness
+**Status:** Resolved.
+
+### Background
+
+The `stats` dictionary in `optim/base.py` was initialised (line 44) with
+empty lists for `train_loss`, `val_loss`, `val_pp`, and `val_acc`, and
+returned to `main.py` for serialisation to `summary.json`. However, the
+corresponding `stats[...].append(...)` calls were never present in the
+original codebase — the lists were always empty. As a result, every
+`summary.json` written by the original code (and our initial runs)
+contained empty metric arrays, making post-hoc training curve
+reconstruction from the summary file impossible.
+
+Training correctness was unaffected: the metrics were computed, logged to
+stdout and wandb, and used for checkpoint decisions — they simply were
+never persisted to the JSON summary.
+
+### Fix
+
+Added `stats["train_loss"].append(train_loss)` (and corresponding
+`val_loss`, `val_pp`, `val_acc` appends) inside the master-process
+evaluation block (`optim/base.py:155-158`). The stats dict is only
+populated and written by rank 0, which is correct — `main.py:186-188`
+guards the `json.dump(stats, ...)` call with
+`distributed_backend.is_master_process()`.
+
+---
+
+## B8. Missing `nullcontext` Import in `eval.py` (Original Code Bug) — Resolved
+
+**Impact:** `NameError` crash on CPU-only evaluation; no impact on GPU runs
+**Status:** Resolved.
+
+### Background
+
+`eval.py` uses `nullcontext()` (line 76) as the no-op alternative to
+`torch.amp.autocast` when running without a CUDA device. However, the
+`from contextlib import nullcontext` import was missing from the original
+codebase. On GPU runs (all Iridis jobs), the `torch.amp.autocast` branch
+is taken and `nullcontext` is never evaluated, so the bug was latent.
+A CPU evaluation run (e.g., local testing without GPU) would crash with
+`NameError: name 'nullcontext' is not defined`.
+
+### Fix
+
+Added `from contextlib import nullcontext` to the imports in `eval.py`.
 
 ---
 

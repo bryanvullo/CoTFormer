@@ -149,17 +149,18 @@ def main(args):
         # FIXME checkpoints from compiled model have _orig_mod keyword
 
         optimizer_state_dict = checkpoint['optimizer']
-        rng_state_dict = {
-            module: checkpoint[module] for module in [
-                "cpu_rng_state", 
-                "gpu_rng_state", 
-                "numpy_rng_state", 
-                "py_rng_state",
-                "train_sampler_state"
-            ]
-        }
-        rng_state_dict["gpu_rng_state"] = rng_state_dict["gpu_rng_state"].type(torch.ByteTensor)
-        rng_state_dict["cpu_rng_state"] = rng_state_dict["cpu_rng_state"].cpu().type(torch.ByteTensor)
+        _rng_keys = [
+            "cpu_rng_state",
+            "gpu_rng_state",
+            "numpy_rng_state",
+            "py_rng_state",
+            "train_sampler_state",
+        ]
+        rng_state_dict = {k: checkpoint[k] for k in _rng_keys if k in checkpoint}
+        if "gpu_rng_state" in rng_state_dict:
+            rng_state_dict["gpu_rng_state"] = rng_state_dict["gpu_rng_state"].type(torch.ByteTensor)
+        if "cpu_rng_state" in rng_state_dict:
+            rng_state_dict["cpu_rng_state"] = rng_state_dict["cpu_rng_state"].cpu().type(torch.ByteTensor)
 
         model.load_state_dict(model_state_dict) 
         opt.load_state_dict(optimizer_state_dict)

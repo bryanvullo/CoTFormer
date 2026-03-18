@@ -172,9 +172,6 @@ TRAIN_ARGS=(
 )
 
 # --- Launch ---
-# Reduce VRAM fragmentation (1.78 GiB reserved-but-unallocated caused OOM at batch=16)
-export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
-
 if [ "$N_GPUS" -gt 1 ]; then
     export OMP_NUM_THREADS=1
     RDZV_HOST=$(hostname)

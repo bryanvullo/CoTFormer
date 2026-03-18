@@ -175,9 +175,6 @@ TRAIN_ARGS=(
 )
 
 # --- Launch ---
-# Reduce VRAM fragmentation (helps avoid OOM on L4 24GB)
-export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
-
 if [ "$N_GPUS" -gt 1 ]; then
     export OMP_NUM_THREADS=1
     RDZV_HOST=$(hostname)
