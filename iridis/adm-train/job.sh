@@ -155,6 +155,7 @@ TRAIN_ARGS=(
     --use_pretrained auto
     --wandb
     --wandb_project rcotformer
+    --exp_name "adm_lr0.001_bs${BATCH_SIZE}x${ACC_STEPS}_seqlen256"
     "$@"
 )
 

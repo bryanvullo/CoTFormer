@@ -152,6 +152,11 @@ def train_base(model, opt, data, data_seed, scheduler, iterations, acc_steps, ba
                 print_string += f" [grad_norm] {cur_grad_norm:.4f} [max_grad_norm] {max_grad_norm:.4f}"
                 print(print_string)
 
+                stats["train_loss"].append(train_loss)
+                stats["val_loss"].append(val_loss)
+                stats["val_pp"].append(val_perplexity)
+                stats["val_acc"].append(val_acc)
+
                 # Flag spikes: grad norm > 5x running mean (benign spikes in LN-CoTFormer)
                 if len(grad_norm_accumulator) > eval_freq and max_grad_norm > 5 * mean_grad_norm:
                     print(f"  >> SPIKE WARNING: max_grad_norm={max_grad_norm:.4f} is {max_grad_norm/mean_grad_norm:.1f}x the mean ({mean_grad_norm:.4f})")

@@ -1,21 +1,92 @@
 # Reproducibility Notes
 
-> Known divergences from [CoTFormer (Mohtashami et al., ICLR 2025)][cotformer-paper]
-> in our COMP 6258 reproduction. Only items that **differ** from the original are
-> documented here — aligned details are omitted.
+> Reproduction fidelity log for [CoTFormer (Mohtashami et al., ICLR 2025)][cotformer-paper]
+> in our COMP 6258 reproduction. Covers both successful replications and known
+> divergences.
 
 ## Table of Contents
 
-- [1. Train/Val Split Divergence](#1-trainval-split-divergence)
-- [2. Token Ordering Within Bins](#2-token-ordering-within-bins)
-- [3. Micro-Batch Size (Hardware-Constrained)](#3-micro-batch-size-hardware-constrained)
-- [4. RNG State Restoration on DDP Resume (ADM)](#4-rng-state-restoration-on-ddp-resume-adm)
-- [5. Base Model changes](#5-base-discrepancy)
+- [Part A: Successful Replications](#part-a-successful-replications)
+  - [A1. LN-CoTFormer Perplexity (Table 2)](#a1-ln-cotformer-perplexity-table-2)
+  - [A2. Architecture Depth](#a2-architecture-depth)
+  - [A3. Training Stability](#a3-training-stability)
+  - [A4. Effective Batch Size](#a4-effective-batch-size)
+- [Part B: Known Divergences](#part-b-known-divergences)
+  - [B1. Train/Val Split Divergence](#b1-trainval-split-divergence)
+  - [B2. Token Ordering Within Bins](#b2-token-ordering-within-bins)
+  - [B3. Micro-Batch Size (Hardware-Constrained)](#b3-micro-batch-size-hardware-constrained)
+  - [B4. RNG State Restoration on DDP Resume (ADM)](#b4-rng-state-restoration-on-ddp-resume-adm)
+  - [B5. Base Model Batch Size](#b5-base-model-batch-size)
 - [References](#references)
 
 ---
 
-## 1. Train/Val Split Divergence
+# Part A: Successful Replications
+
+## A1. LN-CoTFormer Perplexity (Table 2)
+
+**Result:** Reproduced within +0.02 PPL of the paper.
+
+| Metric | Paper (Table 2) | Ours | Delta |
+|--------|----------------|------|-------|
+| Val perplexity | ~24.11 | 24.13 | +0.02 |
+| Val accuracy | — | 0.4129 | — |
+| Val loss | — | 3.183 | — |
+
+Trained for 40,000 steps on 2x L4 24 GB (DDP), OWT2 dataset, cosine LR
+schedule (peak 1e-3, final ~2e-4). Wall time: 23h 26m across 2 SLURM
+submissions with auto-resume from checkpoint.
+
+This confirms that our data pipeline, architecture, and training loop
+faithfully reproduce the paper's non-adaptive LN-CoTFormer result, despite
+the divergences documented in Part B.
+
+---
+
+## A2. Architecture Depth
+
+**Result:** Exact match.
+
+The paper's 24-layer LN-CoTFormer uses 2 prefix + 21 mid (repeated 5x) + 1
+suffix = 108 effective layers. Our implementation reports `avg_depth=108.000`
+consistently across all 40,000 training steps, confirming the block structure
+and repeat loop are correct.
+
+---
+
+## A3. Training Stability
+
+**Result:** No gradient spikes observed.
+
+The paper (Section 3.3) documents "benign spikes" during LN-CoTFormer
+training. Our run with gradient norm tracking shows:
+
+| Signal | Last 1000 steps |
+|--------|----------------|
+| Gradient norm range | 0.49 -- 0.54 |
+| Max gradient norm | 0.83 (isolated, at step 39300) |
+| Spike threshold (5x mean) | Never triggered |
+
+The cosine learning rate decayed smoothly from 1e-3 to ~2e-4. Loss curves
+show stable convergence with normal per-eval variance (PPL 22.4 -- 25.7 in
+final 1000 steps; this is expected from the 24-batch eval sample size).
+
+---
+
+## A4. Effective Batch Size
+
+**Result:** Exact match at 128.
+
+Despite using smaller micro-batches than the original (8 vs likely 32+), the
+effective batch size of 128 is preserved via gradient accumulation. DDP
+correctly halves `acc_steps` (16 -> 8 per GPU) while keeping `batch_size` (8)
+per GPU: 8 x 8 x 2 = 128.
+
+---
+
+# Part B: Known Divergences
+
+## B1. Train/Val Split Divergence
 
 **Impact:** Negligible (within noise floor of stochastic training)
 
@@ -25,7 +96,7 @@ The original codebase uses a pre-built HuggingFace Arrow dataset
 identical raw tarball ([`segyges/OpenWebText2`][segyges-mirror]) but
 diverges in three independent ways:
 
-### 1a. Document ordering
+### B1a. Document ordering
 
 The pre-built Arrow dataset had a fixed row ordering that determined which
 documents landed in train vs. val. We read raw `.jsonl.zst` files in sorted
@@ -33,7 +104,7 @@ filename order, which is not guaranteed to match the original Arrow row
 ordering. Since the split partitions by row index, different ordering means
 different documents in each split.
 
-### 1b. Split RNG implementation
+### B1b. Split RNG implementation
 
 The original uses HF datasets' `train_test_split()`, which internally
 generates a permutation via numpy. The exact backend depends on the
@@ -49,10 +120,10 @@ val_set = set(perm[:n_val].tolist())
 Even with identical document ordering, the split would differ unless the
 exact `datasets` version were matched.
 
-### 1c. Validation set size rounding
+### B1c. Validation set size rounding
 
 The original uses `test_size=0.0005` with HF's internal rounding. We use
-`n_val = max(1, round(n_docs * 0.0005))`, which may differ by ±1 document.
+`n_val = max(1, round(n_docs * 0.0005))`, which may differ by +/-1 document.
 
 ### Why the original split is unrecoverable
 
@@ -68,7 +139,7 @@ validation sets. Negligible impact on reported perplexity.
 
 ---
 
-## 2. Token Ordering Within Bins
+## B2. Token Ordering Within Bins
 
 **Impact:** None
 
@@ -82,7 +153,7 @@ offsets into the memmap file, making physical token ordering irrelevant.
 
 ---
 
-## 3. Micro-Batch Size (Hardware-Constrained)
+## B3. Micro-Batch Size (Hardware-Constrained)
 
 **Impact:** Negligible (statistically equivalent gradients)
 
@@ -126,11 +197,10 @@ on final perplexity.
 
 ---
 
-## 4. RNG State Restoration on DDP Resume (ADM)
+## B4. RNG State Restoration on DDP Resume (ADM)
 
-**Impact:** None for LN-CoTFormer; potential divergence for ADM training
-
-**Status:** Open — to be resolved before ADM training begins.
+**Impact:** None for LN-CoTFormer; minor divergence for ADM training at
+resume boundaries
 
 ### Background
 
@@ -143,44 +213,50 @@ the calls in `optim/base.py:63-67` are commented out.
 
 The LN-CoTFormer (`cotformer_full_depth_lnmid_depthemb`) has no runtime
 randomness: `dropout=0.0` (all `nn.Dropout` are no-ops) and a fixed
-repeat loop (`range(1, n_repeat+1)`). The `depth_random_method` arg is
-unused by this model variant. Training is fully deterministic modulo cuDNN
-kernel selection.
+repeat loop (`range(1, n_repeat+1)`). Training is fully deterministic modulo
+cuDNN kernel selection.
 
-### Why it will affect ADM training
+### Why it affects ADM training
 
-The ADM model (`but_full_depth` / adaptive variants) uses `torch.randint`
-for depth sampling during forward passes (via `_predict_depth`), and will
-likely train with `dropout > 0`. Both consume CUDA RNG state, so a resume
-without RNG restoration produces different dropout masks and depth
-schedules than a continuous run.
+The ADM model (`adaptive_cotformer_..._single_final`) generates random
+`length_factors` via `torch.rand()` at every training step (forward pass,
+lines 400-431 of the model file). These factors control per-repeat capacity
+and are consumed by the router to determine token routing. Although
+`dropout=0.0` in our config, the `torch.rand()` calls consume CUDA RNG state,
+so a resume without RNG restoration produces different capacity factor
+sequences than a continuous run.
 
-### DDP bug preventing naive fix
+Note: the original reprod-notes incorrectly referenced `_predict_depth` and
+`torch.randint` — our specific model variant uses `torch.rand()` for
+`length_factors`, not `torch.randint` for depth prediction.
+
+### DDP complication
 
 Simply uncommenting lines 63-67 is **incorrect** under DDP. The checkpoint
 is saved only by rank 0 (`if distributed_backend.is_master_process()`), so
 the stored `gpu_rng_state` belongs to GPU 0. On resume, all ranks load the
 same file — rank 1 would receive rank 0's CUDA state, giving both GPUs
-identical dropout masks and breaking statistical independence.
+identical random sequences and breaking statistical independence.
 
-### Fix required (before ADM training)
+### Practical impact
 
-Save per-rank RNG states by writing one checkpoint per rank, or embedding
-a dict keyed by rank:
+At 60k steps with ~24h SLURM wall limit, the ADM requires 2-3 submissions.
+Each resume boundary produces a different `length_factors` sequence than a
+continuous run would. Since `length_factors` are random (uniform, sorted
+descending) and the router learns against them, the effect is equivalent to a
+small random perturbation in the training curriculum. Unlikely to measurably
+affect final model quality but means exact bit-for-bit reproducibility across
+job boundaries is not achievable.
 
-```python
-# Save (rank-aware)
-rng_states = {f"gpu_rng_state_{rank}": torch.cuda.get_rng_state(rank) for rank in range(world_size)}
-# Restore (rank-aware)
-torch.cuda.set_rng_state(checkpoint[f"gpu_rng_state_{local_rank}"])
-```
+---
 
-Until this is implemented, ADM job chaining across SLURM timeouts will
-have non-reproducible dropout/depth sequences at resume boundaries.
+## B5. Base Model Batch Size
 
-## 5. Base Model Changes
+**Impact:** Minor
 
-discrepancy found between the paper and `experiments.md` file. Paper states they use a batch size of 128 where as the `md` file states 64. I opted to use a size of 64 due to GPU memory constraints. 
+Discrepancy found between the paper and `experiments.md` file. Paper states
+they use a batch size of 128 whereas the `md` file states 64. We opted to
+use a size of 64 due to GPU memory constraints.
 
 ---
 

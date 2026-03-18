@@ -48,7 +48,7 @@
 # Find it under /scratch/ab3u21/exps/owt2/adaptive_cotformer_*/
 #
 # IMPORTANT: Set this to YOUR checkpoint path before submitting!
-CHECKPOINT_DIR="/scratch/ab3u21/exps/owt2/adaptive_cotformer_mod_efficient_sigmoid_crw_lnmid_de_random_factor_single_final_lr0.001_bs16x8_seqlen256"
+CHECKPOINT_DIR="/scratch/ab3u21/exps/owt2/adaptive_cotformer_mod_efficient_sigmoid_crw_lnmid_de_random_factor_single_final/adm_lr0.001_bs8x16_seqlen256"
 
 # ========================= END CONFIGURATION ================================
 
