@@ -1,11 +1,12 @@
 # Reproducibility Notes
 
 > Reproduction fidelity log for [CoTFormer (Mohtashami et al., ICLR 2025)][cotformer-paper]
-> in our COMP 6258 reproduction. Covers both successful replications and known
-> divergences.
+> in our COMP 6258 reproduction. Covers both successful replications and known divergences.
 
 ## Table of Contents
 
+- [Reproducibility Notes](#reproducibility-notes)
+  - [Table of Contents](#table-of-contents)
 - [Part A: Successful Replications](#part-a-successful-replications)
   - [A1. LN-CoTFormer Perplexity (Table 2)](#a1-ln-cotformer-perplexity-table-2)
   - [A2. Architecture Depth](#a2-architecture-depth)
@@ -13,14 +14,38 @@
   - [A4. Effective Batch Size](#a4-effective-batch-size)
 - [Part B: Known Divergences](#part-b-known-divergences)
   - [B1. Train/Val Split Divergence](#b1-trainval-split-divergence)
+    - [B1a. Document ordering](#b1a-document-ordering)
+    - [B1b. Split RNG implementation](#b1b-split-rng-implementation)
+    - [B1c. Validation set size rounding](#b1c-validation-set-size-rounding)
+    - [Why the original split is unrecoverable](#why-the-original-split-is-unrecoverable)
+    - [Impact assessment](#impact-assessment)
   - [B2. Token Ordering Within Bins](#b2-token-ordering-within-bins)
   - [B3. Micro-Batch Size (Hardware-Constrained)](#b3-micro-batch-size-hardware-constrained)
+    - [What changed](#what-changed)
+    - [Why it diverges numerically](#why-it-diverges-numerically)
+    - [Impact assessment](#impact-assessment-1)
+    - [Additional hardware-driven settings](#additional-hardware-driven-settings)
   - [B4. RNG State Restoration on DDP Resume (ADM) — Resolved](#b4-rng-state-restoration-on-ddp-resume-adm--resolved)
+    - [Background](#background)
+    - [Why it doesn't affect LN-CoTFormer](#why-it-doesnt-affect-ln-cotformer)
+    - [Why it affects ADM training](#why-it-affects-adm-training)
+    - [DDP complication (original code)](#ddp-complication-original-code)
+    - [Fix](#fix)
+    - [Practical impact (post-fix)](#practical-impact-post-fix)
   - [B5. Base Model Batch Size](#b5-base-model-batch-size)
   - [B6. Orphan MoDBlock in Adaptive/MoD Models — Resolved](#b6-orphan-modblock-in-adaptivemod-models--resolved)
+    - [Background](#background-1)
+    - [Why the original codebase doesn't crash](#why-the-original-codebase-doesnt-crash)
+    - [How it manifests under DDP](#how-it-manifests-under-ddp)
+    - [Fix](#fix-1)
+    - [Affected files (all from original commit `2723e30`)](#affected-files-all-from-original-commit-2723e30)
   - [B7. Training Summary Metrics Never Recorded (Original Code Bug) — Resolved](#b7-training-summary-metrics-never-recorded-original-code-bug--resolved)
+    - [Background](#background-2)
+    - [Fix](#fix-2)
   - [B8. Missing `nullcontext` Import in `eval.py` (Original Code Bug) — Resolved](#b8-missing-nullcontext-import-in-evalpy-original-code-bug--resolved)
-- [References](#references)
+    - [Background](#background-3)
+    - [Fix](#fix-3)
+  - [References](#references)
 
 ---
 
