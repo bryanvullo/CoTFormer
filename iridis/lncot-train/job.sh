@@ -42,7 +42,7 @@
 
 N_GPUS=2          # Must match --gres=gpu:N above
 N_LAYER=24        # Paper uses 24 for LN-CoTFormer (Table 2). Change to 12 if needed.
-N_REPEAT=5        # Number of block repeats
+N_REPEAT=5        # Number of block repeats - same as Table 2
 ITERATIONS=40000  # Training steps
 BATCH_SIZE=8      # Per-GPU micro-batch (L4 24GB OOMs at 16 with 108 effective layers)
 ACC_STEPS=16      # Gradient accumulation steps (DDP halves: per-GPU=8)

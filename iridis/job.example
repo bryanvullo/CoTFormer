@@ -8,6 +8,8 @@
 #SBATCH --gres=gpu:2
 #SBATCH --mem=128G
 #SBATCH --time=24:00:00
+#SBATCH --mail-type=ALL
+#SBATCH --mail-user=your_email@example.com
 ################################################################################
 # Slurm Job Script Template for Iridis X
 #

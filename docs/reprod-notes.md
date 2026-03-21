@@ -1,11 +1,12 @@
 # Reproducibility Notes
 
 > Reproduction fidelity log for [CoTFormer (Mohtashami et al., ICLR 2025)][cotformer-paper]
-> in our COMP 6258 reproduction. Covers both successful replications and known
-> divergences.
+> in our COMP 6258 reproduction. Covers both successful replications and known divergences.
 
 ## Table of Contents
 
+- [Reproducibility Notes](#reproducibility-notes)
+  - [Table of Contents](#table-of-contents)
 - [Part A: Successful Replications](#part-a-successful-replications)
   - [A1. LN-CoTFormer Perplexity (Table 2)](#a1-ln-cotformer-perplexity-table-2)
   - [A2. Architecture Depth](#a2-architecture-depth)
@@ -14,14 +15,38 @@
   - [A5. ADM Perplexity (Section 4.2, Figure 4)](#a5-adm-perplexity-section-42-figure-4)
 - [Part B: Known Divergences](#part-b-known-divergences)
   - [B1. Train/Val Split Divergence](#b1-trainval-split-divergence)
+    - [B1a. Document ordering](#b1a-document-ordering)
+    - [B1b. Split RNG implementation](#b1b-split-rng-implementation)
+    - [B1c. Validation set size rounding](#b1c-validation-set-size-rounding)
+    - [Why the original split is unrecoverable](#why-the-original-split-is-unrecoverable)
+    - [Impact assessment](#impact-assessment)
   - [B2. Token Ordering Within Bins](#b2-token-ordering-within-bins)
   - [B3. Micro-Batch Size (Hardware-Constrained)](#b3-micro-batch-size-hardware-constrained)
-  - [B4. RNG State Restoration on DDP Resume (ADM)](#b4-rng-state-restoration-on-ddp-resume-adm)
+    - [What changed](#what-changed)
+    - [Why it diverges numerically](#why-it-diverges-numerically)
+    - [Impact assessment](#impact-assessment-1)
+    - [Additional hardware-driven settings](#additional-hardware-driven-settings)
+  - [B4. RNG State Restoration on DDP Resume (ADM) — Resolved](#b4-rng-state-restoration-on-ddp-resume-adm--resolved)
+    - [Background](#background)
+    - [Why it doesn't affect LN-CoTFormer](#why-it-doesnt-affect-ln-cotformer)
+    - [Why it affects ADM training](#why-it-affects-adm-training)
+    - [DDP complication (original code)](#ddp-complication-original-code)
+    - [Fix](#fix)
+    - [Practical impact (post-fix)](#practical-impact-post-fix)
   - [B5. Base Model Batch Size](#b5-base-model-batch-size)
   - [B6. Orphan MoDBlock in Adaptive/MoD Models — Resolved](#b6-orphan-modblock-in-adaptivemod-models--resolved)
+    - [Background](#background-1)
+    - [Why the original codebase doesn't crash](#why-the-original-codebase-doesnt-crash)
+    - [How it manifests under DDP](#how-it-manifests-under-ddp)
+    - [Fix](#fix-1)
+    - [Affected files (all from original commit `2723e30`)](#affected-files-all-from-original-commit-2723e30)
   - [B7. Training Summary Metrics Never Recorded (Original Code Bug) — Resolved](#b7-training-summary-metrics-never-recorded-original-code-bug--resolved)
+    - [Background](#background-2)
+    - [Fix](#fix-2)
   - [B8. Missing `nullcontext` Import in `eval.py` (Original Code Bug) — Resolved](#b8-missing-nullcontext-import-in-evalpy-original-code-bug--resolved)
-- [References](#references)
+    - [Background](#background-3)
+    - [Fix](#fix-3)
+  - [References](#references)
 
 ---
 
@@ -291,17 +316,20 @@ on final perplexity.
 
 ---
 
-## B4. RNG State Restoration on DDP Resume (ADM)
+## B4. RNG State Restoration on DDP Resume (ADM) — Resolved
 
-**Impact:** None for LN-CoTFormer; minor divergence for ADM training at
-resume boundaries
+**Impact:** None for LN-CoTFormer; previously caused minor divergence for
+ADM training at resume boundaries
+**Status:** Resolved. Per-rank GPU RNG gathering + full restore on resume.
 
 ### Background
 
-Checkpoint saving (`optim/base.py:207-210`) records four RNG states:
-`cpu_rng_state`, `gpu_rng_state`, `numpy_rng_state`, `py_rng_state`.
-On resume, these are loaded (`main.py:152-162`) but **never restored** —
-the calls in `optim/base.py:63-67` are commented out.
+The original codebase saves four RNG states in intermediary checkpoints
+(`cpu_rng_state`, `gpu_rng_state`, `numpy_rng_state`, `py_rng_state`) but
+**never restores them** — the restore calls in `optim/base.py` were
+commented out. Additionally, the final `ckpt.pt` omitted RNG states
+entirely, and `main.py` would `KeyError` if resuming from such a
+checkpoint.
 
 ### Why it doesn't affect LN-CoTFormer
 
@@ -324,33 +352,43 @@ Note: the original reprod-notes incorrectly referenced `_predict_depth` and
 `torch.randint` — our specific model variant uses `torch.rand()` for
 `length_factors`, not `torch.randint` for depth prediction.
 
-### DDP complication
+### DDP complication (original code)
 
-Simply uncommenting lines 63-67 is **incorrect** under DDP. The checkpoint
-is saved only by rank 0 (`if distributed_backend.is_master_process()`), so
-the stored `gpu_rng_state` belongs to GPU 0. On resume, all ranks load the
-same file — rank 1 would receive rank 0's CUDA state, giving both GPUs
+Simply uncommenting the original restore lines was **incorrect** under DDP.
+The checkpoint was saved only by rank 0
+(`if distributed_backend.is_master_process()`), so the stored
+`gpu_rng_state` belonged to GPU 0. On resume, all ranks load the same
+file — rank 1 would receive rank 0's CUDA state, giving both GPUs
 identical random sequences and breaking statistical independence.
 
-### Final checkpoint omits RNG states entirely
+### Fix
 
-The intermediary checkpoint (`optim/base.py:207-215`) saves all four RNG
-states, but the final end-of-training checkpoint (`optim/base.py:219-226`)
-omits them entirely. If a final checkpoint were used for continued training
-(e.g., extending past the iteration limit), `main.py:152-162` would
-`KeyError` on `cpu_rng_state`. Currently low risk since final checkpoints
-are not resumed in our workflow, but creates an asymmetry with intermediary
-checkpoints that would surface if the training schedule were ever extended.
+Three changes resolve the issue completely:
 
-### Practical impact
+1. **Per-rank GPU RNG gathering** (`optim/base.py`): before each checkpoint
+   save, `torch.distributed.all_gather_object` collects every rank's
+   `torch.cuda.get_rng_state()` into a list. Rank 0 saves this list as
+   `gpu_rng_states` (plural). Single-GPU runs wrap the local state in a
+   one-element list for format consistency.
 
-At 60k steps with ~24h SLURM wall limit, the ADM requires 2-3 submissions.
-Each resume boundary produces a different `length_factors` sequence than a
-continuous run would. Since `length_factors` are random (uniform, sorted
-descending) and the router learns against them, the effect is equivalent to a
-small random perturbation in the training curriculum. Unlikely to measurably
-affect final model quality but means exact bit-for-bit reproducibility across
-job boundaries is not achievable.
+2. **Full restore on resume** (`optim/base.py`): all four RNG states are
+   now restored. CPU, numpy, and Python RNG are restored directly (shared
+   across ranks). GPU RNG is restored per-rank: each rank indexes into the
+   `gpu_rng_states` list by its rank ID. Legacy checkpoints with the old
+   singular `gpu_rng_state` key are handled by restoring only on rank 0.
+
+3. **Tolerant checkpoint loading** (`main.py`): the RNG key extraction
+   uses `if k in checkpoint`, so old checkpoints missing RNG keys (e.g.,
+   final `ckpt.pt` from before this fix) load without error. Both
+   `gpu_rng_state` (legacy) and `gpu_rng_states` (new) are accepted.
+
+### Practical impact (post-fix)
+
+ADM multi-job training across SLURM submissions now produces the same
+`length_factors` sequences as a hypothetical continuous run, assuming the
+same number of GPUs on resume. The remaining source of non-determinism is
+cuDNN kernel selection (inherent to CUDA, not fixable without
+`torch.use_deterministic_algorithms(True)` which has a performance cost).
 
 ---
 

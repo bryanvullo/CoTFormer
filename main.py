@@ -151,7 +151,8 @@ def main(args):
         optimizer_state_dict = checkpoint['optimizer']
         _rng_keys = [
             "cpu_rng_state",
-            "gpu_rng_state",
+            "gpu_rng_state",      # legacy single-GPU checkpoints
+            "gpu_rng_states",     # new per-rank DDP checkpoints
             "numpy_rng_state",
             "py_rng_state",
             "train_sampler_state",

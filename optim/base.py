@@ -2,6 +2,7 @@ from contextlib import nullcontext
 from data.utils import get_dataloader
 
 import torch
+import torch.distributed
 import torch.nn.functional as F
 import wandb
 import time 
@@ -61,12 +62,21 @@ def train_base(model, opt, data, data_seed, scheduler, iterations, acc_steps, ba
     t0 = time.time()
     
     if rng_state_dict is not None:
-        torch.set_rng_state(rng_state_dict["cpu_rng_state"])
-        np.random.set_state(rng_state_dict["numpy_rng_state"])
-        random.setstate(rng_state_dict["py_rng_state"])
-        # GPU RNG: NOT restored here — checkpoint only has rank 0's state.
-        # Restoring it on all ranks would collapse CUDA RNG independence.
-        # See docs/reprod-notes.md B4 § "DDP complication".
+        if "cpu_rng_state" in rng_state_dict:
+            torch.set_rng_state(rng_state_dict["cpu_rng_state"])
+        if "numpy_rng_state" in rng_state_dict:
+            np.random.set_state(rng_state_dict["numpy_rng_state"])
+        if "py_rng_state" in rng_state_dict:
+            random.setstate(rng_state_dict["py_rng_state"])
+        # GPU RNG: per-rank restore from gathered states (new checkpoints),
+        # or rank-0-only restore from legacy single-state checkpoints.
+        if "gpu_rng_states" in rng_state_dict:
+            rank = torch.distributed.get_rank() if torch.distributed.is_initialized() else 0
+            if rank < len(rng_state_dict["gpu_rng_states"]):
+                torch.cuda.set_rng_state(rng_state_dict["gpu_rng_states"][rank])
+        elif "gpu_rng_state" in rng_state_dict:
+            if not torch.distributed.is_initialized() or torch.distributed.get_rank() == 0:
+                torch.cuda.set_rng_state(rng_state_dict["gpu_rng_state"])
     for _ in range(substep % num_substeps_per_epoch):
         get_batch(data_train_iter, device=extra_args.device)
 
@@ -203,8 +213,16 @@ def train_base(model, opt, data, data_seed, scheduler, iterations, acc_steps, ba
 
                 model.train()
                 t0 = time.time()
-        if distributed_backend.is_master_process():
-            if extra_args.save_checkpoint_freq is not None and itr % extra_args.save_checkpoint_freq == 0:
+        # Checkpoint save: all ranks must evaluate the frequency check together
+        # because the GPU RNG gather is a collective op.
+        if extra_args.save_checkpoint_freq is not None and itr % extra_args.save_checkpoint_freq == 0:
+            if distributed_backend.get_world_size() > 1:
+                _gpu_rng_gathered = [None] * distributed_backend.get_world_size()
+                torch.distributed.all_gather_object(_gpu_rng_gathered, torch.cuda.get_rng_state())
+            else:
+                _gpu_rng_gathered = [torch.cuda.get_rng_state()]
+
+            if distributed_backend.is_master_process():
                 print(f"saving checkpoint to {ckpt_path}/ckpt_{itr}.pt")
                 save_checkpoint(distributed_backend=distributed_backend,
                                 model=model,
@@ -212,12 +230,19 @@ def train_base(model, opt, data, data_seed, scheduler, iterations, acc_steps, ba
                                 scheduler=scheduler,
                                 itr=itr,
                                 cpu_rng_state=torch.get_rng_state(),
-                                gpu_rng_state=torch.cuda.get_rng_state(),
+                                gpu_rng_states=_gpu_rng_gathered,
                                 numpy_rng_state=np.random.get_state(),
                                 py_rng_state=random.getstate(),
                                 train_sampler_state=sampler_state_before_iter,
                                 ckpt_path=os.path.join(ckpt_path, f"ckpt_{itr}.pt"))
-                
+
+    # Final checkpoint — gather GPU RNG from all ranks before master writes.
+    if distributed_backend.get_world_size() > 1:
+        _gpu_rng_gathered = [None] * distributed_backend.get_world_size()
+        torch.distributed.all_gather_object(_gpu_rng_gathered, torch.cuda.get_rng_state())
+    else:
+        _gpu_rng_gathered = [torch.cuda.get_rng_state()]
+
     if distributed_backend.is_master_process():
         print(f"saving checkpoint to {ckpt_path}")
         save_checkpoint(distributed_backend=distributed_backend,
@@ -226,7 +251,7 @@ def train_base(model, opt, data, data_seed, scheduler, iterations, acc_steps, ba
                         scheduler=scheduler,
                         itr=itr,
                         cpu_rng_state=torch.get_rng_state(),
-                        gpu_rng_state=torch.cuda.get_rng_state(),
+                        gpu_rng_states=_gpu_rng_gathered,
                         numpy_rng_state=np.random.get_state(),
                         py_rng_state=random.getstate(),
                         train_sampler_state=sampler_state_before_iter,
