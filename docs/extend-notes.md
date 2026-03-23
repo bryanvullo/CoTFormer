@@ -6,7 +6,7 @@
 > components.
 >
 > For concrete numerical divergences from the paper, see `reprod-notes.md`.
-> For the implementation plan and code specs, see `plan.md`.
+> For canonical training commands, see `experiments.md`.
 
 ## Table of Contents
 
@@ -17,6 +17,9 @@
 - [5. Design Decisions](#5-design-decisions)
 - [6. Expected Outcomes](#6-expected-outcomes)
 - [7. Experimental Plan](#7-experimental-plan)
+- [8. MLA Implementation Reference](#8-mla-implementation-reference)
+- [9. mcHC Extension (Phase 5)](#9-mchc-extension-phase-5)
+- [Appendix: MLA Dimensionality Reference](#appendix-mla-dimensionality-reference)
 - [References](#references)
 
 ---
@@ -360,7 +363,9 @@ If `kv_lora_rank=192` proves insufficient:
 1. Create `models/mla_cotformer.py` — copy `cotformer_full_depth_lnmid_depthemb.py`,
    replace `CausalSelfAttention` with `MLACausalSelfAttention` in mid-blocks only.
 2. Register in `models/__init__.py`.
-3. Add MLA config args to `config/base.py` (already spec'd in `plan.md` §0.5).
+3. Add MLA config args to `config/base.py`:
+   `--kv_lora_rank 192`, `--q_lora_rank 384`, `--qk_rope_head_dim 32`,
+   `--qk_nope_head_dim 64`, `--v_head_dim 64`.
 4. Verify model instantiation and forward pass locally (CPU, batch=1).
 5. Compare parameter counts: MLA model should have ~24% fewer attention params.
 
@@ -385,6 +390,195 @@ If `kv_lora_rank=192` proves insufficient:
 
 ---
 
+## 8. MLA Implementation Reference
+
+### `MLACausalSelfAttention` Projections
+
+```python
+class MLACausalSelfAttention(nn.Module):
+    def __init__(self, config):
+        super().__init__()
+        d = config.n_embd          # 768
+        n_h = config.n_head        # 12
+        d_c = config.kv_lora_rank  # 192
+        d_qc = config.q_lora_rank  # 384
+        d_R = config.qk_rope_head_dim  # 32
+        d_nope = config.qk_nope_head_dim  # 64
+        d_v = config.v_head_dim    # 64
+
+        # Query: down -> norm -> up + RoPE branch
+        self.wq_a = nn.Linear(d, d_qc, bias=False)
+        self.q_norm = RMSNorm(d_qc)
+        self.wq_b = nn.Linear(d_qc, n_h * d_nope, bias=False)
+        self.wq_rope = nn.Linear(d_qc, n_h * d_R, bias=False)
+
+        # KV: joint down -> norm -> up
+        self.wkv_a = nn.Linear(d, d_c + d_R, bias=False)
+        self.kv_norm = RMSNorm(d_c)
+        self.wkv_b = nn.Linear(d_c, n_h * (d_nope + d_v), bias=False)
+
+        # Output
+        self.c_proj = nn.Linear(n_h * d_v, d, bias=False)
+```
+
+`RMSNorm` is needed in `models/utils.py` (no mean-centering, preserves directional
+information in compressed space):
+
+```python
+class RMSNorm(nn.Module):
+    def __init__(self, dim, eps=1e-6):
+        super().__init__()
+        self.weight = nn.Parameter(torch.ones(dim))
+        self.eps = eps
+
+    def forward(self, x):
+        norm = torch.rsqrt(x.pow(2).mean(-1, keepdim=True) + self.eps)
+        return x * norm * self.weight
+```
+
+### RoPE Handling
+
+The existing `rotary.py` already supports arbitrary head dims via `adapt_queries` /
+`adapt_keys`. Pass the smaller d_R-dimensional tensors directly. **No changes to
+`rotary.py` needed.**
+
+### New File: `models/mla_cotformer.py`
+
+Copy `cotformer_full_depth_lnmid_depthemb.py` and make these surgical changes:
+
+1. Replace `CausalSelfAttention` with `MLACausalSelfAttention` in mid-blocks only
+2. Replace `InPlaceSetSlice` K/V buffers with compressed `kv_latent` + `k_rope` buffers
+3. `h_begin`/`h_end` keep standard MHA (no repeat-induced cache growth)
+4. Everything else identical: depth embeddings, ln_mid, repeat loop
+
+Register in `models/__init__.py`:
+```python
+from . import mla_cotformer
+MODELS["mla_cotformer"] = mla_cotformer.GPTBase
+```
+
+### Parameter Count
+
+MLA attention is ~24% fewer params per layer than standard MHA (fewer projection
+weights due to the low-rank bottleneck). Report parameter counts alongside perplexity
+for fair comparison.
+
+---
+
+## 9. mcHC Extension (Phase 5)
+
+### Background
+
+Manifold-Constrained HyperConnections (mcHC) generalise the standard residual
+connection `y = x + f(x)` by replacing it with a learned linear transformation that
+routes information between layers through multiple "streams." Introduced by Wang et
+al. (2024) and adopted in DeepSeek-V3 [6], mcHC addresses representation collapse in
+very deep networks by allowing each layer to selectively read from and write to
+different subspaces of the hidden representation.
+
+In the standard formulation, the hidden state h is expanded into alpha > 1 streams of
+dimension d each. Each layer reads a weighted combination of streams, processes it,
+and writes its output back as a weighted combination. The connection weights form a
+matrix C in R^{alpha x alpha} per layer, constrained to lie on a smooth manifold
+(e.g., the Stiefel manifold of orthonormal frames) to prevent degeneration during
+training.
+
+### Motivation for CoTFormer
+
+CoTFormer's cross-repeat architecture creates a natural multi-pass information flow
+where the same transformer block processes tokens n_repeat times. Three properties
+make mcHC particularly attractive:
+
+1. **Repeat-aware information routing**: Different repeats serve different purposes
+   (early repeats: broad context gathering; late repeats: refinement). mcHC could
+   learn to route different subspaces through different repeats, effectively
+   specialising the repeat loop without explicit gating.
+
+2. **Complementary to MLA**: MLA (Phase 4) compresses the KV cache, an inference-time
+   memory optimisation. mcHC modifies the residual stream structure, a capacity
+   optimisation that changes what the model can learn. They operate on orthogonal axes
+   and can be combined.
+
+3. **Potential router replacement**: The ADM router decides per-token whether to
+   continue processing. mcHC's multi-stream structure could subsume this: if a
+   stream's write-weight goes to zero for a given layer, that stream is effectively
+   "halted" -- a softer, differentiable alternative to the hard top-k selection.
+
+### Architectural Sketch
+
+For d=768 and alpha=2 streams (minimal configuration):
+
+```
+Hidden state: h in R^{2 x 768} (2 streams of 768 dims)
+
+Per-layer processing:
+  h_read = C_read @ h           C_read in R^{1 x 2}  (combine streams for layer input)
+  h_out  = TransformerBlock(h_read)
+  h      = h + C_write @ h_out  C_write in R^{2 x 1}  (distribute output across streams)
+```
+
+**Memory overhead**: 2x hidden state size during forward pass. No additional KV cache
+cost (mcHC operates on the residual stream, not on attention keys/values).
+
+**Parameter overhead**: 2 x alpha x alpha scalars per layer = 8 parameters per layer
+for alpha=2. Negligible relative to the ~8.7M parameters per transformer layer.
+
+### Design Questions (To Resolve Before Implementation)
+
+| Question | Options | Decision Criteria |
+|----------|---------|-------------------|
+| Number of streams (alpha) | 2, 4, 8 | Trade-off: expressiveness vs memory. Start with alpha=2 |
+| Manifold constraint | Stiefel (orthogonal), unconstrained + regularisation | Stiefel if training instability observed; unconstrained otherwise |
+| Scope of mcHC | Mid layers only, all layers, cross-repeat only | KV analysis results will reveal which layers benefit most |
+| Interaction with MLA | Shared latent space, independent | Independent first; explore shared compression after baseline ablation |
+| Interaction with ADM router | Co-exist (mcHC + router), replace router | Ablation required: mcHC-only vs router-only vs combined |
+
+### Dependencies
+
+Phase 5 begins only after Phase 4 (MLA) training is complete. Prerequisites:
+- Trained MLA model with measured perplexity and KV cache savings
+- KV compression analysis results to identify which layers have the most/least
+  compressible representations
+- Attention entropy analysis to understand per-layer information flow patterns
+
+The mcHC module will be developed as a standalone component that can be inserted into
+any CoTFormer variant (MLA or standard MHA).
+
+---
+
+## Appendix: MLA Dimensionality Reference
+
+```
+STANDARD MHA (per layer):
+  Q = W_Q . h_t    W_Q in R^(768x768)
+  K = W_K . h_t    W_K in R^(768x768)
+  V = W_V . h_t    W_V in R^(768x768)
+  Cache per token: K + V = 1536 floats
+
+MLA (per layer):
+  Query path:
+    c_Q = RMSNorm(W_qa . h_t)           W_qa in R^(384x768)  -> c_Q in R^384
+    q_nope = W_qb . c_Q                 W_qb in R^(768x384)  -> 12 heads x 64
+    q_rope = RoPE(W_qr . c_Q)           W_qr in R^(384x384)  -> 12 heads x 32
+    q = [q_nope ; q_rope]  per head: R^96
+
+  KV path:
+    [c_KV ; k_pe] = W_kva . h_t         W_kva in R^(224x768) -> c_KV in R^192, k_pe in R^32
+    c_KV = RMSNorm(c_KV)
+    [k_nope ; v] = W_kvb . c_KV         W_kvb in R^(1536x192)
+    k_rope = RoPE(k_pe)                 shared across heads
+    k = [k_nope ; k_rope]  per head: R^96
+
+  Cache per token: c_KV + k_pe = 224 floats  (6.9x compression)
+```
+
+### Weight Absorption (Inference-Only)
+
+At inference, absorb `W_kvb` into the attention dot product to avoid materialising
+full K/V. Not needed during training -- deferred to post-training optimisation.
+
+---
+
 ## References
 
 [1] DeepSeek-AI. (2024). *DeepSeek-V2: A Strong, Economical, and Efficient
@@ -402,3 +596,6 @@ If `kv_lora_rank=192` proves insufficient:
 
 [5] Zhang, B. & Sennrich, R. (2019). *Root Mean Square Layer Normalization.*
     NeurIPS 2019.
+
+[6] DeepSeek-AI. (2024). *DeepSeek-V3 Technical Report.* arXiv:2412.19437.
+    (Manifold-Constrained HyperConnections, Section 3.1.)
