@@ -52,7 +52,13 @@
 
 # Part A: Successful Replications
 
-## A1. LN-CoTFormer Perplexity (Table 2)
+> **Step-count disambiguation**: A1 reports the LN-CoTFormer at **40,000 steps**
+> (Table 2 scope). A5 reports the ADM at **60,000 steps** (Section 4.2 scope).
+> A 60k LN-CoTFormer run is planned to enable the direct Section 5 comparison
+> (paper: non-adaptive 60k = 23.19 PPL). The CoTFormer + Reserved model
+> (Table 2, row 1, target 24.51) is pending via `cot-res-train`.
+
+## A1. LN-CoTFormer Perplexity (Table 2, 40k steps)
 
 **Result:** Reproduced within +0.02 PPL of the paper.
 
@@ -113,11 +119,11 @@ per GPU: 8 x 8 x 2 = 128.
 
 ---
 
-## A5. ADM Perplexity (Section 4.2, Figure 4)
+## A5. ADM Perplexity (Section 4.2, Figure 4, 60k steps)
 
 **Result:** Reproduced within +0.24 PPL of the paper.
 
-| Metric | Paper (Section 5) | Ours | Delta |
+| Metric | Paper (Section 5, adaptive LN-CoTFormer) | Ours | Delta |
 |--------|-------------------|------|-------|
 | Val perplexity | ~23.83 | 24.07 | +0.24 |
 | Val accuracy | -- | 0.4128 | -- |
@@ -198,8 +204,10 @@ does not affect it.
 The paper (Section 5) reports that after 60k steps, the non-adaptive
 LN-CoTFormer reaches PPL 23.19. Our non-adaptive model was trained
 for 40k steps (PPL 24.13, matching Table 2's 24.11). To reproduce the
-Section 5 comparison exactly, the non-adaptive model would need 60k
-steps of training, which was not in scope for Table 2 reproduction.
+Section 5 comparison exactly, the non-adaptive model needs 60k steps
+of training. The `lncot-train` package has been updated to 60k
+iterations; resubmission will auto-resume from the existing 40k
+checkpoint and train for an additional 20k steps.
 
 ---
 

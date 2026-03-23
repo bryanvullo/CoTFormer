@@ -12,7 +12,13 @@
 # LN-CoTFormer Training — iridis/lncot-train
 #
 # Trains the non-adaptive LN-CoTFormer (cotformer_full_depth_lnmid_depthemb).
-# This reproduces Table 2 of the paper (perplexity 24.11 target).
+#
+# Training scope:
+#   - 40k steps: reproduces Table 2 (perplexity 24.11 target)
+#   - 60k steps: reproduces Section 5 comparison (perplexity 23.19 target)
+#
+# The script is set to 60k iterations. Auto-resume from the existing 40k
+# checkpoint means resubmission trains only the remaining 20k steps (~12h).
 #
 # Usage:
 #   cd ~/CoTFormer && bash iridis/lncot-train/job.sh
@@ -34,7 +40,7 @@
 #   + LayerNorm between repeats + learned depth embedding
 #
 # NOTE: The paper trains this on A100 80GB for ~12-18h. On 2x L4 24GB
-#   with DDP, expect ~18-22h. If it doesn't finish in 24h, resubmit.
+#   with DDP, expect ~18-22h per 40k steps. If it doesn't finish, resubmit.
 ################################################################################
 
 # ========================= CONFIGURATION ====================================
@@ -42,8 +48,8 @@
 
 N_GPUS=2          # Must match --gres=gpu:N above
 N_LAYER=24        # Paper uses 24 for LN-CoTFormer (Table 2). Change to 12 if needed.
-N_REPEAT=5        # Number of block repeats - same as Table 2
-ITERATIONS=40000  # Training steps
+N_REPEAT=5        # Number of block repeats (same as Table 2)
+ITERATIONS=60000  # 60k steps: 40k (Table 2) + 20k (Section 5 comparison)
 BATCH_SIZE=8      # Per-GPU micro-batch (L4 24GB OOMs at 16 with 108 effective layers)
 ACC_STEPS=16      # Gradient accumulation steps (DDP halves: per-GPU=8)
                   # Effective batch size = BATCH_SIZE * (ACC_STEPS/world_size) * world_size = 128

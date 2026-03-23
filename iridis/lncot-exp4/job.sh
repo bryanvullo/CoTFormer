@@ -48,7 +48,9 @@
 # Find it under /scratch/ab3u21/exps/owt2/adaptive_cotformer_*/
 #
 # IMPORTANT: Set this to YOUR checkpoint path before submitting!
-CHECKPOINT_DIR="/scratch/ab3u21/exps/owt2/adaptive_cotformer_mod_efficient_sigmoid_crw_lnmid_de_random_factor_single_final/adm_lr0.001_bs8x16_seqlen256"
+# Updated to v2 exp_name (fresh ADM retrain with fixed RNG checkpointing).
+# Old v1 path: .../adm_lr0.001_bs8x16_seqlen256
+CHECKPOINT_DIR="/scratch/ab3u21/exps/owt2/adaptive_cotformer_mod_efficient_sigmoid_crw_lnmid_de_random_factor_single_final/adm_v2_lr0.001_bs8x16_seqlen256"
 
 # ========================= END CONFIGURATION ================================
 

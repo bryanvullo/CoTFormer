@@ -155,7 +155,12 @@ TRAIN_ARGS=(
     --use_pretrained auto
     --wandb
     --wandb_project rcotformer
-    --exp_name "adm_lr0.001_bs${BATCH_SIZE}x${ACC_STEPS}_seqlen256"
+    # v2: fresh start with fixed per-rank GPU RNG checkpointing (B4 fix,
+    # commits 657de47+29b9690). The v1 run (adm_lr0.001_bs8x16_seqlen256)
+    # completed 60k steps but had RNG state discontinuities at resume
+    # boundaries, producing +0.22 excess delta vs paper. Preserved on
+    # scratch for comparison.
+    --exp_name "adm_v2_lr0.001_bs${BATCH_SIZE}x${ACC_STEPS}_seqlen256"
     "$@"
 )
 
