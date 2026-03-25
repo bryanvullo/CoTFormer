@@ -216,9 +216,14 @@ def train_base(model, opt, data, data_seed, scheduler, iterations, acc_steps, ba
         # Checkpoint save: all ranks must evaluate the frequency check together
         # because the GPU RNG gather is a collective op.
         if extra_args.save_checkpoint_freq is not None and itr % extra_args.save_checkpoint_freq == 0:
+            # Use all_gather on fixed-size ByteTensors instead of all_gather_object,
+            # which OOMs on PyTorch 2.2.0 + NCCL (see reprod-notes B9).
             if distributed_backend.get_world_size() > 1:
-                _gpu_rng_gathered = [None] * distributed_backend.get_world_size()
-                torch.distributed.all_gather_object(_gpu_rng_gathered, torch.cuda.get_rng_state())
+                local_rng = torch.cuda.get_rng_state()  # CPU ByteTensor, fixed size
+                local_rng_cuda = local_rng.to(extra_args.device)
+                _gpu_rng_gathered_cuda = [torch.empty_like(local_rng_cuda) for _ in range(distributed_backend.get_world_size())]
+                torch.distributed.all_gather(_gpu_rng_gathered_cuda, local_rng_cuda)
+                _gpu_rng_gathered = [t.cpu() for t in _gpu_rng_gathered_cuda]
             else:
                 _gpu_rng_gathered = [torch.cuda.get_rng_state()]
 
@@ -237,9 +242,14 @@ def train_base(model, opt, data, data_seed, scheduler, iterations, acc_steps, ba
                                 ckpt_path=os.path.join(ckpt_path, f"ckpt_{itr}.pt"))
 
     # Final checkpoint — gather GPU RNG from all ranks before master writes.
+    # Use all_gather on fixed-size ByteTensors instead of all_gather_object,
+    # which OOMs on PyTorch 2.2.0 + NCCL (see reprod-notes B9).
     if distributed_backend.get_world_size() > 1:
-        _gpu_rng_gathered = [None] * distributed_backend.get_world_size()
-        torch.distributed.all_gather_object(_gpu_rng_gathered, torch.cuda.get_rng_state())
+        local_rng = torch.cuda.get_rng_state()  # CPU ByteTensor, fixed size
+        local_rng_cuda = local_rng.to(extra_args.device)
+        _gpu_rng_gathered_cuda = [torch.empty_like(local_rng_cuda) for _ in range(distributed_backend.get_world_size())]
+        torch.distributed.all_gather(_gpu_rng_gathered_cuda, local_rng_cuda)
+        _gpu_rng_gathered = [t.cpu() for t in _gpu_rng_gathered_cuda]
     else:
         _gpu_rng_gathered = [torch.cuda.get_rng_state()]
 

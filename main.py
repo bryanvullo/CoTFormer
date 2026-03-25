@@ -162,8 +162,13 @@ def main(args):
             rng_state_dict["gpu_rng_state"] = rng_state_dict["gpu_rng_state"].type(torch.ByteTensor)
         if "cpu_rng_state" in rng_state_dict:
             rng_state_dict["cpu_rng_state"] = rng_state_dict["cpu_rng_state"].cpu().type(torch.ByteTensor)
+        if "gpu_rng_states" in rng_state_dict:
+            rng_state_dict["gpu_rng_states"] = [
+                s.cpu().type(torch.ByteTensor) if isinstance(s, torch.Tensor) else s
+                for s in rng_state_dict["gpu_rng_states"]
+            ]
 
-        model.load_state_dict(model_state_dict) 
+        model.load_state_dict(model_state_dict)
         opt.load_state_dict(optimizer_state_dict)
         itr = checkpoint['itr']
         if scheduler is not None:

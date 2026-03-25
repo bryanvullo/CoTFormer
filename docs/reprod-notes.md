@@ -46,6 +46,11 @@
   - [B8. Missing `nullcontext` Import in `eval.py` (Original Code Bug) — Resolved](#b8-missing-nullcontext-import-in-evalpy-original-code-bug--resolved)
     - [Background](#background-3)
     - [Fix](#fix-3)
+  - [B9. GPU RNG Gather OOM on PyTorch 2.2.0 DDP (Checkpoint Save) — Resolved](#b9-gpu-rng-gather-oom-on-pytorch-220-ddp-checkpoint-save--resolved)
+    - [Background](#background-4)
+    - [Why the original authors didn't encounter this](#why-the-original-authors-didnt-encounter-this)
+    - [Why v1 training succeeded](#why-v1-training-succeeded)
+    - [Fix](#fix-4)
   - [References](#references)
 
 ---
@@ -522,6 +527,68 @@ A CPU evaluation run (e.g., local testing without GPU) would crash with
 ### Fix
 
 Added `from contextlib import nullcontext` to the imports in `eval.py`.
+
+---
+
+## B9. GPU RNG Gather OOM on PyTorch 2.2.0 DDP (Checkpoint Save) — Resolved
+
+**Impact:** Fatal crash on first DDP checkpoint save (step 2000)
+**Status:** Resolved.
+
+### Background
+
+The B4 fix (commit `29b9690`) introduced `torch.distributed.all_gather_object`
+to gather per-rank GPU RNG states during checkpoint saves. On PyTorch 2.2.0
+with the NCCL backend, `all_gather_object` pickles the Python object, exchanges
+pickled sizes via a CUDA all-gather, then resizes receive buffers to
+`max_object_size`. A corrupted value in the NCCL size-negotiation step causes
+`input_tensor.resize_(max_object_size)` to request more than 1 EB of CUDA
+memory, triggering an immediate `torch.cuda.OutOfMemoryError`.
+
+The crash occurred on the ADM v2 re-training (run_3, job 707599) at step 2000
+— the first `save_checkpoint_freq` boundary:
+
+```
+optim/base.py line 221:
+  torch.distributed.all_gather_object(_gpu_rng_gathered, torch.cuda.get_rng_state())
+  → torch.cuda.OutOfMemoryError: Tried to allocate more than 1EB memory.
+```
+
+### Why the original authors didn't encounter this
+
+The original codebase was developed on single A100 80 GB GPUs without DDP
+(confirmed in B6). Single-GPU training never invokes distributed collective
+ops. The authors' checkpoint code saved only rank 0's RNG state and never
+restored it (restore calls were commented out). Without multi-GPU training,
+there was no need for cross-rank RNG gathering, and no opportunity to trigger
+the `all_gather_object` bug.
+
+### Why v1 training succeeded
+
+v1 (runs 0–2, jobs 696795/698707/701232) ran code from before commit `29b9690`
+— the `all_gather_object` call didn't exist yet. v2 (run_3, job 707599) was
+the first run to exercise the new code path.
+
+### Fix
+
+Replaced `all_gather_object` with `torch.distributed.all_gather` on fixed-size
+ByteTensors (`optim/base.py`, 2 locations: periodic and final checkpoint save).
+`torch.cuda.get_rng_state()` returns a fixed-size CPU ByteTensor — 16 bytes
+consisting of an 8-byte seed and 8-byte Philox offset, a compile-time constant
+in PyTorch's `CUDAGeneratorImpl.cpp`. Same-model GPUs produce identical tensor
+sizes, eliminating the need for pickle serialization and size negotiation
+entirely.
+
+Additionally, a defensive ByteTensor conversion was added in `main.py` for the
+plural `gpu_rng_states` checkpoint key, mirroring the existing conversion for
+the singular `gpu_rng_state` key. This ensures any checkpoint format —
+including those saved by the old `all_gather_object` path — loads correctly.
+
+**References:**
+
+- [1] PyTorch Issue [#145965](https://github.com/pytorch/pytorch/issues/145965): `all_gather_object` 1 EB OOM (confirmed by maintainer @kwen2501)
+- [2] PyTorch Issue [#116177](https://github.com/pytorch/pytorch/issues/116177): NCCL collective OOM under high GPU memory utilization
+- [3] NVIDIA/nccl Issue [#962](https://github.com/NVIDIA/nccl/issues/962): NCCL allocator fragmentation during `all_gather_object`
 
 ---
 
