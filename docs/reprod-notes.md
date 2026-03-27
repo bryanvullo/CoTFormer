@@ -51,6 +51,10 @@
     - [Why the original authors didn't encounter this](#why-the-original-authors-didnt-encounter-this)
     - [Why v1 training succeeded](#why-v1-training-succeeded)
     - [Fix](#fix-4)
+  - [B10. NCCL ALLREDUCE Timeout After Checkpoint Save (DDP) — Resolved](#b10-nccl-allreduce-timeout-after-checkpoint-save-ddp--resolved)
+    - [Background](#background-5)
+    - [Root cause](#root-cause)
+    - [Fix](#fix-5)
   - [References](#references)
 
 ---
@@ -589,6 +593,91 @@ including those saved by the old `all_gather_object` path — loads correctly.
 - [1] PyTorch Issue [#145965](https://github.com/pytorch/pytorch/issues/145965): `all_gather_object` 1 EB OOM (confirmed by maintainer @kwen2501)
 - [2] PyTorch Issue [#116177](https://github.com/pytorch/pytorch/issues/116177): NCCL collective OOM under high GPU memory utilization
 - [3] NVIDIA/nccl Issue [#962](https://github.com/NVIDIA/nccl/issues/962): NCCL allocator fragmentation during `all_gather_object`
+
+---
+
+## B10. NCCL ALLREDUCE Timeout After Checkpoint Save (DDP) — Resolved
+
+**Impact:** Fatal crash at first DDP checkpoint save (step 2000)
+**Status:** Resolved.
+
+### Background
+
+The B9 fix (commit `ef3bff5`) replaced `all_gather_object` with
+`torch.distributed.all_gather` on fixed-size ByteTensors. The `all_gather`
+itself completed successfully — "saving checkpoint" was printed — but the job
+crashed ~13 minutes later with an NCCL ALLREDUCE timeout:
+
+```
+[rank0]: Watchdog caught collective operation timeout:
+  WorkNCCL(SeqNum=51989, OpType=ALLREDUCE, NumelIn=2360064,
+  Timeout(ms)=600000) ran for 600326 milliseconds before timing out.
+```
+
+The timed-out operation is a **gradient ALLREDUCE** (DDP backward pass
+synchronisation), not the `all_gather` for RNG states. Two jobs in run_3
+exhibited the failure:
+
+| Job | Code version | Error | Step |
+|-----|-------------|-------|------|
+| 707599 | Pre-B9 (`all_gather_object`) | `OutOfMemoryError: >1EB` (B9) | 2000 |
+| 714422 | Post-B9 (`all_gather` ByteTensors) | NCCL ALLREDUCE timeout | 2000 |
+
+### Root cause
+
+After the `all_gather` completes, only rank 0 writes the checkpoint to disk
+via `torch.save` (~2.5 GB of model + AdamW optimizer state). Rank 1 skips
+the `is_master_process()` block and immediately continues to the next training
+step. The sequence:
+
+1. Both ranks complete `all_gather` (RNG states gathered)
+2. Rank 0 enters `torch.save` (blocking I/O to `/scratch/` Lustre filesystem)
+3. Rank 1 continues to step 2010, completes forward + backward, reaches
+   gradient ALLREDUCE — **waits for rank 0**
+4. Rank 0 is still blocked on the Lustre write (~4 MB/s under contention)
+5. After 600 seconds (NCCL default timeout), rank 1's watchdog fires
+
+This race condition was **latent in the original code** — the pre-B4 checkpoint
+save was also master-only with no barrier (line 206–219 of the original
+`optim/base.py`). The v1 training (runs 0–2) never triggered it because the
+filesystem was faster on those particular nodes/times. The B9 fix did not
+introduce the race; it merely exposed it by successfully reaching the save
+(instead of crashing at `all_gather_object`).
+
+The torchtune project hit the exact same failure pattern: [pytorch/torchtune
+#2093](https://github.com/meta-pytorch/torchtune/issues/2093) — NCCL ALLREDUCE
+timeout during Llama 3.1 70B checkpoint save on 8x V100.
+
+### Fix
+
+Two changes, following the canonical DDP checkpoint pattern used by Megatron-LM
+([`# Wait so everyone is done (necessary)`](https://github.com/NVIDIA/Megatron-LM/blob/main/megatron/training/checkpointing.py)),
+DeepSpeed, HuggingFace Transformers, Meta Lingua, and PyTorch Lightning:
+
+1. **Barrier after checkpoint save** (`optim/base.py`, 2 locations): added
+   `distributed_backend.sync()` after both the periodic and final checkpoint
+   save blocks. This forces all ranks to wait for rank 0's `torch.save` to
+   complete before any rank proceeds to the next training step. The barrier
+   is a standard NCCL collective (`torch.distributed.barrier`) that blocks
+   until all ranks have entered it.
+
+2. **NCCL timeout increase** (`distributed/ddp.py`): changed
+   `init_process_group(backend=...)` to pass `timeout=timedelta(minutes=30)`,
+   increasing the NCCL operation timeout from the default 10 minutes to 30
+   minutes. This provides headroom if the Lustre filesystem is slow; the
+   barrier ensures correctness, the timeout ensures the barrier itself does
+   not prematurely abort.
+
+Additionally, a duplicate `sync()` method definition in
+`DataParallelDistributedBackend` (lines 59 and 65) was removed.
+
+**References:**
+
+- [1] PyTorch DDP Tutorial: [Save/Load Checkpoints](https://docs.pytorch.org/tutorials/intermediate/ddp_tutorial.html) — canonical `dist.barrier()` after rank-0 `torch.save()`
+- [2] PyTorch/torchtune Issue [#2093](https://github.com/meta-pytorch/torchtune/issues/2093): identical NCCL ALLREDUCE timeout during checkpoint save
+- [3] PyTorch 2.2 docs: [`init_process_group(timeout=...)`](https://docs.pytorch.org/docs/2.2/distributed.html#torch.distributed.init_process_group) — *"Default value is 10 minutes for NCCL [...] duration after which collectives will be aborted asynchronously"*
+- [4] PyTorch Blog: [Flight Recorder](https://pytorch.org/blog/flight-recorder-a-new-lens-for-understanding-nccl-watchdog-timeouts/) — *"Almost all NCCL watchdog timeout errors are caused by collective desynchronization"*
+- [5] NVIDIA Megatron-LM: [checkpointing.py](https://github.com/NVIDIA/Megatron-LM/blob/main/megatron/training/checkpointing.py) — barrier after save labeled `(necessary)`
 
 ---
 

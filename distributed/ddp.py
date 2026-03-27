@@ -1,6 +1,7 @@
 import os
 import math
 from contextlib import contextmanager
+from datetime import timedelta
 
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.distributed import init_process_group, destroy_process_group, get_world_size, barrier
@@ -14,7 +15,8 @@ class DataParallelDistributedBackend(DistributedBackend):
         self.rank = int(os.environ.get('RANK', -1))
         assert self.rank != -1, "DDP backend can not be used without rank"
         assert "cuda" in args.device, "DDP backend can not be used on non-CUDA devices"
-        init_process_group(backend=args.distributed_backend)
+        init_process_group(backend=args.distributed_backend,
+                           timeout=timedelta(minutes=30))
         self.local_rank = int(os.environ['LOCAL_RANK'])
 
     def get_adjusted_args_for_process(self, args):
@@ -61,6 +63,3 @@ class DataParallelDistributedBackend(DistributedBackend):
 
     def finalize(self):
         destroy_process_group()
-
-    def sync(self):
-        barrier()

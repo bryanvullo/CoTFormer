@@ -241,6 +241,12 @@ def train_base(model, opt, data, data_seed, scheduler, iterations, acc_steps, ba
                                 train_sampler_state=sampler_state_before_iter,
                                 ckpt_path=os.path.join(ckpt_path, f"ckpt_{itr}.pt"))
 
+            # Barrier: wait for rank 0 torch.save before next training step.
+            # Without this, non-master ranks race to the next gradient ALLREDUCE
+            # while rank 0 is still writing to disk, causing NCCL timeout (B10).
+            if distributed_backend.get_world_size() > 1:
+                distributed_backend.sync()
+
     # Final checkpoint — gather GPU RNG from all ranks before master writes.
     # Use all_gather on fixed-size ByteTensors instead of all_gather_object,
     # which OOMs on PyTorch 2.2.0 + NCCL (see reprod-notes B9).
@@ -270,5 +276,9 @@ def train_base(model, opt, data, data_seed, scheduler, iterations, acc_steps, ba
             for file_ in os.listdir(ckpt_path):
                  if 'ckpt_' in file_:
                     os.remove(os.path.join(ckpt_path, file_))
+
+    # Barrier: wait for rank 0 final save before process cleanup (B10).
+    if distributed_backend.get_world_size() > 1:
+        distributed_backend.sync()
 
     return stats
