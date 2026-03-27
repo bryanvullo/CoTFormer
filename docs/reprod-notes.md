@@ -545,9 +545,10 @@ The B4 fix (commit `29b9690`) introduced `torch.distributed.all_gather_object`
 to gather per-rank GPU RNG states during checkpoint saves. On PyTorch 2.2.0
 with the NCCL backend, `all_gather_object` pickles the Python object, exchanges
 pickled sizes via a CUDA all-gather, then resizes receive buffers to
-`max_object_size`. A corrupted value in the NCCL size-negotiation step causes
-`input_tensor.resize_(max_object_size)` to request more than 1 EB of CUDA
-memory, triggering an immediate `torch.cuda.OutOfMemoryError`.
+`max_object_size`. A corrupted value in the NCCL size-negotiation step [2]
+causes `input_tensor.resize_(max_object_size)` to request more than 1 EB of
+CUDA memory, triggering an immediate `torch.cuda.OutOfMemoryError`. Related
+NCCL-level fragmentation behaviour is documented in [3] and [4].
 
 The crash occurred on the ADM v2 re-training (run_3, job 707599) at step 2000
 — the first `save_checkpoint_freq` boundary:
@@ -587,12 +588,6 @@ Additionally, a defensive ByteTensor conversion was added in `main.py` for the
 plural `gpu_rng_states` checkpoint key, mirroring the existing conversion for
 the singular `gpu_rng_state` key. This ensures any checkpoint format —
 including those saved by the old `all_gather_object` path — loads correctly.
-
-**References:**
-
-- [1] PyTorch Issue [#145965](https://github.com/pytorch/pytorch/issues/145965): `all_gather_object` 1 EB OOM (confirmed by maintainer @kwen2501)
-- [2] PyTorch Issue [#116177](https://github.com/pytorch/pytorch/issues/116177): NCCL collective OOM under high GPU memory utilization
-- [3] NVIDIA/nccl Issue [#962](https://github.com/NVIDIA/nccl/issues/962): NCCL allocator fragmentation during `all_gather_object`
 
 ---
 
@@ -642,17 +637,18 @@ save was also master-only with no barrier (line 206–219 of the original
 `optim/base.py`). The v1 training (runs 0–2) never triggered it because the
 filesystem was faster on those particular nodes/times. The B9 fix did not
 introduce the race; it merely exposed it by successfully reaching the save
-(instead of crashing at `all_gather_object`).
+(instead of crashing at `all_gather_object`). As the PyTorch team notes,
+"almost all NCCL watchdog timeout errors are caused by collective
+desynchronization (mismatch) rather than slowness" [5].
 
-The torchtune project hit the exact same failure pattern: [pytorch/torchtune
-#2093](https://github.com/meta-pytorch/torchtune/issues/2093) — NCCL ALLREDUCE
+The torchtune project hit the exact same failure pattern [6] — NCCL ALLREDUCE
 timeout during Llama 3.1 70B checkpoint save on 8x V100.
 
 ### Fix
 
-Two changes, following the canonical DDP checkpoint pattern used by Megatron-LM
-([`# Wait so everyone is done (necessary)`](https://github.com/NVIDIA/Megatron-LM/blob/main/megatron/training/checkpointing.py)),
-DeepSpeed, HuggingFace Transformers, Meta Lingua, and PyTorch Lightning:
+Two changes, following the canonical DDP checkpoint pattern [7] used by
+Megatron-LM [8], DeepSpeed, HuggingFace Transformers, Meta Lingua, and
+PyTorch Lightning:
 
 1. **Barrier after checkpoint save** (`optim/base.py`, 2 locations): added
    `distributed_backend.sync()` after both the periodic and final checkpoint
@@ -663,21 +659,13 @@ DeepSpeed, HuggingFace Transformers, Meta Lingua, and PyTorch Lightning:
 
 2. **NCCL timeout increase** (`distributed/ddp.py`): changed
    `init_process_group(backend=...)` to pass `timeout=timedelta(minutes=30)`,
-   increasing the NCCL operation timeout from the default 10 minutes to 30
-   minutes. This provides headroom if the Lustre filesystem is slow; the
+   increasing the NCCL operation timeout from the default 10 minutes [9] to
+   30 minutes. This provides headroom if the Lustre filesystem is slow; the
    barrier ensures correctness, the timeout ensures the barrier itself does
    not prematurely abort.
 
 Additionally, a duplicate `sync()` method definition in
 `DataParallelDistributedBackend` (lines 59 and 65) was removed.
-
-**References:**
-
-- [1] PyTorch DDP Tutorial: [Save/Load Checkpoints](https://docs.pytorch.org/tutorials/intermediate/ddp_tutorial.html) — canonical `dist.barrier()` after rank-0 `torch.save()`
-- [2] PyTorch/torchtune Issue [#2093](https://github.com/meta-pytorch/torchtune/issues/2093): identical NCCL ALLREDUCE timeout during checkpoint save
-- [3] PyTorch 2.2 docs: [`init_process_group(timeout=...)`](https://docs.pytorch.org/docs/2.2/distributed.html#torch.distributed.init_process_group) — *"Default value is 10 minutes for NCCL [...] duration after which collectives will be aborted asynchronously"*
-- [4] PyTorch Blog: [Flight Recorder](https://pytorch.org/blog/flight-recorder-a-new-lens-for-understanding-nccl-watchdog-timeouts/) — *"Almost all NCCL watchdog timeout errors are caused by collective desynchronization"*
-- [5] NVIDIA Megatron-LM: [checkpointing.py](https://github.com/NVIDIA/Megatron-LM/blob/main/megatron/training/checkpointing.py) — barrier after save labeled `(necessary)`
 
 ---
 
@@ -687,3 +675,11 @@ Additionally, a duplicate `sync()` method definition in
 [segyges-mirror]: https://huggingface.co/datasets/segyges/OpenWebText2
 
 1. Mohtashami, A. et al. (2025). *CoTFormer: A Chain-of-Thought Driven Architecture with Budget-Adaptive Computation Cost at Inference.* [ICLR 2025](https://openreview.net/forum?id=7igPXQFupX)
+2. PyTorch Issue [#145965](https://github.com/pytorch/pytorch/issues/145965): `all_gather_object` 1 EB OOM — confirmed by maintainer @kwen2501 as collective call ordering mismatch corrupting size negotiation.
+3. PyTorch Issue [#116177](https://github.com/pytorch/pytorch/issues/116177): NCCL collective OOM under high GPU memory utilization.
+4. NVIDIA/nccl Issue [#962](https://github.com/NVIDIA/nccl/issues/962): NCCL allocator fragmentation during `all_gather_object`.
+5. PyTorch Blog: [Flight Recorder — A New Lens for Understanding NCCL Watchdog Timeouts](https://pytorch.org/blog/flight-recorder-a-new-lens-for-understanding-nccl-watchdog-timeouts/) (2024).
+6. PyTorch/torchtune Issue [#2093](https://github.com/meta-pytorch/torchtune/issues/2093): NCCL ALLREDUCE timeout during Llama 3.1 70B checkpoint save on multi-GPU.
+7. PyTorch Tutorial: [Getting Started with Distributed Data Parallel — Save/Load Checkpoints](https://docs.pytorch.org/tutorials/intermediate/ddp_tutorial.html).
+8. NVIDIA Megatron-LM: [checkpointing.py](https://github.com/NVIDIA/Megatron-LM/blob/main/megatron/training/checkpointing.py) — barrier after save labeled `# Wait so everyone is done (necessary)`.
+9. PyTorch 2.2 Docs: [`init_process_group`](https://docs.pytorch.org/docs/2.2/distributed.html#torch.distributed.init_process_group) — *"Default value is 10 minutes for NCCL [...] duration after which collectives will be aborted asynchronously."*
