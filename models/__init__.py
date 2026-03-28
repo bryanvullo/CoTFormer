@@ -7,7 +7,7 @@ from . import but_full_depth
 from . import adaptive_cotformer_mod_efficient_sigmoid_crw_lnmid_de_random_factor_single_final
 from . import pondernet
 from . import but_mod_efficient_sigmoid_lnmid_depthemb_random_factor_for_mac_compute
-
+from . import tak_custom_cot
 MODELS = {
     "base": base.GPTBase,
     "adaptive_cotformer_mod_efficient_sigmoid_crw_lnmid_de_random_factor_single_final": adaptive_cotformer_mod_efficient_sigmoid_crw_lnmid_de_random_factor_single_final.GPTBase,
@@ -18,6 +18,7 @@ MODELS = {
     "but_mod_efficient_sigmoid_lnmid_depthemb_random_factor_for_mac_compute": but_mod_efficient_sigmoid_lnmid_depthemb_random_factor_for_mac_compute.GPTBase,
     "pondernet": pondernet.GPTBase,
     "but_halting_freeze_input_on_stop": but_halting_freeze_input_on_stop.GPTBase,
+    "tak_custom_cot" : tak_custom_cot.GPTBase,
 }
 
 
