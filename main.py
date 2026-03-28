@@ -137,14 +137,22 @@ def main(args):
                     last_iter_found = ckpt_iter
             if last_iter_found == -1:
                 print("WARN: Could not find last checkpoint")
-                args.use_pretrained = sorted(checkpoint)[-1]
+                args.use_pretrained = sorted(checkpoints)[-1]
         else:
             args.use_pretrained = None
+            print(f"WARN: No checkpoint found in {ckpt_path}, starting fresh")
     
     if args.use_pretrained is not None:
         last_ckpt_path = args.use_pretrained
         print(f"Resuming from {last_ckpt_path}")
-        checkpoint = torch.load(os.path.join(ckpt_path, last_ckpt_path), map_location=args.device)
+        try:
+            checkpoint = torch.load(os.path.join(ckpt_path, last_ckpt_path), map_location=args.device)
+        except (RuntimeError, EOFError) as e:
+            print(f"WARN: Corrupted checkpoint {last_ckpt_path}: {e}")
+            print("Starting fresh.")
+            args.use_pretrained = None
+
+    if args.use_pretrained is not None:
         model_state_dict = {distributed_backend.translate_model_parameter_name_for_node(k.replace("_orig_mod.", ""))[0]:v for k,v in checkpoint['model'].items()}
         # FIXME checkpoints from compiled model have _orig_mod keyword
 

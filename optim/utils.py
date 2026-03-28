@@ -1,3 +1,4 @@
+import os
 import numpy as np
 import torch
 import torch.nn.functional as F
@@ -50,4 +51,22 @@ def save_checkpoint(distributed_backend, model, opt, scheduler, itr, ckpt_path, 
         'itr': itr,
     }, **extra_args)
 
-    torch.save(checkpoint, ckpt_path)
+    # Save to local /tmp first, then atomic-copy to target (Lustre).
+    # torch.save() uses zip serialization that buffers the entire state dict
+    # before flushing — a single ~2 GB write to Lustre can stall for 30+ min
+    # under cluster I/O contention, causing the post-save DDP barrier to
+    # timeout (see reprod-notes B11).
+    import shutil, tempfile, time
+
+    t0 = time.time()
+    with tempfile.NamedTemporaryFile(dir='/tmp', suffix='.pt', delete=False) as tmp:
+        tmp_path = tmp.name
+    torch.save(checkpoint, tmp_path)
+
+    ckpt_tmp = ckpt_path + '.tmp'
+    shutil.copy2(tmp_path, ckpt_tmp)
+    os.rename(ckpt_tmp, ckpt_path)
+    os.remove(tmp_path)
+
+    elapsed = time.time() - t0
+    print(f"  checkpoint saved in {elapsed:.1f}s ({os.path.getsize(ckpt_path) / 1e6:.0f} MB)")

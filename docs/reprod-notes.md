@@ -55,6 +55,10 @@
     - [Background](#background-5)
     - [Root cause](#root-cause)
     - [Fix](#fix-5)
+  - [B11. Lustre I/O Stall During Checkpoint Save (DDP) — Resolved](#b11-lustre-io-stall-during-checkpoint-save-ddp--resolved)
+    - [Background](#background-6)
+    - [Root cause](#root-cause-1)
+    - [Fix](#fix-6)
   - [References](#references)
 
 ---
@@ -669,6 +673,81 @@ Additionally, a duplicate `sync()` method definition in
 
 ---
 
+## B11. Lustre I/O Stall During Checkpoint Save (DDP) — Resolved
+
+**Impact:** Fatal crash at DDP checkpoint save (step 2000); 30-minute hang
+**Status:** Resolved.
+
+### Background
+
+With B9 and B10 deployed, the `all_gather` for GPU RNG states and the
+post-save barrier both function correctly. However, run_3 job 724964
+(the first job to exercise the fully-fixed code path) still crashed at step
+2000 with a 30-minute NCCL barrier timeout:
+
+```
+[rank1]: Watchdog caught collective operation timeout:
+  WorkNCCL(SeqNum=51988, OpType=ALLREDUCE, NumelIn=1,
+  Timeout(ms)=1800000) ran for 1800681 milliseconds before timing out.
+```
+
+The timed-out operation is the **post-save barrier** (`NumelIn=1` = barrier
+ALLREDUCE), not a gradient sync. The "saving checkpoint" message was printed,
+confirming the `all_gather` completed and rank 0 entered `torch.save()`.
+Rank 0 was still alive when rank 1 timed out (torchrun sent it SIGTERM),
+indicating `torch.save()` was blocked, not crashed.
+
+All three run_3 jobs started from scratch (`'use_pretrained': None` in every
+log) because no checkpoint was ever successfully written.
+
+### Root cause
+
+`torch.save()` uses zip serialization [10] that buffers the entire ~2 GB
+checkpoint (208M-parameter model + fused AdamW optimizer states) in CPU
+memory before writing a single byte to disk. On Lustre, a single large
+sequential write to one OST can stall for extended periods under
+cluster-wide I/O contention. The 30-minute NCCL timeout (set in B10) was
+exceeded by the Lustre write latency.
+
+Memory pressure was ruled out: 2 DDP processes on a 128 GB node use ~75 GB
+(32.8 GB dataset per process in uint16 + model/optimizer/activations). The
+594 GB SLURM "memory utilized" figure is virtual memory from CUDA BAR
+mappings, not resident memory. CUDA synchronisation was also ruled out:
+all training and NCCL operations complete before `torch.save()` is called.
+
+The root timeline across all three run_3 jobs:
+
+| Job | Date | Code state | Failure at step 2000 |
+|-----|------|-----------|---------------------|
+| 707599 | Mar 23 | Pre-B9 | `all_gather_object` 1 EB OOM (B9) |
+| 714422 | Mar 25 | Post-B9, pre-B10 | NCCL gradient ALLREDUCE timeout (B10) |
+| 724964 | Mar 27 | Post-B9 + B10 | Lustre I/O stall in `torch.save()` (this fix) |
+
+### Fix
+
+Three changes to make checkpoint save robust against Lustre latency:
+
+1. **Local-first save** (`optim/utils.py`): `torch.save()` now writes to a
+   temporary file in `/tmp` (node-local storage), then `shutil.copy2` copies
+   the serialised file to Lustre, followed by an `os.rename` for atomicity.
+   Serialisation and CUDA D2H copies happen against fast local I/O; only the
+   byte-level copy touches Lustre. This also prevents corrupted checkpoints:
+   the target path is never written directly, so a crash mid-write leaves
+   only a `.tmp` file that auto-resume ignores.
+
+2. **Checkpoint integrity on resume** (`main.py`): `torch.load()` is now
+   wrapped in a try/except for `RuntimeError` and `EOFError`. A corrupted
+   or truncated checkpoint prints a warning and falls back to fresh start
+   instead of crashing.
+
+3. **Silent resume logging** (`main.py`): `--use_pretrained auto` now prints
+   an explicit warning when no checkpoint is found, instead of silently
+   setting `use_pretrained=None`. A pre-existing typo (`sorted(checkpoint)`
+   referencing an undefined variable instead of `sorted(checkpoints)`) was
+   also fixed.
+
+---
+
 ## References
 
 [cotformer-paper]: https://openreview.net/forum?id=7igPXQFupX
@@ -683,3 +762,4 @@ Additionally, a duplicate `sync()` method definition in
 7. PyTorch Tutorial: [Getting Started with Distributed Data Parallel — Save/Load Checkpoints](https://docs.pytorch.org/tutorials/intermediate/ddp_tutorial.html).
 8. NVIDIA Megatron-LM: [checkpointing.py](https://github.com/NVIDIA/Megatron-LM/blob/main/megatron/training/checkpointing.py) — barrier after save labeled `# Wait so everyone is done (necessary)`.
 9. PyTorch 2.2 Docs: [`init_process_group`](https://docs.pytorch.org/docs/2.2/distributed.html#torch.distributed.init_process_group) — *"Default value is 10 minutes for NCCL [...] duration after which collectives will be aborted asynchronously."*
+10. PyTorch Issue [#63720](https://github.com/pytorch/pytorch/issues/63720): `torch.save` zip serialization buffers entire state dict in memory before writing — causes single large sequential write to filesystem.
