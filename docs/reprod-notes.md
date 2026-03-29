@@ -46,19 +46,12 @@
   - [B8. Missing `nullcontext` Import in `eval.py` (Original Code Bug) — Resolved](#b8-missing-nullcontext-import-in-evalpy-original-code-bug--resolved)
     - [Background](#background-3)
     - [Fix](#fix-3)
-  - [B9. GPU RNG Gather OOM on PyTorch 2.2.0 DDP (Checkpoint Save) — Resolved](#b9-gpu-rng-gather-oom-on-pytorch-220-ddp-checkpoint-save--resolved)
+  - [B9. DDP Checkpoint Save Failures — NCCL + Lustre (ADM) — Resolved](#b9-ddp-checkpoint-save-failures--nccl--lustre-adm--resolved)
     - [Background](#background-4)
-    - [Why the original authors didn't encounter this](#why-the-original-authors-didnt-encounter-this)
-    - [Why v1 training succeeded](#why-v1-training-succeeded)
-    - [Fix](#fix-4)
-  - [B10. NCCL ALLREDUCE Timeout After Checkpoint Save (DDP) — Resolved](#b10-nccl-allreduce-timeout-after-checkpoint-save-ddp--resolved)
-    - [Background](#background-5)
-    - [Root cause](#root-cause)
-    - [Fix](#fix-5)
-  - [B11. Lustre I/O Stall During Checkpoint Save (DDP) — Resolved](#b11-lustre-io-stall-during-checkpoint-save-ddp--resolved)
-    - [Background](#background-6)
-    - [Root cause](#root-cause-1)
-    - [Fix](#fix-6)
+    - [Failure timeline](#failure-timeline)
+    - [Root causes](#root-causes)
+    - [Affected files](#affected-files-cumulative-across-all-four-fix-iterations)
+    - [Checkpoint format compatibility](#checkpoint-format-compatibility)
   - [References](#references)
 
 ---
@@ -387,10 +380,12 @@ identical random sequences and breaking statistical independence.
 Three changes resolve the issue completely:
 
 1. **Per-rank GPU RNG gathering** (`optim/base.py`): before each checkpoint
-   save, `torch.distributed.all_gather_object` collects every rank's
-   `torch.cuda.get_rng_state()` into a list. Rank 0 saves this list as
-   `gpu_rng_states` (plural). Single-GPU runs wrap the local state in a
-   one-element list for format consistency.
+   save, all ranks' `torch.cuda.get_rng_state()` are collected into a list
+   via a Gloo (CPU) `all_gather`. Rank 0 saves this list as `gpu_rng_states`
+   (plural). Single-GPU runs wrap the local state in a one-element list for
+   format consistency. (The transport evolved through several iterations:
+   `all_gather_object` -> NCCL `all_gather` -> Gloo `all_gather` -- see B9
+   for the full history.)
 
 2. **Full restore on resume** (`optim/base.py`): all four RNG states are
    now restored. CPU, numpy, and Python RNG are restored directly (shared
@@ -538,213 +533,111 @@ Added `from contextlib import nullcontext` to the imports in `eval.py`.
 
 ---
 
-## B9. GPU RNG Gather OOM on PyTorch 2.2.0 DDP (Checkpoint Save) — Resolved
+## B9. DDP Checkpoint Save Failures — NCCL + Lustre (ADM) — Resolved
 
-**Impact:** Fatal crash on first DDP checkpoint save (step 2000)
-**Status:** Resolved.
-
-### Background
-
-The B4 fix (commit `29b9690`) introduced `torch.distributed.all_gather_object`
-to gather per-rank GPU RNG states during checkpoint saves. On PyTorch 2.2.0
-with the NCCL backend, `all_gather_object` pickles the Python object, exchanges
-pickled sizes via a CUDA all-gather, then resizes receive buffers to
-`max_object_size`. A corrupted value in the NCCL size-negotiation step [2]
-causes `input_tensor.resize_(max_object_size)` to request more than 1 EB of
-CUDA memory, triggering an immediate `torch.cuda.OutOfMemoryError`. Related
-NCCL-level fragmentation behaviour is documented in [3] and [4].
-
-The crash occurred on the ADM v2 re-training (run_3, job 707599) at step 2000
-— the first `save_checkpoint_freq` boundary:
-
-```
-optim/base.py line 221:
-  torch.distributed.all_gather_object(_gpu_rng_gathered, torch.cuda.get_rng_state())
-  → torch.cuda.OutOfMemoryError: Tried to allocate more than 1EB memory.
-```
-
-### Why the original authors didn't encounter this
-
-The original codebase was developed on single A100 80 GB GPUs without DDP
-(confirmed in B6). Single-GPU training never invokes distributed collective
-ops. The authors' checkpoint code saved only rank 0's RNG state and never
-restored it (restore calls were commented out). Without multi-GPU training,
-there was no need for cross-rank RNG gathering, and no opportunity to trigger
-the `all_gather_object` bug.
-
-### Why v1 training succeeded
-
-v1 (runs 0–2, jobs 696795/698707/701232) ran code from before commit `29b9690`
-— the `all_gather_object` call didn't exist yet. v2 (run_3, job 707599) was
-the first run to exercise the new code path.
-
-### Fix
-
-Replaced `all_gather_object` with `torch.distributed.all_gather` on fixed-size
-ByteTensors (`optim/base.py`, 2 locations: periodic and final checkpoint save).
-`torch.cuda.get_rng_state()` returns a fixed-size CPU ByteTensor — 16 bytes
-consisting of an 8-byte seed and 8-byte Philox offset, a compile-time constant
-in PyTorch's `CUDAGeneratorImpl.cpp`. Same-model GPUs produce identical tensor
-sizes, eliminating the need for pickle serialization and size negotiation
-entirely.
-
-Additionally, a defensive ByteTensor conversion was added in `main.py` for the
-plural `gpu_rng_states` checkpoint key, mirroring the existing conversion for
-the singular `gpu_rng_state` key. This ensures any checkpoint format —
-including those saved by the old `all_gather_object` path — loads correctly.
-
----
-
-## B10. NCCL ALLREDUCE Timeout After Checkpoint Save (DDP) — Resolved
-
-**Impact:** Fatal crash at first DDP checkpoint save (step 2000)
-**Status:** Resolved.
+**Impact:** Fatal crash at first DDP checkpoint save (step 2000), every run
+**Status:** Resolved. Required four fix iterations across five SLURM jobs.
 
 ### Background
 
-The B9 fix (commit `ef3bff5`) replaced `all_gather_object` with
-`torch.distributed.all_gather` on fixed-size ByteTensors. The `all_gather`
-itself completed successfully — "saving checkpoint" was printed — but the job
-crashed ~13 minutes later with an NCCL ALLREDUCE timeout:
+The B4 fix introduced per-rank GPU RNG gathering via
+`torch.distributed.all_gather_object` so that checkpoint saves preserve each
+rank's CUDA RNG state. This was the first code path to inject NCCL collective
+operations into the checkpoint save sequence. On our 2x L4 24 GB DDP setup
+(PyTorch 2.2.0+cu118, Lustre `/scratch/`), a cascade of four distinct
+failures prevented checkpoint saves from ever succeeding.
 
-```
-[rank0]: Watchdog caught collective operation timeout:
-  WorkNCCL(SeqNum=51989, OpType=ALLREDUCE, NumelIn=2360064,
-  Timeout(ms)=600000) ran for 600326 milliseconds before timing out.
-```
+The original codebase (single A100, no DDP) saved only rank 0's RNG state
+and never restored it (restore calls were commented out in `optim/base.py`).
+v1 training (runs 0-2) used pre-B4 code without any distributed RNG
+gathering and completed 60k steps without checkpoint issues.
 
-The timed-out operation is a **gradient ALLREDUCE** (DDP backward pass
-synchronisation), not the `all_gather` for RNG states. Two jobs in run_3
-exhibited the failure:
+### Failure timeline
 
-| Job | Code version | Error | Step |
-|-----|-------------|-------|------|
-| 707599 | Pre-B9 (`all_gather_object`) | `OutOfMemoryError: >1EB` (B9) | 2000 |
-| 714422 | Post-B9 (`all_gather` ByteTensors) | NCCL ALLREDUCE timeout | 2000 |
+All five run_3 jobs crashed at step 2000 (`save_checkpoint_freq` boundary):
 
-### Root cause
+| Job | Date | Fix state | Error | Root cause |
+|-----|------|-----------|-------|------------|
+| 707599 | Mar 23 | B4 only | `OutOfMemoryError: >1EB` in `all_gather_object` | NCCL size-negotiation corruption [2][3][4] |
+| 714422 | Mar 25 | + ByteTensor gather | NCCL gradient ALLREDUCE timeout (SeqNum=51989, NumelIn=2360064) | No barrier after save; rank 1 races ahead [5][6] |
+| 724964 | Mar 27 | + barrier + 30 min timeout | NCCL barrier timeout (SeqNum=51988, NumelIn=1, 1800s) | Lustre I/O stall in `torch.save` [10] |
+| 726223 | Mar 28 | + local-first save to `/tmp` | NCCL barrier timeout (SeqNum=51988, NumelIn=1, 1800s) | NCCL LL protocol hang (see below) |
+| *(next)* | | + Gloo checkpoint coordination | *(expected: success)* | |
 
-After the `all_gather` completes, only rank 0 writes the checkpoint to disk
-via `torch.save` (~2.5 GB of model + AdamW optimizer state). Rank 1 skips
-the `is_master_process()` block and immediately continues to the next training
-step. The sequence:
+### Root causes
 
-1. Both ranks complete `all_gather` (RNG states gathered)
-2. Rank 0 enters `torch.save` (blocking I/O to `/scratch/` Lustre filesystem)
-3. Rank 1 continues to step 2010, completes forward + backward, reaches
-   gradient ALLREDUCE — **waits for rank 0**
-4. Rank 0 is still blocked on the Lustre write (~4 MB/s under contention)
-5. After 600 seconds (NCCL default timeout), rank 1's watchdog fires
+**1. `all_gather_object` OOM (job 707599).** `all_gather_object` pickles
+Python objects and exchanges sizes via CUDA all-gather. A corrupted value in
+NCCL's size-negotiation step [2] caused a >1 EB allocation request.
+`torch.cuda.get_rng_state()` returns a fixed-size CPU ByteTensor, so pickle
+serialization was unnecessary. **Fix:** replaced with `torch.distributed.all_gather`
+on fixed-size ByteTensors (commit `ef3bff5`). A defensive ByteTensor conversion
+was added in `main.py` for backward-compatible checkpoint loading.
 
-This race condition was **latent in the original code** — the pre-B4 checkpoint
-save was also master-only with no barrier (line 206–219 of the original
-`optim/base.py`). The v1 training (runs 0–2) never triggered it because the
-filesystem was faster on those particular nodes/times. The B9 fix did not
-introduce the race; it merely exposed it by successfully reaching the save
-(instead of crashing at `all_gather_object`). As the PyTorch team notes,
-"almost all NCCL watchdog timeout errors are caused by collective
-desynchronization (mismatch) rather than slowness" [5].
+**2. Missing post-save barrier (job 714422).** After the gather, only rank 0
+writes the ~2.5 GB checkpoint. Without a barrier, rank 1 races to the next
+gradient ALLREDUCE while rank 0 is blocked on Lustre I/O, exceeding the NCCL
+10-minute default timeout [9]. This race was latent in the original code.
+The torchtune project hit the identical pattern [6]. **Fix:** added
+`distributed_backend.sync()` after both periodic and final checkpoint saves,
+following the Megatron-LM pattern [7][8]. Increased `init_process_group`
+timeout to 30 minutes [9].
 
-The torchtune project hit the exact same failure pattern [6] — NCCL ALLREDUCE
-timeout during Llama 3.1 70B checkpoint save on 8x V100.
+**3. Lustre I/O stall (job 724964).** `torch.save()` buffers the entire
+checkpoint in memory before writing [10]. Under cluster I/O contention,
+a single ~2 GB sequential write to one Lustre OST stalled for >30 minutes,
+exceeding the post-save barrier timeout. Memory pressure and CUDA
+synchronisation were both ruled out. **Fix:** local-first save
+(`optim/utils.py`): `torch.save()` to `/tmp` (node-local), then
+`shutil.copy2` to Lustre + `os.rename` for atomicity. Also added
+checkpoint integrity handling on resume (`main.py`: try/except for
+corrupted files, explicit warning on missing checkpoints).
 
-### Fix
+**4. NCCL LL protocol hang (job 726223).** With the local-first save, the
+checkpoint completed in 3.8 seconds and the "checkpoint saved" message was
+printed. Yet the post-save barrier still hung for 30 minutes. The root
+cause: NCCL's Low-Latency (LL) protocol on NCCL 2.15-2.17 (CUDA 11.8) has
+a slot-reuse race when switching between collective types at small tensor
+sizes. After ~52K gradient AllReduces using the Simple protocol (large
+tensors), the first LL-protocol operations --- `all_gather` (16 bytes) then
+`barrier` (1-element AllReduce) --- trigger the hang. NCCL 2.18.1 fixed the
+LL cleanup race [11]; our PyTorch 2.2.0+cu118 ships an affected version.
 
-Two changes, following the canonical DDP checkpoint pattern [7] used by
-Megatron-LM [8], DeepSpeed, HuggingFace Transformers, Meta Lingua, and
-PyTorch Lightning:
+Crucially, our code was the only framework using NCCL tensor collectives for
+RNG gathering. Meta's torchtitan [12], Megatron-LM [8], HuggingFace
+Accelerate, and DeepSpeed all use either Gloo (CPU) process groups or
+per-rank files for checkpoint metadata exchange --- never NCCL.
 
-1. **Barrier after checkpoint save** (`optim/base.py`, 2 locations): added
-   `distributed_backend.sync()` after both the periodic and final checkpoint
-   save blocks. This forces all ranks to wait for rank 0's `torch.save` to
-   complete before any rank proceeds to the next training step. The barrier
-   is a standard NCCL collective (`torch.distributed.barrier`) that blocks
-   until all ranks have entered it.
+**Fix:** replaced all NCCL operations in the checkpoint path with a secondary
+Gloo (CPU/TCP) process group (`distributed/ddp.py`):
 
-2. **NCCL timeout increase** (`distributed/ddp.py`): changed
-   `init_process_group(backend=...)` to pass `timeout=timedelta(minutes=30)`,
-   increasing the NCCL operation timeout from the default 10 minutes [9] to
-   30 minutes. This provides headroom if the Lustre filesystem is slow; the
-   barrier ensures correctness, the timeout ensures the barrier itself does
-   not prematurely abort.
+- `dist.new_group(backend="gloo")` created at init, used for RNG `all_gather`
+  (CPU ByteTensors, no GPU round-trip) and post-save `barrier`.
+- `broadcast_buffers=False` added to DDP constructor (all registered buffers
+  are deterministic from config; eliminates unnecessary NCCL broadcasts).
+- `NCCL_PROTO=Simple` set in `iridis/adm-train/job.sh` as belt-and-suspenders
+  (forces Simple protocol for all remaining NCCL ops; negligible throughput
+  impact on PCIe: ~0.04%).
 
-Additionally, a duplicate `sync()` method definition in
-`DataParallelDistributedBackend` (lines 59 and 65) was removed.
+### Affected files (cumulative across all four fix iterations)
 
----
+| File | Changes |
+|------|---------|
+| `optim/base.py` | Gloo `all_gather` for RNG, Gloo barrier after save (2 locations) |
+| `optim/utils.py` | Local-first save to `/tmp` then copy to Lustre |
+| `distributed/ddp.py` | Gloo process group, `broadcast_buffers=False`, 30 min NCCL timeout |
+| `main.py` | ByteTensor conversion for `gpu_rng_states`, try/except on `torch.load`, resume logging |
+| `iridis/adm-train/job.sh` | `NCCL_PROTO=Simple` environment variable |
 
-## B11. Lustre I/O Stall During Checkpoint Save (DDP) — Resolved
+### Checkpoint format compatibility
 
-**Impact:** Fatal crash at DDP checkpoint save (step 2000); 30-minute hang
-**Status:** Resolved.
-
-### Background
-
-With B9 and B10 deployed, the `all_gather` for GPU RNG states and the
-post-save barrier both function correctly. However, run_3 job 724964
-(the first job to exercise the fully-fixed code path) still crashed at step
-2000 with a 30-minute NCCL barrier timeout:
-
-```
-[rank1]: Watchdog caught collective operation timeout:
-  WorkNCCL(SeqNum=51988, OpType=ALLREDUCE, NumelIn=1,
-  Timeout(ms)=1800000) ran for 1800681 milliseconds before timing out.
-```
-
-The timed-out operation is the **post-save barrier** (`NumelIn=1` = barrier
-ALLREDUCE), not a gradient sync. The "saving checkpoint" message was printed,
-confirming the `all_gather` completed and rank 0 entered `torch.save()`.
-Rank 0 was still alive when rank 1 timed out (torchrun sent it SIGTERM),
-indicating `torch.save()` was blocked, not crashed.
-
-All three run_3 jobs started from scratch (`'use_pretrained': None` in every
-log) because no checkpoint was ever successfully written.
-
-### Root cause
-
-`torch.save()` uses zip serialization [10] that buffers the entire ~2 GB
-checkpoint (208M-parameter model + fused AdamW optimizer states) in CPU
-memory before writing a single byte to disk. On Lustre, a single large
-sequential write to one OST can stall for extended periods under
-cluster-wide I/O contention. The 30-minute NCCL timeout (set in B10) was
-exceeded by the Lustre write latency.
-
-Memory pressure was ruled out: 2 DDP processes on a 128 GB node use ~75 GB
-(32.8 GB dataset per process in uint16 + model/optimizer/activations). The
-594 GB SLURM "memory utilized" figure is virtual memory from CUDA BAR
-mappings, not resident memory. CUDA synchronisation was also ruled out:
-all training and NCCL operations complete before `torch.save()` is called.
-
-The root timeline across all three run_3 jobs:
-
-| Job | Date | Code state | Failure at step 2000 |
-|-----|------|-----------|---------------------|
-| 707599 | Mar 23 | Pre-B9 | `all_gather_object` 1 EB OOM (B9) |
-| 714422 | Mar 25 | Post-B9, pre-B10 | NCCL gradient ALLREDUCE timeout (B10) |
-| 724964 | Mar 27 | Post-B9 + B10 | Lustre I/O stall in `torch.save()` (this fix) |
-
-### Fix
-
-Three changes to make checkpoint save robust against Lustre latency:
-
-1. **Local-first save** (`optim/utils.py`): `torch.save()` now writes to a
-   temporary file in `/tmp` (node-local storage), then `shutil.copy2` copies
-   the serialised file to Lustre, followed by an `os.rename` for atomicity.
-   Serialisation and CUDA D2H copies happen against fast local I/O; only the
-   byte-level copy touches Lustre. This also prevents corrupted checkpoints:
-   the target path is never written directly, so a crash mid-write leaves
-   only a `.tmp` file that auto-resume ignores.
-
-2. **Checkpoint integrity on resume** (`main.py`): `torch.load()` is now
-   wrapped in a try/except for `RuntimeError` and `EOFError`. A corrupted
-   or truncated checkpoint prints a warning and falls back to fresh start
-   instead of crashing.
-
-3. **Silent resume logging** (`main.py`): `--use_pretrained auto` now prints
-   an explicit warning when no checkpoint is found, instead of silently
-   setting `use_pretrained=None`. A pre-existing typo (`sorted(checkpoint)`
-   referencing an undefined variable instead of `sorted(checkpoints)`) was
-   also fixed.
+The checkpoint format is unchanged: `gpu_rng_states` is a list of CPU
+ByteTensors regardless of whether Gloo or NCCL was used for gathering.
+Old checkpoints with the legacy singular `gpu_rng_state` key are handled
+by the fallback path in `optim/base.py`. Non-ADM models (base,
+cotformer_full_depth, cotformer_full_depth_lnmid_depthemb) have
+`dropout=0.0` and no `torch.rand` calls, so RNG state is irrelevant to
+their training math.
 
 ---
 
@@ -754,12 +647,14 @@ Three changes to make checkpoint save robust against Lustre latency:
 [segyges-mirror]: https://huggingface.co/datasets/segyges/OpenWebText2
 
 1. Mohtashami, A. et al. (2025). *CoTFormer: A Chain-of-Thought Driven Architecture with Budget-Adaptive Computation Cost at Inference.* [ICLR 2025](https://openreview.net/forum?id=7igPXQFupX)
-2. PyTorch Issue [#145965](https://github.com/pytorch/pytorch/issues/145965): `all_gather_object` 1 EB OOM — confirmed by maintainer @kwen2501 as collective call ordering mismatch corrupting size negotiation.
+2. PyTorch Issue [#145965](https://github.com/pytorch/pytorch/issues/145965): `all_gather_object` 1 EB OOM --- confirmed by maintainer @kwen2501 as collective call ordering mismatch corrupting size negotiation.
 3. PyTorch Issue [#116177](https://github.com/pytorch/pytorch/issues/116177): NCCL collective OOM under high GPU memory utilization.
 4. NVIDIA/nccl Issue [#962](https://github.com/NVIDIA/nccl/issues/962): NCCL allocator fragmentation during `all_gather_object`.
-5. PyTorch Blog: [Flight Recorder — A New Lens for Understanding NCCL Watchdog Timeouts](https://pytorch.org/blog/flight-recorder-a-new-lens-for-understanding-nccl-watchdog-timeouts/) (2024).
+5. PyTorch Blog: [Flight Recorder --- A New Lens for Understanding NCCL Watchdog Timeouts](https://pytorch.org/blog/flight-recorder-a-new-lens-for-understanding-nccl-watchdog-timeouts/) (2024).
 6. PyTorch/torchtune Issue [#2093](https://github.com/meta-pytorch/torchtune/issues/2093): NCCL ALLREDUCE timeout during Llama 3.1 70B checkpoint save on multi-GPU.
-7. PyTorch Tutorial: [Getting Started with Distributed Data Parallel — Save/Load Checkpoints](https://docs.pytorch.org/tutorials/intermediate/ddp_tutorial.html).
-8. NVIDIA Megatron-LM: [checkpointing.py](https://github.com/NVIDIA/Megatron-LM/blob/main/megatron/training/checkpointing.py) — barrier after save labeled `# Wait so everyone is done (necessary)`.
-9. PyTorch 2.2 Docs: [`init_process_group`](https://docs.pytorch.org/docs/2.2/distributed.html#torch.distributed.init_process_group) — *"Default value is 10 minutes for NCCL [...] duration after which collectives will be aborted asynchronously."*
-10. PyTorch Issue [#63720](https://github.com/pytorch/pytorch/issues/63720): `torch.save` zip serialization buffers entire state dict in memory before writing — causes single large sequential write to filesystem.
+7. PyTorch Tutorial: [Getting Started with Distributed Data Parallel --- Save/Load Checkpoints](https://docs.pytorch.org/tutorials/intermediate/ddp_tutorial.html).
+8. NVIDIA Megatron-LM: [checkpointing.py](https://github.com/NVIDIA/Megatron-LM/blob/main/megatron/training/checkpointing.py) --- barrier after save labeled `# Wait so everyone is done (necessary)`.
+9. PyTorch 2.2 Docs: [`init_process_group`](https://docs.pytorch.org/docs/2.2/distributed.html#torch.distributed.init_process_group) --- *"Default value is 10 minutes for NCCL [...] duration after which collectives will be aborted asynchronously."*
+10. PyTorch Issue [#63720](https://github.com/pytorch/pytorch/issues/63720): `torch.save` zip serialization buffers entire state dict in memory before writing --- causes single large sequential write to filesystem.
+11. NCCL 2.18.1 Release Notes: fixed LL protocol cleanup race on PCIe when switching between collective types in rapid succession. Related: PyTorch Issue [#104530](https://github.com/pytorch/pytorch/issues/104530) (DDP hang at specific step count traced to NCCL proxy thread state); NVIDIA/nccl Issue [#789](https://github.com/NVIDIA/nccl/issues/789) (LL protocol hang on PCIe with mixed collective types).
+12. Meta torchtitan: [checkpoint.py](https://github.com/pytorch/torchtitan/blob/main/torchtitan/components/checkpoint.py) --- uses `dist.new_group(backend="gloo")` for checkpoint coordination, decoupling checkpoint I/O from NCCL training collectives.

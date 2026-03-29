@@ -213,17 +213,17 @@ def train_base(model, opt, data, data_seed, scheduler, iterations, acc_steps, ba
 
                 model.train()
                 t0 = time.time()
-        # Checkpoint save: all ranks must evaluate the frequency check together
+        # Checkpoint save: all ranks evaluate the frequency check together
         # because the GPU RNG gather is a collective op.
         if extra_args.save_checkpoint_freq is not None and itr % extra_args.save_checkpoint_freq == 0:
-            # Use all_gather on fixed-size ByteTensors instead of all_gather_object,
-            # which OOMs on PyTorch 2.2.0 + NCCL (see reprod-notes B9).
+            # Gather per-rank CUDA RNG states via Gloo (CPU tensors, no NCCL).
+            # Previous versions used NCCL all_gather on CUDA ByteTensors, which
+            # triggered an LL-protocol hang after ~52K gradient AllReduces on
+            # NCCL 2.15-2.17 / CUDA 11.8 (see reprod-notes B9).
             if distributed_backend.get_world_size() > 1:
                 local_rng = torch.cuda.get_rng_state()  # CPU ByteTensor, fixed size
-                local_rng_cuda = local_rng.to(extra_args.device)
-                _gpu_rng_gathered_cuda = [torch.empty_like(local_rng_cuda) for _ in range(distributed_backend.get_world_size())]
-                torch.distributed.all_gather(_gpu_rng_gathered_cuda, local_rng_cuda)
-                _gpu_rng_gathered = [t.cpu() for t in _gpu_rng_gathered_cuda]
+                _gpu_rng_gathered = [torch.empty_like(local_rng) for _ in range(distributed_backend.get_world_size())]
+                torch.distributed.all_gather(_gpu_rng_gathered, local_rng, group=distributed_backend.cpu_group)
             else:
                 _gpu_rng_gathered = [torch.cuda.get_rng_state()]
 
@@ -243,19 +243,16 @@ def train_base(model, opt, data, data_seed, scheduler, iterations, acc_steps, ba
 
             # Barrier: wait for rank 0 torch.save before next training step.
             # Without this, non-master ranks race to the next gradient ALLREDUCE
-            # while rank 0 is still writing to disk, causing NCCL timeout (B10).
+            # while rank 0 is still writing to disk (see reprod-notes B9).
             if distributed_backend.get_world_size() > 1:
                 distributed_backend.sync()
 
     # Final checkpoint — gather GPU RNG from all ranks before master writes.
-    # Use all_gather on fixed-size ByteTensors instead of all_gather_object,
-    # which OOMs on PyTorch 2.2.0 + NCCL (see reprod-notes B9).
+    # Gloo (CPU) gather — same rationale as periodic checkpoint above (see reprod-notes B9).
     if distributed_backend.get_world_size() > 1:
         local_rng = torch.cuda.get_rng_state()  # CPU ByteTensor, fixed size
-        local_rng_cuda = local_rng.to(extra_args.device)
-        _gpu_rng_gathered_cuda = [torch.empty_like(local_rng_cuda) for _ in range(distributed_backend.get_world_size())]
-        torch.distributed.all_gather(_gpu_rng_gathered_cuda, local_rng_cuda)
-        _gpu_rng_gathered = [t.cpu() for t in _gpu_rng_gathered_cuda]
+        _gpu_rng_gathered = [torch.empty_like(local_rng) for _ in range(distributed_backend.get_world_size())]
+        torch.distributed.all_gather(_gpu_rng_gathered, local_rng, group=distributed_backend.cpu_group)
     else:
         _gpu_rng_gathered = [torch.cuda.get_rng_state()]
 
@@ -277,7 +274,7 @@ def train_base(model, opt, data, data_seed, scheduler, iterations, acc_steps, ba
                  if 'ckpt_' in file_:
                     os.remove(os.path.join(ckpt_path, file_))
 
-    # Barrier: wait for rank 0 final save before process cleanup (B10).
+    # Barrier: wait for rank 0 final save before process cleanup (see reprod-notes B9).
     if distributed_backend.get_world_size() > 1:
         distributed_backend.sync()
 

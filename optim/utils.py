@@ -55,7 +55,7 @@ def save_checkpoint(distributed_backend, model, opt, scheduler, itr, ckpt_path, 
     # torch.save() uses zip serialization that buffers the entire state dict
     # before flushing — a single ~2 GB write to Lustre can stall for 30+ min
     # under cluster I/O contention, causing the post-save DDP barrier to
-    # timeout (see reprod-notes B11).
+    # timeout (see reprod-notes B9).
     import shutil, tempfile, time
 
     t0 = time.time()

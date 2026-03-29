@@ -109,6 +109,10 @@ eval "$(conda shell.bash hook)"
 conda activate "$CONDA_ENV_PREFIX"
 
 export WANDB_MODE=offline
+# Force NCCL Simple protocol for all collectives — avoids LL-protocol hang
+# on NCCL 2.15-2.17 / CUDA 11.8 when mixing small and large tensor ops.
+# Negligible throughput impact on PCIe L4s (~0.04% overhead). See reprod-notes B9.
+export NCCL_PROTO=Simple
 
 cd "$REPO_DIR"
 

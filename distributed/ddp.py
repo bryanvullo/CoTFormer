@@ -3,6 +3,7 @@ import math
 from contextlib import contextmanager
 from datetime import timedelta
 
+import torch.distributed as dist
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.distributed import init_process_group, destroy_process_group, get_world_size, barrier
 
@@ -18,6 +19,11 @@ class DataParallelDistributedBackend(DistributedBackend):
         init_process_group(backend=args.distributed_backend,
                            timeout=timedelta(minutes=30))
         self.local_rank = int(os.environ['LOCAL_RANK'])
+        # Secondary Gloo (CPU/TCP) process group for checkpoint coordination.
+        # Checkpoint saves need a barrier + small RNG gather — using NCCL for
+        # these tiny ops triggers an LL-protocol hang on NCCL 2.15-2.17/CUDA
+        # 11.8 after ~52K Simple-protocol gradient AllReduces (see reprod-notes B9).
+        self.cpu_group = dist.new_group(backend="gloo")
 
     def get_adjusted_args_for_process(self, args):
         effective_batch_size = args.batch_size * args.acc_steps
@@ -38,7 +44,11 @@ class DataParallelDistributedBackend(DistributedBackend):
         return args
 
     def transform_model(self, model):
-        return DDP(model, device_ids=[self.local_rank], find_unused_parameters=False)
+        # broadcast_buffers=False: all registered buffers (RotaryPositionalEncoder.freqs,
+        # CausalSelfAttention.bias) are deterministic from config — identical on all
+        # ranks, never mutated. Broadcasting them every forward is wasted NCCL traffic.
+        return DDP(model, device_ids=[self.local_rank],
+                   find_unused_parameters=False, broadcast_buffers=False)
 
     @contextmanager
     def get_context_for_microstep_forward(self, model, microstep_idx, gradient_accumulation_steps):
@@ -59,7 +69,7 @@ class DataParallelDistributedBackend(DistributedBackend):
         return get_world_size()
     
     def sync(self):
-        barrier()
+        barrier(group=self.cpu_group)
 
     def finalize(self):
         destroy_process_group()
