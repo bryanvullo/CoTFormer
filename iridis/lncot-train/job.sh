@@ -126,6 +126,9 @@ conda activate "$CONDA_ENV_PREFIX"
 # WandB offline (compute nodes have no internet)
 export WANDB_MODE=offline
 
+# NCCL: force Simple protocol to avoid LL-protocol hangs (see reprod-notes B9)
+export NCCL_PROTO=Simple
+
 cd "$REPO_DIR"
 
 # --- GPU diagnostics ---

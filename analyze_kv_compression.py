@@ -41,7 +41,7 @@ import torch
 import models
 
 
-def load_model_from_checkpoint(checkpoint_dir):
+def load_model_from_checkpoint(checkpoint_dir, checkpoint_file="ckpt.pt"):
     """Load a trained model from its checkpoint directory."""
     summary_path = os.path.join(checkpoint_dir, "summary.json")
     if not os.path.exists(summary_path):
@@ -58,7 +58,7 @@ def load_model_from_checkpoint(checkpoint_dir):
 
     model = models.make_model_from_args(config)
 
-    ckpt_path = os.path.join(checkpoint_dir, "ckpt.pt")
+    ckpt_path = os.path.join(checkpoint_dir, checkpoint_file)
     if os.path.exists(ckpt_path):
         checkpoint = torch.load(ckpt_path, map_location="cpu")
         state_dict = {
@@ -450,6 +450,8 @@ def main():
     )
     parser.add_argument("--checkpoint", type=str, required=True,
                         help="Path to checkpoint directory (must contain summary.json)")
+    parser.add_argument("--checkpoint-file", type=str, default="ckpt.pt",
+                        help="Checkpoint filename within directory (default: ckpt.pt)")
     parser.add_argument("--target-rank", type=int, default=192,
                         help="Target kv_lora_rank for MLA (default: 192, DeepSeek-V2)")
     parser.add_argument("--compute-activations", action="store_true",
@@ -467,7 +469,7 @@ def main():
     print("=" * 70)
 
     # Load model
-    model, config = load_model_from_checkpoint(args.checkpoint)
+    model, config = load_model_from_checkpoint(args.checkpoint, args.checkpoint_file)
     model.eval()
 
     # Type A: Weight-level analysis (always run, fast)

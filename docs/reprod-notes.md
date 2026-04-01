@@ -8,11 +8,11 @@
 - [Reproducibility Notes](#reproducibility-notes)
   - [Table of Contents](#table-of-contents)
 - [Part A: Successful Replications](#part-a-successful-replications)
-  - [A1. LN-CoTFormer Perplexity (Table 2)](#a1-ln-cotformer-perplexity-table-2)
+  - [A1. LN-CoTFormer Perplexity (Table 2, 40k steps)](#a1-ln-cotformer-perplexity-table-2-40k-steps)
   - [A2. Architecture Depth](#a2-architecture-depth)
   - [A3. Training Stability](#a3-training-stability)
   - [A4. Effective Batch Size](#a4-effective-batch-size)
-  - [A5. ADM Perplexity (Section 4.2, Figure 4)](#a5-adm-perplexity-section-42-figure-4)
+  - [A5. ADM Perplexity (Section 4.2, Figure 4, 60k steps)](#a5-adm-perplexity-section-42-figure-4-60k-steps)
 - [Part B: Known Divergences](#part-b-known-divergences)
   - [B1. Train/Val Split Divergence](#b1-trainval-split-divergence)
     - [B1a. Document ordering](#b1a-document-ordering)
@@ -562,7 +562,7 @@ All five run_3 jobs crashed at step 2000 (`save_checkpoint_freq` boundary):
 | 714422 | Mar 25 | + ByteTensor gather | NCCL gradient ALLREDUCE timeout (SeqNum=51989, NumelIn=2360064) | No barrier after save; rank 1 races ahead [5][6] |
 | 724964 | Mar 27 | + barrier + 30 min timeout | NCCL barrier timeout (SeqNum=51988, NumelIn=1, 1800s) | Lustre I/O stall in `torch.save` [10] |
 | 726223 | Mar 28 | + local-first save to `/tmp` | NCCL barrier timeout (SeqNum=51988, NumelIn=1, 1800s) | NCCL LL protocol hang (see below) |
-| *(next)* | | + Gloo checkpoint coordination | *(expected: success)* | |
+| (resolved) | Mar 29 | + Gloo checkpoint coordination | Success | Gloo bypass of NCCL confirmed [12]; ADM v2 completed 60k steps (A5) |
 
 ### Root causes
 
