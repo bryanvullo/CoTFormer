@@ -119,9 +119,14 @@ def main(args):
     if not os.path.exists(ckpt_path):
         if distributed_backend.is_master_process():
             os.makedirs(ckpt_path)
-    elif os.path.isfile(f"{ckpt_path}/summary.json"): # the experiment was already completed
-            print(f"Already found experiment '{ckpt_path}'.\nSkipping.")
+    elif os.path.isfile(f"{ckpt_path}/summary.json"):
+        with open(f"{ckpt_path}/summary.json") as f:
+            prev_iters = json.load(f)["args"].get("iterations", 0)
+        if args.iterations <= prev_iters:
+            print(f"Already completed experiment '{ckpt_path}' ({prev_iters} iters).\nSkipping.")
             sys.exit(0)
+        else:
+            print(f"Extending experiment '{ckpt_path}' from {prev_iters} to {args.iterations} iters.")
     distributed_backend.sync()
 
     itr = 0
