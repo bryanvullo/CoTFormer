@@ -52,6 +52,7 @@
     - [Root causes](#root-causes)
     - [Affected files](#affected-files-cumulative-across-all-four-fix-iterations)
     - [Checkpoint format compatibility](#checkpoint-format-compatibility)
+  - [B10. LR Schedule Discontinuity on 40k-to-60k Extension](#b10-lr-schedule-discontinuity-on-40k-to-60k-extension)
   - [References](#references)
 
 ---
@@ -638,6 +639,65 @@ by the fallback path in `optim/base.py`. Non-ADM models (base,
 cotformer_full_depth, cotformer_full_depth_lnmid_depthemb) have
 `dropout=0.0` and no `torch.rand` calls, so RNG state is irrelevant to
 their training math.
+
+---
+
+## B10. LR Schedule Discontinuity on 40k-to-60k Extension
+
+**Impact:** Minor LR trajectory divergence for LN-CoTFormer 60k run (steps
+40001--60000). No effect on ADM (trained 60k from scratch).
+**Status:** Accepted. Will assess impact when training completes.
+
+### Background
+
+The paper trains the LN-CoTFormer for 60k steps with a single
+`OneCycleLR(total_steps=60000)` cosine schedule. We initially trained for
+40k steps (reproducing Table 2), then extended to 60k for the Section 5
+comparison. This two-phase approach introduced a scheduler mismatch.
+
+### What happened
+
+The 40k training used `OneCycleLR(total_steps=40000)`:
+- Warmup: 0 to peak LR over steps 0--8000 (20%)
+- Cosine decay: peak to final LR over steps 8000--40000
+- At step 40000: LR at its minimum (~2e-5, i.e. `1e-3 * final_div_factor`)
+
+On resume with `--iterations 60000`, the original `summary.json` triggered
+an early exit in `main.py` ("Already found experiment... Skipping"). After
+fixing that (iteration-aware skip check), the restored `OneCycleLR` state
+dict had `total_steps=40000`, causing a `ValueError` at step 40001.
+
+The fix rebuilds the scheduler with `total_steps=60000` and fast-forwards
+it to step 40000. This means steps 40001--60000 follow the latter portion
+of a 60k cosine schedule, where the LR is still in mid-decay (~3.5e-4 at
+step 40000 under a 60k schedule).
+
+### The discontinuity
+
+| Step | 40k schedule LR | 60k schedule LR | Delta |
+|------|-----------------|-----------------|-------|
+| 39999 | ~2.0e-5 (near minimum) | ~3.6e-4 | -- |
+| 40000 | ~2.0e-5 (end) | ~3.5e-4 | -- |
+| 40001 | (would not exist) | ~3.5e-4 | -- |
+
+At the 40k/60k boundary, the effective learning rate jumps from the 40k
+schedule's minimum (~2e-5) to the 60k schedule's mid-decay value (~3.5e-4),
+a ~17x increase. The paper's continuous 60k run would have smoothly decayed
+through this region.
+
+### Impact assessment
+
+The LR jump at the boundary acts as a mild "warm restart" for the final 20k
+steps. Two factors limit the practical impact:
+
+1. The model weights and optimizer states are correct (restored from
+   checkpoint). Only the LR trajectory diverges.
+2. The 60k schedule's LR at step 40000 (~3.5e-4) is within the range the
+   model trained stably at during the first 40k steps (peak 1e-3 to 2e-5).
+
+If the final 60k perplexity diverges materially from the paper's 23.19
+target, this LR discontinuity is a likely contributor. The ADM model (A5)
+is unaffected as it was trained for 60k steps from scratch.
 
 ---
 

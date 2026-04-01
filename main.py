@@ -115,6 +115,7 @@ def main(args):
         del params_copy['device']
         wandb.init(project=args.wandb_project, name=exp_name, config=params_copy, entity=args.wandb_entity)
     
+    extending = False
     ckpt_path = os.path.join(args.results_base_folder, args.dataset, args.model, exp_name)
     if not os.path.exists(ckpt_path):
         if distributed_backend.is_master_process():
@@ -126,6 +127,7 @@ def main(args):
             print(f"Already completed experiment '{ckpt_path}' ({prev_iters} iters).\nSkipping.")
             sys.exit(0)
         else:
+            extending = True
             print(f"Extending experiment '{ckpt_path}' from {prev_iters} to {args.iterations} iters.")
     distributed_backend.sync()
 
@@ -185,8 +187,17 @@ def main(args):
         opt.load_state_dict(optimizer_state_dict)
         itr = checkpoint['itr']
         if scheduler is not None:
-            scheduler_state_dict = checkpoint['scheduler']
-            scheduler.load_state_dict(scheduler_state_dict)
+            if extending:
+                # Extending training: scheduler was created with new total_steps.
+                # Don't restore old state (has old total_steps that would block).
+                # Fast-forward the fresh scheduler to the resume iteration.
+                for _ in range(itr):
+                    scheduler.step()
+                print(f"Scheduler rebuilt for {args.iterations} total steps, "
+                      f"fast-forwarded to itr {itr} (lr={scheduler.get_last_lr()[0]:.6f})")
+            else:
+                scheduler_state_dict = checkpoint['scheduler']
+                scheduler.load_state_dict(scheduler_state_dict)
 
     if True: # all train functions have the same interface
         train = train_base
