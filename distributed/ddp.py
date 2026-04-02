@@ -16,7 +16,7 @@ class DataParallelDistributedBackend(DistributedBackend):
         assert self.rank != -1, "DDP backend can not be used without rank"
         assert "cuda" in args.device, "DDP backend can not be used on non-CUDA devices"
         init_process_group(backend=args.distributed_backend,
-                           timeout=timedelta(minutes=30))
+                           timeout=timedelta(minutes=60))
         self.local_rank = int(os.environ['LOCAL_RANK'])
 
     def get_adjusted_args_for_process(self, args):
