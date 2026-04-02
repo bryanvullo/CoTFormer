@@ -69,6 +69,7 @@ def main(args):
         sequence_length=args.sequence_length,
         batch_size=args.batch_size,
         seed=args.data_seed,
+	#distributed_backend=distributed_backend, # <-- ADD THIS /actually dont
     )  
     
     model = models.make_model_from_args(args).to(args.device) # todo: take care of initializing the model if args.use_pretrained != 'none'
