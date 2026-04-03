@@ -144,7 +144,7 @@ def train_base(model, opt, data, data_seed, scheduler, iterations, acc_steps, ba
                     data_val_iter = iter(data_val)
 
                 val_acc, val_loss, val_perplexity, avg_depth = eval(
-                    model,
+                    distributed_backend.get_raw_model(model),
                     data_val_iter,
                     extra_args.device,
                     max_num_batches=eval_steps,

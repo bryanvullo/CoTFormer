@@ -83,6 +83,7 @@ def main():
     output = args.output or os.path.join(ckpt, "figure4_pareto.png")
     plt.savefig(output, dpi=150, bbox_inches="tight")
     print(f"Figure 4 saved: {output}")
+    print("Note: 'LN-Block Universal (Router)' curve omitted -- requires a separate trained model.")
     plt.close()
 
 

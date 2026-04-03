@@ -1,5 +1,6 @@
 import os
 import sys
+import math
 import numpy as np
 import torch
 import inspect
@@ -30,7 +31,9 @@ def get_args(args=None):
     parser = argparse.ArgumentParser(allow_abbrev=False)
     parser.add_argument('--checkpoint', type=none_or_str, required=True)
     parser.add_argument('--config_format', type=str, required=False)
-    
+    parser.add_argument('--output_dir', type=none_or_str, default=None,
+                        help='Directory for eval_summary JSON output. Defaults to checkpoint dir.')
+
     args, rem_args = parser.parse_known_args(args)
 
     if args.checkpoint is not None:
@@ -45,7 +48,7 @@ def get_args(args=None):
         for k, v in summary['args'].items():
             if k == "config_format" and args.config_format is not None:
                 continue
-            if k not in ["device", "dtype"]:
+            if k not in ["device", "dtype", "output_dir"]:
                 setattr(args, k, v)
 
     return config.parse_args_with_format(format=args.config_format, base_parser=argparse.ArgumentParser(allow_abbrev=False), args=rem_args, namespace=args)
@@ -129,12 +132,36 @@ def evaluate(model, data, iterations, acc_steps, batch_size, sequence_length, di
         eval_per_batch_time = dt * 1000 / len(acc_list)
         
 
-    stats['val_acc'] = torch.as_tensor(acc_list).mean().item()
-    stats['val_loss'] = torch.as_tensor(loss_list_val).mean().item()
+    loss_t = torch.as_tensor(loss_list_val)
+    acc_t = torch.as_tensor(acc_list)
+
+    stats['val_acc'] = acc_t.mean().item()
+    stats['val_loss'] = loss_t.mean().item()
     stats['val_perplexity'] = 2.71828 ** stats['val_loss']
     stats['eval_per_batch_time'] = eval_per_batch_time
     if avg_depth_list:
         stats['average_depth'] = torch.as_tensor(avg_depth_list).float().mean().item()
+
+    # Per-batch statistics for confidence intervals.
+    # NOTE: batches are contiguous windows of the val set (not i.i.d. draws),
+    # so the CI is approximate -- the true effective sample size is smaller.
+    n = len(loss_list_val)
+    stats['n_batches'] = n
+    stats['val_loss_std'] = loss_t.std().item() if n > 1 else 0.0
+    stats['val_acc_std'] = acc_t.std().item() if n > 1 else 0.0
+    loss_se = stats['val_loss_std'] / (n ** 0.5) if n > 1 else 0.0
+    stats['val_loss_ci95'] = [stats['val_loss'] - 1.96 * loss_se,
+                              stats['val_loss'] + 1.96 * loss_se]
+    ppl_lo = math.e ** stats['val_loss_ci95'][0]
+    ppl_hi = math.e ** stats['val_loss_ci95'][1]
+    stats['val_perplexity_ci95'] = [ppl_lo, ppl_hi]
+
+    # Raw per-batch arrays (for downstream analysis)
+    stats['_per_batch_losses'] = loss_list_val
+    stats['_per_batch_accs'] = acc_list
+    if avg_depth_list:
+        stats['_per_batch_depths'] = [d.item() if isinstance(d, torch.Tensor) else d
+                                      for d in avg_depth_list]
 
     return stats
 
@@ -173,14 +200,49 @@ def main(args):
 
     model = distributed_backend.transform_model(model)
     
-    print(f"\Evaluating model={args.model} \n{vars(args)}\n")
+    print(f"Evaluating model={args.model}\n{vars(args)}\n")
 
-    stats = evaluate(model, data, args.iterations, args.acc_steps, args.batch_size, args.sequence_length, 
+    stats = evaluate(model, data, args.iterations, args.acc_steps, args.batch_size, args.sequence_length,
                   distributed_backend=distributed_backend,
                   extra_args=args)
 
-    print(stats)
-    
+    # Print summary (excludes per-batch arrays for readability)
+    summary = {k: v for k, v in stats.items() if not k.startswith('_')}
+    print(summary)
+
+    # Write eval_summary JSON with full per-batch data
+    if distributed_backend.is_master_process():
+        output_dir = getattr(args, 'output_dir', None) or args.checkpoint
+        os.makedirs(output_dir, exist_ok=True)
+
+        ckpt_stem = os.path.splitext(args.checkpoint_filename)[0]
+        summary_path = os.path.join(output_dir, f"eval_summary_{ckpt_stem}.json")
+
+        json_out = {
+            'checkpoint': args.checkpoint_filename,
+            'checkpoint_dir': args.checkpoint,
+            'model': args.model,
+            'batch_size': args.batch_size,
+            'sequence_length': args.sequence_length,
+        }
+        json_out.update(stats)
+        # Recursively convert tensors/numpy types for JSON serialisation
+        def _convert(obj):
+            if isinstance(obj, (torch.Tensor, np.generic)):
+                return obj.item()
+            if isinstance(obj, np.ndarray):
+                return obj.tolist()
+            if isinstance(obj, list):
+                return [_convert(x) for x in obj]
+            if isinstance(obj, dict):
+                return {k: _convert(v) for k, v in obj.items()}
+            return obj
+        json_out = {k: _convert(v) for k, v in json_out.items()}
+
+        with open(summary_path, 'w') as f:
+            json.dump(json_out, f, indent=2)
+        print(f"\nEval summary written to: {summary_path}")
+
     distributed_backend.finalize()
     return stats
 

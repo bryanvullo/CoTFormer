@@ -62,8 +62,9 @@ def main():
 
     ax.set_xlabel("Repeat Weight Prediction", fontsize=11)
     ax.set_ylabel("Density", fontsize=11)
-    ax.legend(fontsize=10)
+    ax.legend(fontsize=10, loc="upper right")
     ax.set_xlim(0, 1)
+    ax.set_ylim(0, 0.7)  # paper shows ~0.6 max; slight headroom
     ax.grid(True, alpha=0.3, axis="y")
 
     plt.tight_layout()

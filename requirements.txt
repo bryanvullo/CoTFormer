@@ -11,3 +11,4 @@ wandb
 zstandard
 ptflops
 einops
+matplotlib

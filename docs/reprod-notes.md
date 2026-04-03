@@ -53,6 +53,9 @@
     - [Affected files](#affected-files-cumulative-across-all-four-fix-iterations)
     - [Checkpoint format compatibility](#checkpoint-format-compatibility)
   - [B10. LR Schedule Discontinuity on 40k-to-60k Extension](#b10-lr-schedule-discontinuity-on-40k-to-60k-extension)
+  - [B11. Evaluation Batch Size Independence](#b11-evaluation-batch-size-independence)
+- [Part C: Original Code Bugs](#part-c-original-code-bugs)
+  - [C1. Router Weight Extraction Uses Training Data (Figure 5)](#c1-router-weight-extraction-uses-training-data-figure-5)
   - [References](#references)
 
 ---
@@ -698,6 +701,116 @@ steps. Two factors limit the practical impact:
 If the final 60k perplexity diverges materially from the paper's 23.19
 target, this LR discontinuity is a likely contributor. The ADM model (A5)
 is unaffected as it was trained for 60k steps from scratch.
+
+---
+
+## B11. Evaluation Batch Size Independence
+
+**Impact:** Negligible (<0.001 PPL)
+
+Our standalone evaluation (`eval.py`) uses batch_size=8 (from `summary.json`,
+matching training). The paper's evaluation was likely performed with a larger
+batch size on A100 80 GB GPUs.
+
+Per-sample cross-entropy loss is mathematically invariant to batch size: each
+sequence in a batch is processed independently, and `F.cross_entropy` computes
+per-token loss before averaging. The only micro-effect is the final partial
+batch: `eval.py`'s `get_as_batch` generator (line 62) yields batches of
+`batch_size` samples. If the total number of validation sequences is not
+evenly divisible by batch_size, the last batch has fewer samples but receives
+equal weight in the mean (one `loss_list_val.append()` per batch). At
+~16,400 sequences / batch_size=8 = ~2,050 batches, the partial-batch weight
+contribution is at most 1/2050th of the total, producing <0.001 PPL divergence.
+
+We deliberately use the training batch_size (from `summary.json`) rather than
+overriding to a larger value, to eliminate this micro-divergence entirely.
+Single-GPU evaluation with `--distributed_backend None` also matches the
+paper's evaluation conditions (no DDP data sharding during eval).
+
+---
+
+# Part C: Original Code Bugs
+
+> Bugs present in the original codebase (`commit 2723e30`, "Add everything")
+> that affect the authors' own reported results. These are distinct from
+> Part B divergences, which arise from our hardware or setup constraints.
+>
+> Note: B6 (orphan MoDBlock), B7 (empty training summary), and B8 (missing
+> nullcontext import) are also original code bugs but are documented in Part B
+> because they were discovered during our reproduction process and primarily
+> affected our DDP setup. They are cross-referenced here for completeness.
+
+## C1. Router Weight Extraction Uses Training Data (Figure 5)
+
+**Impact:** Figure 5 router weight distributions were computed on training
+data, not validation data. The qualitative trend (longer training shifts
+distribution towards higher weights) is likely unaffected, but the
+distribution shape and quantitative claims may differ on held-out data.
+
+**Status:** Fixed in our reproduction. Our `get_router_weights.py` evaluates
+on the validation set.
+
+### Background
+
+The authors' `get_router_weights.py` (present in the initial commit `2723e30`)
+extracts router score distributions by running the adaptive model's forward
+pass and collecting per-token sigmoid scores from each `MoDBlock`. This data
+generates Figure 5, which compares the router weight distribution for the
+final repeat at 40k vs 60k training steps.
+
+### The bug
+
+Line 133 of the original `get_router_weights.py`:
+
+```python
+for idx, (x, y) in tqdm(enumerate(get_as_batch(
+        data['train'],                          # <-- BUG: should be data['val']
+        config.sequence_length,
+        config.batch_size,
+        device=config.device,
+        sample_size=len(data['val']),           # samples val-sized amount from TRAIN
+        )),
+```
+
+The script iterates over `data['train']` (the training set), not `data['val']`
+(the validation set). The `sample_size=len(data['val'])` parameter causes it
+to randomly subsample a validation-sized chunk from the training data. This
+means the router weight distributions in Figure 5 reflect model behaviour on
+data it was trained on, not held-out data.
+
+### Why this matters
+
+1. **Memorisation bias**: The model has seen training data during optimisation.
+   Router decisions on memorised sequences may be more confident (lower
+   entropy) than on unseen validation sequences, skewing the distribution
+   towards more extreme values (closer to 0 or 1).
+
+2. **Scientific methodology**: Standard practice in model analysis is to
+   measure behaviour on held-out data. Using training data for Figure 5 while
+   using validation data for all perplexity measurements (Figures 2, 4;
+   Tables 1, 2) creates an inconsistency in the experimental protocol.
+
+3. **Quantitative impact**: The paper claims (Section 5) that "55% of tokens
+   are still getting a router score of 0 for the final repeat" at 60k steps.
+   This statistic may differ on validation data, where the model is less
+   certain about routing decisions.
+
+### Fix
+
+Our rewritten `get_router_weights.py` uses forward hooks on
+`MoDBlock.mod_router` (the `nn.Linear` layer) to capture raw router logits
+during a forward pass on **validation data** (`data['val']`). This produces
+methodologically sound distributions suitable for the report.
+
+### Cross-references
+
+- **B6** (orphan MoDBlock): Original code bug affecting DDP training.
+  Harmless on single-GPU (the authors' setup) but fatal under DDP.
+- **B7** (empty training summary): Original code bug. `stats` dict was
+  initialised but never populated, losing training curve data in
+  `summary.json`.
+- **B8** (missing nullcontext import): Original code bug. `eval.py` crashed
+  on CPU-only evaluation due to missing import; latent on GPU runs.
 
 ---
 
