@@ -55,11 +55,11 @@ fi
 # --- Build training args ---
 TRAIN_ARGS=(
     --config_format base
-    --model base
+    --model cotformer_full_depth
     --n_embd 768
     --n_head 12
     --n_layer 12
-    --batch_size 64
+    --batch_size 32
     --sequence_length 256
     --acc_steps 2
     --dropout 0.0
