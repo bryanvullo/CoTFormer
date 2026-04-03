@@ -67,7 +67,6 @@ TRAIN_ARGS=(
     --iterations 40000
     --dataset owt2
     --data_dir "$DATA_DIR"
-    --data_in_ram
     --lr 1e-3
     --weight_decay 0.1
     --warmup_percent 0.2
