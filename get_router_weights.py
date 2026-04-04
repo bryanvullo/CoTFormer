@@ -158,8 +158,8 @@ def main(args):
             f"Ensure eval uses capacity_factor=1.0 (eval_length_factor=[1]*{n_routers})."
         )
         all_logits = torch.cat(router_logits_per_repeat[i], dim=0)  # (N_batches*B, T)
-        raw_logits[i] = all_logits.reshape(-1).numpy()
-        raw_scores[i] = torch.sigmoid(all_logits).reshape(-1).numpy()
+        raw_logits[i] = all_logits.reshape(-1).float().numpy()
+        raw_scores[i] = torch.sigmoid(all_logits).reshape(-1).float().numpy()
 
     # Build the cascaded output array: [None, scores_1, scores_2, ..., scores_{n-1}]
     # Matches the repeat indexing: element 0 = repeat 1 (no router), element k = repeat k+1
