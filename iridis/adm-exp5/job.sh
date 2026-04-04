@@ -133,7 +133,7 @@ if [ -f "$CKPT_SUBDIR/router_weights.npy" ]; then
     echo "router_weights.npy exists (from adm-exp4 or prior run)."
 else
     echo "Extracting 60k router weights..."
-    python get_router_weights.py --checkpoint "$CKPT_SUBDIR"
+    python get_router_weights.py --checkpoint "$CKPT_SUBDIR" --distributed_backend None
 fi
 cp "$CKPT_SUBDIR/router_weights.npy" "$CKPT_SUBDIR/router_weights_60k.npy"
 echo "Saved: router_weights_60k.npy"
@@ -145,7 +145,7 @@ echo " Phase 2: 40k router weights"
 echo "========================================="
 
 echo "Extracting 40k router weights from ckpt_40000.pt..."
-python get_router_weights.py --checkpoint "$CKPT_SUBDIR/ckpt_40000.pt"
+python get_router_weights.py --checkpoint "$CKPT_SUBDIR/ckpt_40000.pt" --distributed_backend None
 # get_router_weights.py saves to router_weights.npy in the same dir (overwrites 60k)
 cp "$CKPT_SUBDIR/router_weights.npy" "$CKPT_SUBDIR/router_weights_40k.npy"
 # Restore the 60k version as the default

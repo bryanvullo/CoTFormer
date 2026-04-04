@@ -223,7 +223,7 @@ if __name__ == "__main__":
         for k, v in summary['args'].items():
             if k == "config_format" and args.config_format is not None:
                 continue
-            if k not in ["device", "dtype"]:
+            if k not in ["device", "dtype", "distributed_backend"]:
                 setattr(args, k, v)
 
     import config as cfg_module

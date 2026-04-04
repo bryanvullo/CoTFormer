@@ -131,7 +131,7 @@ echo "========================================="
 if [ -f "$CKPT_SUBDIR/router_weights.npy" ]; then
     echo "router_weights.npy already exists — skipping."
 else
-    python get_router_weights.py --checkpoint "$CKPT_SUBDIR"
+    python get_router_weights.py --checkpoint "$CKPT_SUBDIR" --distributed_backend None
 fi
 echo ""
 

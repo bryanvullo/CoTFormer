@@ -9,10 +9,12 @@
   - [Table of Contents](#table-of-contents)
 - [Part A: Successful Replications](#part-a-successful-replications)
   - [A1. LN-CoTFormer Perplexity (Table 2, 40k steps)](#a1-ln-cotformer-perplexity-table-2-40k-steps)
+  - [A1a. LN-CoTFormer Perplexity (Section 5, 60k steps)](#a1a-ln-cotformer-perplexity-section-5-60k-steps)
   - [A2. Architecture Depth](#a2-architecture-depth)
   - [A3. Training Stability](#a3-training-stability)
   - [A4. Effective Batch Size](#a4-effective-batch-size)
   - [A5. ADM Perplexity (Section 4.2, Figure 4, 60k steps)](#a5-adm-perplexity-section-42-figure-4-60k-steps)
+  - [A6. Section 5 Comparison: LN-CoTFormer vs ADM at 60k Steps](#a6-section-5-comparison-ln-cotformer-vs-adm-at-60k-steps)
 - [Part B: Known Divergences](#part-b-known-divergences)
   - [B1. Train/Val Split Divergence](#b1-trainval-split-divergence)
     - [B1a. Document ordering](#b1a-document-ordering)
@@ -63,10 +65,20 @@
 # Part A: Successful Replications
 
 > **Step-count disambiguation**: A1 reports the LN-CoTFormer at **40,000 steps**
-> (Table 2 scope). A5 reports the ADM at **60,000 steps** (Section 4.2 scope).
-> A 60k LN-CoTFormer run is planned to enable the direct Section 5 comparison
-> (paper: non-adaptive 60k = 23.19 PPL). The CoTFormer + Reserved model
-> (Table 2, row 1, target 24.51) is pending via `cot-res-train`.
+> (Table 2 scope). A1a reports the LN-CoTFormer at **60,000 steps**
+> (Section 5 scope). A5 reports the ADM at **60,000 steps** (Section 4.2 scope).
+> A6 compares LN-CoTFormer vs ADM at 60k, directly validating the Section 5
+> claims. The CoTFormer + Reserved model (Table 2, row 1, target 24.51) is
+> pending via `cot-res-train`.
+>
+> **Evaluation methodology**: all metrics below are from standalone `eval.py`
+> runs on the **full validation set** (3,973 batches, no subsampling), matching
+> the original authors' evaluation protocol (confirmed by inspection of the
+> original `eval.py` from commit `2723e30`, which uses `data['val']`
+> exclusively). Confidence intervals are 95% CIs computed across per-batch
+> losses, then exponentiated into perplexity space. These reflect
+> **intra-run batch variance**, not the paper's inter-run SEM across 3
+> independent training seeds. We report a single training run per model.
 
 ## A1. LN-CoTFormer Perplexity (Table 2, 40k steps)
 
@@ -74,17 +86,47 @@
 
 | Metric | Paper (Table 2) | Ours | Delta |
 |--------|----------------|------|-------|
-| Val perplexity | ~24.11 | 24.13 | +0.02 |
-| Val accuracy | — | 0.4129 | — |
-| Val loss | — | 3.183 | — |
+| Val perplexity | 24.11 (0.03) | 24.13 | +0.02 |
+| Val accuracy | -- | 0.4129 | -- |
+| Val loss | -- | 3.1834 | -- |
+| 95% CI (perplexity) | -- | [23.75, 24.51] | -- |
+| Per-batch SEM (loss) | -- | 0.0081 | -- |
+| n_batches | -- | 3,973 | -- |
 
-Trained for 40,000 steps on 2x L4 24 GB (DDP), OWT2 dataset, cosine LR
-schedule (peak 1e-3, final ~2e-4). Wall time: 23h 26m across 2 SLURM
-submissions with auto-resume from checkpoint.
+Our point estimate (24.13) falls within 0.67 standard deviations of the
+paper's 24.11 +/- 0.03 (inter-run SEM across 3 seeds). Trained for 40,000
+steps on 2x L4 24 GB (DDP), OWT2 dataset, cosine LR schedule (peak 1e-3,
+final ~2e-4). Wall time: 23h 26m across 2 SLURM submissions with
+auto-resume from checkpoint.
 
 This confirms that our data pipeline, architecture, and training loop
 faithfully reproduce the paper's non-adaptive LN-CoTFormer result, despite
 the divergences documented in Part B.
+
+---
+
+## A1a. LN-CoTFormer Perplexity (Section 5, 60k steps)
+
+**Result:** Reproduced within +0.40 PPL of the paper.
+
+| Metric | Paper (Section 5) | Ours | Delta |
+|--------|-------------------|------|-------|
+| Val perplexity | 23.19 | 23.59 | +0.40 |
+| Val accuracy | -- | 0.4157 | -- |
+| Val loss | -- | 3.1609 | -- |
+| 95% CI (perplexity) | -- | [23.22, 23.97] | -- |
+| Per-batch SEM (loss) | -- | 0.0081 | -- |
+| n_batches | -- | 3,973 | -- |
+
+The 40k-to-60k extension used auto-resume from the 40k checkpoint with a
+rebuilt `OneCycleLR(total_steps=60000)` scheduler. This introduces a
+learning rate discontinuity at the resume boundary (B10): the 40k schedule
+had decayed to ~2e-5, while the 60k schedule expects ~3.5e-4 at step 40000,
+producing a ~17x LR jump that acts as a mild warm restart.
+
+The wider delta (+0.40 vs +0.02 at 40k) is consistent with B10's impact
+on the final 20k steps. The ADM model (A5) is unaffected by B10 as it was
+trained for 60k steps from scratch.
 
 ---
 
@@ -131,13 +173,16 @@ per GPU: 8 x 8 x 2 = 128.
 
 ## A5. ADM Perplexity (Section 4.2, Figure 4, 60k steps)
 
-**Result:** Reproduced within +0.24 PPL of the paper.
+**Result:** Reproduced within +0.23 PPL of the paper.
 
-| Metric | Paper (Section 5, adaptive LN-CoTFormer) | Ours | Delta |
+| Metric | Paper (Section 5) | Ours | Delta |
 |--------|-------------------|------|-------|
-| Val perplexity | ~23.83 | 24.07 | +0.24 |
-| Val accuracy | -- | 0.4128 | -- |
-| Val loss | -- | 3.181 | -- |
+| Val perplexity | 23.83 | 24.06 | +0.23 |
+| Val accuracy | -- | 0.4127 | -- |
+| Val loss | -- | 3.1806 | -- |
+| 95% CI (perplexity) | -- | [23.68, 24.44] | -- |
+| Per-batch SEM (loss) | -- | 0.0081 | -- |
+| n_batches | -- | 3,973 | -- |
 
 Trained for 60,000 steps on 2x L4 24 GB (DDP), OWT2 dataset, cosine LR
 schedule (peak 1e-3, final ~2e-4). Wall time: ~52h across 3 SLURM
@@ -194,12 +239,12 @@ decreasing order." The 1.05 multiplier gives ~5% extra probability of
 capacity=1.0 (a minor stabilisation detail not mentioned in the paper).
 
 During evaluation, `eval_length_factor=None` activates all repeats
-(`length_factors = [1, 1, 1, 1]`), so the reported PPL of 24.07 is
+(`length_factors = [1, 1, 1, 1]`), so the reported PPL of 24.06 is
 at full compute.
 
 ### Why the Gap Is Wider Than A1
 
-The +0.24 delta (vs +0.02 for the non-adaptive LN-CoTFormer) is
+The +0.23 delta (vs +0.02 for the non-adaptive LN-CoTFormer at 40k) is
 explained by the ADM's unique sensitivity to RNG state discontinuities
 at resume boundaries. As documented in B4, the `torch.rand()` calls
 that generate capacity factors are consumed from the CUDA RNG stream.
@@ -211,13 +256,46 @@ does not affect it.
 
 ### Paper Comparison Note
 
-The paper (Section 5) reports that after 60k steps, the non-adaptive
-LN-CoTFormer reaches PPL 23.19. Our non-adaptive model was trained
-for 40k steps (PPL 24.13, matching Table 2's 24.11). To reproduce the
-Section 5 comparison exactly, the non-adaptive model needs 60k steps
-of training. The `lncot-train` package has been updated to 60k
-iterations; resubmission will auto-resume from the existing 40k
-checkpoint and train for an additional 20k steps.
+See A6 for the full Section 5 comparison (LN-CoTFormer vs ADM at 60k).
+
+---
+
+## A6. Section 5 Comparison: LN-CoTFormer vs ADM at 60k Steps
+
+**Result:** Directional claim confirmed. Non-adaptive LN-CoTFormer outperforms
+adaptive model (ADM) at full compute, consistent with the paper.
+
+| Metric | Paper | Ours | Paper gap | Our gap |
+|--------|-------|------|-----------|---------|
+| LN-CoTFormer 60k PPL | 23.19 | 23.59 | -- | -- |
+| ADM 60k PPL (full compute) | 23.83 | 24.06 | -- | -- |
+| Non-adaptive advantage | 0.64 | 0.47 | -- | -- |
+
+The paper (Section 5) states: "after 60k steps, the former [adaptive]
+reaches perplexity 23.83 while the latter [non-adaptive] achieves 23.19."
+Our results confirm this ordering: the non-adaptive model outperforms the
+adaptive model at full compute by 0.47 PPL (paper: 0.64 PPL).
+
+### Absolute deltas
+
+Both models run slightly above the paper's reported values:
+
+| Model | Paper | Ours | Delta | Likely contributors |
+|-------|-------|------|-------|-------------------|
+| LN-CoTFormer 60k | 23.19 | 23.59 | +0.40 | B10 (LR discontinuity from 40k-to-60k extension) |
+| ADM 60k | 23.83 | 24.06 | +0.23 | B4 (RNG state at resume boundaries) |
+
+The gap in deltas (+0.40 vs +0.23) is consistent with B10 being unique
+to the LN-CoTFormer (trained 40k then extended) while the ADM was trained
+60k from scratch (unaffected by B10, but exposed to B4's RNG-dependent
+capacity routing).
+
+### Why the adaptive gap is smaller
+
+The paper's 0.64 gap vs our 0.47 gap is explained by the larger LN-CoTFormer
+delta (+0.40) relative to the ADM delta (+0.23). Since B10 inflates only the
+LN-CoTFormer's perplexity, the gap narrows. A fresh 60k LN-CoTFormer run
+without B10 would likely produce a wider gap closer to the paper's 0.64.
 
 ---
 
@@ -647,9 +725,9 @@ their training math.
 
 ## B10. LR Schedule Discontinuity on 40k-to-60k Extension
 
-**Impact:** Minor LR trajectory divergence for LN-CoTFormer 60k run (steps
-40001--60000). No effect on ADM (trained 60k from scratch).
-**Status:** Accepted. Will assess impact when training completes.
+**Impact:** Likely contributor to the +0.40 PPL delta in A1a (LN-CoTFormer
+60k: 23.59 vs paper's 23.19). No effect on ADM (trained 60k from scratch).
+**Status:** Accepted. Assessed in A6; consistent with observed delta pattern.
 
 ### Background
 
@@ -698,9 +776,12 @@ steps. Two factors limit the practical impact:
 2. The 60k schedule's LR at step 40000 (~3.5e-4) is within the range the
    model trained stably at during the first 40k steps (peak 1e-3 to 2e-5).
 
-If the final 60k perplexity diverges materially from the paper's 23.19
-target, this LR discontinuity is a likely contributor. The ADM model (A5)
-is unaffected as it was trained for 60k steps from scratch.
+**Post-evaluation update (A1a):** The final 60k LN-CoTFormer perplexity is
+23.59 vs the paper's 23.19 (delta +0.40). The delta is significantly wider
+than the 40k reproduction (+0.02, A1). Since the ADM (trained 60k from
+scratch, unaffected by B10) has a delta of only +0.23 (A5), this LR
+discontinuity is the most likely contributor to the excess LN-CoTFormer
+delta. A fresh 60k-from-scratch run would be the definitive test.
 
 ---
 
