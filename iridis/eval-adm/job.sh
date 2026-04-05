@@ -7,27 +7,29 @@
 #SBATCH --cpus-per-task=8
 #SBATCH --gres=gpu:1
 #SBATCH --mem=64G
-#SBATCH --time=02:00:00
+#SBATCH --time=03:00:00
 ################################################################################
-# Adaptive LN-CoTFormer (ADM) Evaluation -- iridis/eval-adm
+# Adaptive LN-CoTFormer (ADM) — Evaluation + Figures 4 & 5
 #
-# Evaluates the trained ADM v2 at 40k and 60k checkpoints against the full
-# OWT2 validation set (single GPU, no DDP).
+# Single sequential job that evaluates the trained ADM v2 and reproduces
+# Figures 4 and 5 from the paper. All phases share the same checkpoint
+# directory; sequential execution avoids file contention on router_weights.
 #
-# Paper targets (Section 4.2, Section 5):
-#   40k steps: intermediate (no paper target, but useful for trajectory)
-#   60k steps: PPL ~23.83, with average_depth < 108 (router skipping)
+# Phases:
+#   1-2. Evaluate 40k + 60k checkpoints (PPL, average_depth)
+#   3.   Extract router weights (60k/40k x val/train = 4 forward passes)
+#   4.   Figure 4: PPL vs MACs sweep (threshold + fixed depth)
+#   5.   Figure 5: Router weight distribution (reproduction + analysis)
 #
-# The ADM model also reports average_depth (effective layers used per token),
-# which is critical for Section 5 analysis and Figure 4/5 reproduction.
+# Paper targets:
+#   PPL:     60k ~23.83, average_depth < 108
+#   Fig 4:   Pareto curves (Router vs Fixed Depth) from ~46 to ~228 GMACs
+#   Fig 5:   Router weight distribution shift between 40k and 60k training
 #
 # Usage:
 #   cd ~/CoTFormer && bash iridis/eval-adm/job.sh
 #
-# Outputs (in this package's run_N/ subdir):
-#   eval_40k.txt   -- stdout from eval.py at ckpt_40000.pt
-#   eval_60k.txt   -- stdout from eval.py at ckpt_60000.pt
-#   slurm_*.out    -- combined SLURM log
+# Supersedes the former adm-exp4 and adm-exp5 packages.
 ################################################################################
 
 # ========================= CONFIGURATION ====================================
@@ -36,9 +38,6 @@ CKPT_DIR="/scratch/ab3u21/exps/owt2/adaptive_cotformer_mod_efficient_sigmoid_crw
 
 # Checkpoints to evaluate (step number -> filename)
 CKPTS=("40000" "60000")
-
-# Batch size: use training value from summary.json (no override).
-# See eval-lncot/job.sh for rationale.
 
 # ========================= END CONFIGURATION ================================
 
@@ -63,10 +62,10 @@ if [ -z "$SLURM_JOB_ID" ]; then
     fi
 
     RUN_DIR=$(next_run_dir "$PACKAGE_DIR")
-    echo "=== ADM v2 Evaluation ==="
+    echo "=== ADM v2 Evaluation + Figures 4 & 5 ==="
     echo "  Checkpoints: ${CKPTS[*]} steps"
     echo "  Source:       $CKPT_DIR"
-    echo "  Batch size:   $EVAL_BATCH_SIZE (eval, no backward)"
+    echo "  Phases:       eval -> router weights -> Fig 4 -> Fig 5"
     echo "  Logs:         $RUN_DIR/"
     echo ""
     exec sbatch \
@@ -90,14 +89,12 @@ fi
 source "$REPO_DIR/iridis/env.sh"
 
 echo "========================================="
-echo " Adaptive LN-CoTFormer (ADM v2) Evaluation"
+echo " ADM v2 — Evaluation + Figures 4 & 5"
 echo " User:          $USER"
 echo " Node:          $(hostname)"
 echo " GPU:           1x L4"
 echo " Job ID:        $SLURM_JOB_ID"
-echo " Model:         adaptive_cotformer_..._single_final"
-echo " Checkpoints:   ${CKPTS[*]} steps"
-echo " Eval BS:       $EVAL_BATCH_SIZE"
+echo " Checkpoint:    $CKPT_DIR"
 echo " Started:       $(date)"
 echo "========================================="
 
@@ -113,14 +110,14 @@ echo "GPU Info:"
 nvidia-smi --query-gpu=index,name,memory.total,driver_version --format=csv,noheader
 echo ""
 
-# --- Evaluate each checkpoint ---
+# ========================= PHASE 1-2: Evaluation ==============================
 for step in "${CKPTS[@]}"; do
     CKPT_FILE="$CKPT_DIR/ckpt_${step}.pt"
     OUT_FILE="$RUN_DIR/eval_${step/000/k}.txt"
 
     echo ""
     echo "========================================="
-    echo " Evaluating: ckpt_${step}.pt (ADM v2)"
+    echo " Phase 1-2: Evaluating ckpt_${step}.pt"
     echo " Output:     $OUT_FILE"
     echo "========================================="
 
@@ -136,39 +133,97 @@ for step in "${CKPTS[@]}"; do
     echo ""
 done
 
-# ========================= PHASE 3: Figure 4 (PPL vs MACs) =====================
+# ========================= PHASE 3: Router Weight Extraction ==================
+# Extract on both splits (val + train) and both checkpoints (60k + 40k).
+# Order: val first so the default router_weights.npy is val-based when
+# Phase 4 reads it for the MAC sweep.
 echo ""
 echo "========================================="
-echo " Phase 3: Figure 4 — PPL vs MACs sweep"
+echo " Phase 3: Router weight extraction"
+echo "   4 runs: {60k,40k} x {val,train}"
 echo "========================================="
 
-if [ ! -f "$CKPT_DIR/router_weights.npy" ]; then
-    echo "Extracting router weights (needed for threshold sweep)..."
-    python get_router_weights.py --checkpoint "$CKPT_DIR" --distributed_backend None
-fi
+echo ""
+echo "--- 3a: 60k val ---"
+python get_router_weights.py --checkpoint "$CKPT_DIR" --split val --distributed_backend None
+cp "$CKPT_DIR/router_weights.npy" "$CKPT_DIR/router_weights_60k_val.npy"
+cp "$CKPT_DIR/router_weights_raw.npy" "$CKPT_DIR/router_weights_raw_60k_val.npy"
 
-echo "Running PPL vs MACs sweep (threshold + fixed depth)..."
+echo ""
+echo "--- 3b: 40k val ---"
+python get_router_weights.py --checkpoint "$CKPT_DIR/ckpt_40000.pt" --split val --distributed_backend None
+cp "$CKPT_DIR/router_weights.npy" "$CKPT_DIR/router_weights_40k_val.npy"
+cp "$CKPT_DIR/router_weights_raw.npy" "$CKPT_DIR/router_weights_raw_40k_val.npy"
+
+echo ""
+echo "--- 3c: 60k train ---"
+python get_router_weights.py --checkpoint "$CKPT_DIR" --split train --distributed_backend None
+cp "$CKPT_DIR/router_weights.npy" "$CKPT_DIR/router_weights_60k_train.npy"
+cp "$CKPT_DIR/router_weights_raw.npy" "$CKPT_DIR/router_weights_raw_60k_train.npy"
+cp "$CKPT_DIR/router_logits.npz" "$CKPT_DIR/router_logits_60k.npz"
+
+echo ""
+echo "--- 3d: 40k train ---"
+python get_router_weights.py --checkpoint "$CKPT_DIR/ckpt_40000.pt" --split train --distributed_backend None
+cp "$CKPT_DIR/router_weights.npy" "$CKPT_DIR/router_weights_40k_train.npy"
+cp "$CKPT_DIR/router_weights_raw.npy" "$CKPT_DIR/router_weights_raw_40k_train.npy"
+cp "$CKPT_DIR/router_logits.npz" "$CKPT_DIR/router_logits_40k.npz"
+
+# Restore val cascaded as the default (get_ppl_per_mac.py reads router_weights.npy)
+cp "$CKPT_DIR/router_weights_60k_val.npy" "$CKPT_DIR/router_weights.npy"
+echo ""
+
+# ========================= PHASE 4: Figure 4 (PPL vs MACs) ====================
+echo "========================================="
+echo " Phase 4: Figure 4 — PPL vs MACs sweep"
+echo "========================================="
+
 python get_ppl_per_mac.py --checkpoint "$CKPT_DIR"
-
-echo "Generating Figure 4..."
 python plot_fig4.py --checkpoint "$CKPT_DIR"
+echo ""
 
-# --- Copy outputs to run dir ---
-cp "$CKPT_DIR/figure4_pareto.png" "$RUN_DIR/" 2>/dev/null || true
-cp "$CKPT_DIR/eval_per_threshold.npy" "$RUN_DIR/" 2>/dev/null || true
-cp "$CKPT_DIR/eval_per_layer.npy" "$RUN_DIR/" 2>/dev/null || true
+# ========================= PHASE 5: Figure 5 (Router Distributions) ===========
+echo "========================================="
+echo " Phase 5a: Figure 5 — Reproduction"
+echo "   (train split, raw per-router scores)"
+echo "========================================="
 
+python plot_fig5.py \
+    --weights-40k "$CKPT_DIR/router_weights_raw_40k_train.npy" \
+    --weights-60k "$CKPT_DIR/router_weights_raw_60k_train.npy" \
+    --output "$CKPT_DIR/figure5_reproduction.png"
+
+echo ""
+echo "========================================="
+echo " Phase 5b: Figure 5 — Analysis"
+echo "   (val split, cascaded minimum scores)"
+echo "========================================="
+
+python plot_fig5.py \
+    --weights-40k "$CKPT_DIR/router_weights_40k_val.npy" \
+    --weights-60k "$CKPT_DIR/router_weights_60k_val.npy" \
+    --output "$CKPT_DIR/figure5_analysis.png"
+
+# ========================= OUTPUT COPY ========================================
+echo ""
+echo "Copying outputs to $RUN_DIR/ ..."
+for f in figure4_pareto.png eval_per_threshold.npy eval_per_layer.npy \
+         figure5_reproduction.png figure5_analysis.png; do
+    cp "$CKPT_DIR/$f" "$RUN_DIR/" 2>/dev/null || true
+done
+
+echo ""
 echo "========================================="
 echo " All phases complete: $(date)"
 echo " Results in: $RUN_DIR/"
 echo ""
 echo " Paper targets:"
-echo "   60k (Section 5): PPL ~23.83"
-echo "   Also check: average_depth (should be < 108, router is skipping)"
+echo "   PPL 60k (Section 5): ~23.83"
+echo "   average_depth:       < 108 (router is skipping)"
 echo ""
-echo " Key outputs:"
-echo "   eval_40k.txt / eval_60k.txt  -- per-checkpoint PPL"
-echo "   figure4_pareto.png           -- PPL vs MACs Pareto plot"
-echo "   eval_per_threshold.npy       -- router threshold sweep data"
-echo "   eval_per_layer.npy           -- fixed depth sweep data"
+echo " Outputs:"
+echo "   eval_40k.txt / eval_60k.txt    — per-checkpoint PPL"
+echo "   figure4_pareto.png             — PPL vs MACs (Router + Fixed Depth)"
+echo "   figure5_reproduction.png       — train split, raw scores (matches paper)"
+echo "   figure5_analysis.png           — val split, cascaded (supplementary)"
 echo "========================================="
