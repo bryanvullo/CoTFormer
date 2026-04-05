@@ -53,18 +53,26 @@ def main():
     fig, ax = plt.subplots(figsize=(5.5, 4))
 
     bins = np.linspace(0, 1, 41)
+    counts_40k, _ = np.histogram(last_40k, bins=bins, density=True)
+    counts_60k, _ = np.histogram(last_60k, bins=bins, density=True)
 
-    # Paper colors: blue for 40k, orange for 60k
-    ax.hist(last_40k, bins=bins, density=True, alpha=0.65,
-            color="#1f77b4", label="CoTFormer (40k Training)", edgecolor="white", linewidth=0.5)
-    ax.hist(last_60k, bins=bins, density=True, alpha=0.65,
-            color="#ff7f0e", label="CoTFormer (60k Training)", edgecolor="white", linewidth=0.5)
+    bin_width = bins[1] - bins[0]
+    bar_width = bin_width * 0.48
+    bin_centers = (bins[:-1] + bins[1:]) / 2
+
+    # Paper colors: blue for 40k, green for 60k (side-by-side bars)
+    ax.bar(bin_centers - bar_width / 2, counts_40k, width=bar_width,
+           color="#1f77b4", label="CoTFormer (40k Training)",
+           edgecolor="white", linewidth=0.3)
+    ax.bar(bin_centers + bar_width / 2, counts_60k, width=bar_width,
+           color="#2ca02c", label="CoTFormer (60k Training)",
+           edgecolor="white", linewidth=0.3)
 
     ax.set_xlabel("Repeat Weight Prediction", fontsize=11)
     ax.set_ylabel("Density", fontsize=11)
     ax.legend(fontsize=10, loc="upper right")
     ax.set_xlim(0, 1)
-    ax.set_ylim(0, 0.7)  # paper shows ~0.6 max; slight headroom
+    ax.set_ylim(bottom=0)
     ax.grid(True, alpha=0.3, axis="y")
 
     plt.tight_layout()

@@ -95,8 +95,8 @@ def run(checkpoint_dir):
 
     results = {}
     model = load_untrained_model(checkpoint_dir)
-    for i in range(4):
-        coefs = [1 if j <= i else 0 for j in range(4)]
+    for i in range(5):
+        coefs = [1 if j < i else 0 for j in range(4)]
         args = [
             "--checkpoint", os.path.join(checkpoint_dir, "ckpt.pt"), "--distributed_backend", "None",
         ] + ["--eval_length_factor"] + ["{:.02f}".format(x) for x in coefs]

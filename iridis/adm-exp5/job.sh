@@ -76,7 +76,7 @@ if [ -z "$SLURM_JOB_ID" ]; then
         --error="$RUN_DIR/slurm_%j.err" \
         --mail-type=BEGIN,END,FAIL \
         --mail-user="$NOTIFY_EMAIL" \
-        --export=ALL,REPO_DIR="$REPO_DIR",CHECKPOINT_DIR="$CHECKPOINT_DIR" \
+        --export=ALL,REPO_DIR="$REPO_DIR",CHECKPOINT_DIR="$CHECKPOINT_DIR",RUN_DIR="$RUN_DIR" \
         "$0" "$@"
 fi
 
@@ -124,53 +124,89 @@ CKPT_SUBDIR=$(dirname "$CKPT_FILE")
 echo "Checkpoint subdir: $CKPT_SUBDIR"
 echo ""
 
-# ========================= PHASE 1: 60k Router Weights ========================
+# ========================= PHASE 1: 60k on TRAIN split ========================
 echo "========================================="
-echo " Phase 1: 60k router weights"
+echo " Phase 1: 60k router weights (train split)"
 echo "========================================="
 
-if [ -f "$CKPT_SUBDIR/router_weights.npy" ]; then
-    echo "router_weights.npy exists (from adm-exp4 or prior run)."
-else
-    echo "Extracting 60k router weights..."
-    python get_router_weights.py --checkpoint "$CKPT_SUBDIR" --distributed_backend None
-fi
-cp "$CKPT_SUBDIR/router_weights.npy" "$CKPT_SUBDIR/router_weights_60k.npy"
-echo "Saved: router_weights_60k.npy"
+python get_router_weights.py --checkpoint "$CKPT_SUBDIR" --split train --distributed_backend None
+cp "$CKPT_SUBDIR/router_weights.npy" "$CKPT_SUBDIR/router_weights_60k_train.npy"
+cp "$CKPT_SUBDIR/router_weights_raw.npy" "$CKPT_SUBDIR/router_weights_raw_60k_train.npy"
+cp "$CKPT_SUBDIR/router_logits.npz" "$CKPT_SUBDIR/router_logits_60k.npz"
 echo ""
 
-# ========================= PHASE 2: 40k Router Weights ========================
+# ========================= PHASE 2: 40k on TRAIN split ========================
 echo "========================================="
-echo " Phase 2: 40k router weights"
+echo " Phase 2: 40k router weights (train split)"
 echo "========================================="
 
-echo "Extracting 40k router weights from ckpt_40000.pt..."
-python get_router_weights.py --checkpoint "$CKPT_SUBDIR/ckpt_40000.pt" --distributed_backend None
-# get_router_weights.py saves to router_weights.npy in the same dir (overwrites 60k)
-cp "$CKPT_SUBDIR/router_weights.npy" "$CKPT_SUBDIR/router_weights_40k.npy"
-# Restore the 60k version as the default
-cp "$CKPT_SUBDIR/router_weights_60k.npy" "$CKPT_SUBDIR/router_weights.npy"
-echo "Saved: router_weights_40k.npy"
+python get_router_weights.py --checkpoint "$CKPT_SUBDIR/ckpt_40000.pt" --split train --distributed_backend None
+cp "$CKPT_SUBDIR/router_weights.npy" "$CKPT_SUBDIR/router_weights_40k_train.npy"
+cp "$CKPT_SUBDIR/router_weights_raw.npy" "$CKPT_SUBDIR/router_weights_raw_40k_train.npy"
+cp "$CKPT_SUBDIR/router_logits.npz" "$CKPT_SUBDIR/router_logits_40k.npz"
 echo ""
 
-# ========================= PHASE 3: Plot Figure 5 ============================
+# ========================= PHASE 3: 60k on VAL split ==========================
 echo "========================================="
-echo " Phase 3: Generating Figure 5"
+echo " Phase 3: 60k router weights (val split)"
+echo "========================================="
+
+python get_router_weights.py --checkpoint "$CKPT_SUBDIR" --split val --distributed_backend None
+cp "$CKPT_SUBDIR/router_weights.npy" "$CKPT_SUBDIR/router_weights_60k_val.npy"
+cp "$CKPT_SUBDIR/router_weights_raw.npy" "$CKPT_SUBDIR/router_weights_raw_60k_val.npy"
+echo ""
+
+# ========================= PHASE 4: 40k on VAL split ==========================
+echo "========================================="
+echo " Phase 4: 40k router weights (val split)"
+echo "========================================="
+
+python get_router_weights.py --checkpoint "$CKPT_SUBDIR/ckpt_40000.pt" --split val --distributed_backend None
+cp "$CKPT_SUBDIR/router_weights.npy" "$CKPT_SUBDIR/router_weights_40k_val.npy"
+cp "$CKPT_SUBDIR/router_weights_raw.npy" "$CKPT_SUBDIR/router_weights_raw_40k_val.npy"
+
+# Restore val cascaded as default (backward compat with get_ppl_per_mac.py)
+cp "$CKPT_SUBDIR/router_weights_60k_val.npy" "$CKPT_SUBDIR/router_weights.npy"
+echo ""
+
+# ========================= PHASE 5: Figure 5a — Reproduction ==================
+echo "========================================="
+echo " Phase 5: Figure 5 — Reproduction"
+echo "   (train split, raw per-router scores)"
 echo "========================================="
 
 python plot_fig5.py \
-    --weights-40k "$CKPT_SUBDIR/router_weights_40k.npy" \
-    --weights-60k "$CKPT_SUBDIR/router_weights_60k.npy" \
-    --output "$CKPT_SUBDIR/figure5_router_dist.png"
+    --weights-40k "$CKPT_SUBDIR/router_weights_raw_40k_train.npy" \
+    --weights-60k "$CKPT_SUBDIR/router_weights_raw_60k_train.npy" \
+    --output "$CKPT_SUBDIR/figure5_reproduction.png"
+echo ""
+
+# ========================= PHASE 6: Figure 5b — Analysis ======================
+echo "========================================="
+echo " Phase 6: Figure 5 — Analysis"
+echo "   (val split, cascaded minimum scores)"
+echo "========================================="
+
+python plot_fig5.py \
+    --weights-40k "$CKPT_SUBDIR/router_weights_40k_val.npy" \
+    --weights-60k "$CKPT_SUBDIR/router_weights_60k_val.npy" \
+    --output "$CKPT_SUBDIR/figure5_analysis.png"
+
+# --- Copy outputs to run dir ---
+for f in figure5_reproduction.png figure5_analysis.png; do
+    cp "$CKPT_SUBDIR/$f" "$RUN_DIR/" 2>/dev/null || true
+done
 
 echo ""
 echo "========================================="
 echo " adm-exp5 complete: $(date)"
 echo ""
-echo " Output files:"
-echo "   $CKPT_SUBDIR/router_weights_40k.npy"
-echo "   $CKPT_SUBDIR/router_weights_60k.npy"
-echo "   $CKPT_SUBDIR/figure5_router_dist.png"
+echo " Output files (also copied to $RUN_DIR/):"
+echo "   figure5_reproduction.png  — train split, raw scores (matches paper)"
+echo "   figure5_analysis.png      — val split, cascaded scores (our analysis)"
+echo "   router_weights_*_train.npy / router_weights_*_val.npy"
+echo "   router_weights_raw_*_train.npy / router_weights_raw_*_val.npy"
+echo "   router_logits_40k.npz / router_logits_60k.npz"
 echo "========================================="
 
 exit 0

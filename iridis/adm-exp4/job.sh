@@ -75,7 +75,7 @@ if [ -z "$SLURM_JOB_ID" ]; then
         --error="$RUN_DIR/slurm_%j.err" \
         --mail-type=BEGIN,END,FAIL \
         --mail-user="$NOTIFY_EMAIL" \
-        --export=ALL,REPO_DIR="$REPO_DIR",CHECKPOINT_DIR="$CHECKPOINT_DIR" \
+        --export=ALL,REPO_DIR="$REPO_DIR",CHECKPOINT_DIR="$CHECKPOINT_DIR",RUN_DIR="$RUN_DIR" \
         "$0" "$@"
 fi
 
@@ -151,11 +151,16 @@ echo "========================================="
 
 python plot_fig4.py --checkpoint "$CKPT_SUBDIR"
 
+# --- Copy outputs to run dir ---
+for f in figure4_pareto.png eval_per_threshold.npy eval_per_layer.npy; do
+    cp "$CKPT_SUBDIR/$f" "$RUN_DIR/" 2>/dev/null || true
+done
+
 echo ""
 echo "========================================="
 echo " adm-exp4 complete: $(date)"
 echo ""
-echo " Output files:"
+echo " Output files (also copied to $RUN_DIR/):"
 echo "   $CKPT_SUBDIR/router_weights.npy"
 echo "   $CKPT_SUBDIR/eval_per_threshold.npy"
 echo "   $CKPT_SUBDIR/eval_per_layer.npy"

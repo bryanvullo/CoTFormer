@@ -7,7 +7,7 @@
 #SBATCH --cpus-per-task=8
 #SBATCH --gres=gpu:1
 #SBATCH --mem=64G
-#SBATCH --time=01:00:00
+#SBATCH --time=02:00:00
 ################################################################################
 # Adaptive LN-CoTFormer (ADM) Evaluation -- iridis/eval-adm
 #
@@ -136,15 +136,39 @@ for step in "${CKPTS[@]}"; do
     echo ""
 done
 
+# ========================= PHASE 3: Figure 4 (PPL vs MACs) =====================
+echo ""
 echo "========================================="
-echo " All evaluations complete: $(date)"
+echo " Phase 3: Figure 4 — PPL vs MACs sweep"
+echo "========================================="
+
+if [ ! -f "$CKPT_DIR/router_weights.npy" ]; then
+    echo "Extracting router weights (needed for threshold sweep)..."
+    python get_router_weights.py --checkpoint "$CKPT_DIR" --distributed_backend None
+fi
+
+echo "Running PPL vs MACs sweep (threshold + fixed depth)..."
+python get_ppl_per_mac.py --checkpoint "$CKPT_DIR"
+
+echo "Generating Figure 4..."
+python plot_fig4.py --checkpoint "$CKPT_DIR"
+
+# --- Copy outputs to run dir ---
+cp "$CKPT_DIR/figure4_pareto.png" "$RUN_DIR/" 2>/dev/null || true
+cp "$CKPT_DIR/eval_per_threshold.npy" "$RUN_DIR/" 2>/dev/null || true
+cp "$CKPT_DIR/eval_per_layer.npy" "$RUN_DIR/" 2>/dev/null || true
+
+echo "========================================="
+echo " All phases complete: $(date)"
 echo " Results in: $RUN_DIR/"
 echo ""
 echo " Paper targets:"
 echo "   60k (Section 5): PPL ~23.83"
 echo "   Also check: average_depth (should be < 108, router is skipping)"
 echo ""
-echo " Key outputs for ADM:"
-echo "   val_perplexity  -- main metric"
-echo "   average_depth   -- effective layers (router behavior)"
+echo " Key outputs:"
+echo "   eval_40k.txt / eval_60k.txt  -- per-checkpoint PPL"
+echo "   figure4_pareto.png           -- PPL vs MACs Pareto plot"
+echo "   eval_per_threshold.npy       -- router threshold sweep data"
+echo "   eval_per_layer.npy           -- fixed depth sweep data"
 echo "========================================="

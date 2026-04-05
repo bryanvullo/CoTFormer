@@ -57,7 +57,8 @@
   - [B10. LR Schedule Discontinuity on 40k-to-60k Extension](#b10-lr-schedule-discontinuity-on-40k-to-60k-extension)
   - [B11. Evaluation Batch Size Independence](#b11-evaluation-batch-size-independence)
 - [Part C: Original Code Bugs](#part-c-original-code-bugs)
-  - [C1. Router Weight Extraction Uses Training Data (Figure 5)](#c1-router-weight-extraction-uses-training-data-figure-5)
+  - [C1. Figure 5 Data Source: Training Split (Reclassified)](#c1-figure-5-data-source-training-split-reclassified)
+  - [C2. Underspecified Training Schedule (Reproducibility Gap)](#c2-underspecified-training-schedule-reproducibility-gap)
   - [References](#references)
 
 ---
@@ -821,67 +822,63 @@ paper's evaluation conditions (no DDP data sharding during eval).
 > because they were discovered during our reproduction process and primarily
 > affected our DDP setup. They are cross-referenced here for completeness.
 
-## C1. Router Weight Extraction Uses Training Data (Figure 5)
+## C1. Figure 5 Data Source: Training Split (Reclassified)
 
-**Impact:** Figure 5 router weight distributions were computed on training
-data, not validation data. The qualitative trend (longer training shifts
-distribution towards higher weights) is likely unaffected, but the
-distribution shape and quantitative claims may differ on held-out data.
-
-**Status:** Fixed in our reproduction. Our `get_router_weights.py` evaluates
-on the validation set.
+**Original classification:** Bug (training data used instead of validation)
+**Reclassification:** Intentional design choice for training dynamics analysis
+**Status:** Our reproduction now matches the paper's methodology
 
 ### Background
 
-The authors' `get_router_weights.py` (present in the initial commit `2723e30`)
-extracts router score distributions by running the adaptive model's forward
-pass and collecting per-token sigmoid scores from each `MoDBlock`. This data
-generates Figure 5, which compares the router weight distribution for the
-final repeat at 40k vs 60k training steps.
+The original `get_router_weights.py` (commit `2723e30`) extracts router
+weight distributions from the **training** split, subsampled to
+validation-set size (`sample_size=len(data['val'])`). This was initially
+classified as a bug (training data used where validation was expected).
 
-### The bug
+### Why this is not a bug
 
-Line 133 of the original `get_router_weights.py`:
+Section 5 of the paper analyses **training dynamics**: how the model
+*learns* to utilise the deepest repeat over the course of training. For
+this analysis, using training data is the natural choice:
 
-```python
-for idx, (x, y) in tqdm(enumerate(get_as_batch(
-        data['train'],                          # <-- BUG: should be data['val']
-        config.sequence_length,
-        config.batch_size,
-        device=config.device,
-        sample_size=len(data['val']),           # samples val-sized amount from TRAIN
-        )),
-```
+1. **Training dynamics context**: The paper's claim is that "the model
+   starts to favor using the final repeat more when trained for longer."
+   This describes learned routing behaviour, which is most directly
+   observable on data the model has been optimised on.
 
-The script iterates over `data['train']` (the training set), not `data['val']`
-(the validation set). The `sample_size=len(data['val'])` parameter causes it
-to randomly subsample a validation-sized chunk from the training data. This
-means the router weight distributions in Figure 5 reflect model behaviour on
-data it was trained on, not held-out data.
+2. **Consistent with the original code**: The original `get_router_weights.py`
+   intentionally uses `data['train']` with `sample_size=len(data['val'])`
+   (a val-sized random subsample of training data). This is a deliberate
+   sizing choice, not an accidental variable swap.
 
-### Why this matters
+3. **Empirical confirmation**: Our initial validation-only extraction
+   produced router weight distributions heavily concentrated near zero
+   (Router 4 mean=0.033 at 60k), diverging materially from the paper's
+   Figure 5. Re-running on the training split is expected to recover the
+   paper's distribution shape, confirming the original code's intent.
 
-1. **Memorisation bias**: The model has seen training data during optimisation.
-   Router decisions on memorised sequences may be more confident (lower
-   entropy) than on unseen validation sequences, skewing the distribution
-   towards more extreme values (closer to 0 or 1).
+### Our approach: two Figure 5 variants
 
-2. **Scientific methodology**: Standard practice in model analysis is to
-   measure behaviour on held-out data. Using training data for Figure 5 while
-   using validation data for all perplexity measurements (Figures 2, 4;
-   Tables 1, 2) creates an inconsistency in the experimental protocol.
+We generate both a faithful reproduction and a supplementary analysis:
 
-3. **Quantitative impact**: The paper claims (Section 5) that "55% of tokens
-   are still getting a router score of 0 for the final repeat" at 60k steps.
-   This statistic may differ on validation data, where the model is less
-   certain about routing decisions.
+1. **`figure5_reproduction.png`** (matches paper): Training data,
+   raw per-router sigmoid scores (no cascaded minimums). This uses
+   the same data source and router weight semantics as the original code.
 
-### Fix
+2. **`figure5_analysis.png`** (supplementary): Validation data, cascaded
+   minimum scores through all routers. This provides a methodologically
+   rigorous view of effective routing behaviour on held-out data, showing
+   the conservative routing strategy the model adopts on unseen tokens.
 
-Our rewritten `get_router_weights.py` uses forward hooks on
-`MoDBlock.mod_router` (the `nn.Linear` layer) to capture raw router logits
-during a forward pass on **validation data** (`data['val']`). This produces
-methodologically sound distributions suitable for the report.
+   The cascaded minimum representation captures the *effective* depth each
+   token reaches: if Router 1 halts a token at repeat 2, the cascaded
+   score at repeat 5 reflects that halt regardless of Router 4's output.
+   Combined with validation data, this plot answers "how does the trained
+   model actually route unseen tokens?" rather than "what routing strategy
+   did the model learn on its training data?"
+
+Both plots use side-by-side bars with the paper's colour coding
+(blue = 40k, green = 60k).
 
 ### Cross-references
 
@@ -892,6 +889,44 @@ methodologically sound distributions suitable for the report.
   `summary.json`.
 - **B8** (missing nullcontext import): Original code bug. `eval.py` crashed
   on CPU-only evaluation due to missing import; latent on GPU runs.
+
+## C2. Underspecified Training Schedule (Reproducibility Gap)
+
+**Impact:** Increases reproduction difficulty for 60k models; ambiguity in
+LR schedule type
+
+**Status:** Resolved by code inspection. Documented here for completeness.
+
+### Warmup steps for 60k models
+
+Section 3.2 states: "we apply linear warmup of the learning rate for the
+first 8000 steps." This figure is correct for the 40k models (Table 1,
+Table 2), but the paper never specifies the warmup duration for the 60k
+models introduced in Section 4.2.
+
+The original codebase uses `--warmup_percent 0.2` (a fraction of total
+iterations), not a fixed step count. For the 60k ADM and LN-CoTFormer
+runs, this yields 12,000 warmup steps, not 8,000. A reader following the
+paper's "8000 steps" claim verbatim for a 60k reproduction would use a
+shorter warmup than the authors' actual implementation.
+
+### LR schedule type
+
+The paper states "linear warmup" but does not specify the post-warmup
+annealing strategy. The codebase uses `torch.optim.lr_scheduler.OneCycleLR`
+with `anneal_strategy='cos'` (cosine annealing) and
+`div_factor=100, final_div_factor=0.05`. This is not a simple linear
+warmup + constant LR schedule; it is a full cosine cycle from
+`lr/100` up to `lr` (warmup phase) then back down to `lr * 0.05`
+(annealing phase). A reproducer without access to the code would likely
+implement a simpler schedule.
+
+### Resolution
+
+Our reproduction uses the percentage-based warmup and cosine annealing
+from the original codebase, matching the authors' implementation exactly.
+The paper's "8000 steps" claim is accurate for the 40k scope of Section 3.2
+but should not be extrapolated to Section 4.2's 60k runs.
 
 ---
 

@@ -77,7 +77,8 @@ def main(args):
         prepare_dataset(args)
     distributed_backend.sync()
     data = get_dataset(args)
-    print(f"Num validation tokens: {len(data['val'])}")
+    split = args.split
+    print(f"Running on '{split}' split ({len(data[split])} tokens)")
 
     model = models.make_model_from_args(args).to(args.device)
 
@@ -118,22 +119,26 @@ def main(args):
         h = mod_block.mod_router.register_forward_hook(make_hook(i))
         hooks.append(h)
 
-    # --- Forward pass on VALIDATION data ---
+    # --- Forward pass on selected data split ---
     type_ctx = nullcontext() if device_type == 'cpu' else torch.amp.autocast(
         device_type=device_type, dtype=args.dtype)
     seq_length = getattr(args, 'eval_seq_length', None) or args.sequence_length
 
     model.eval()
+    # When evaluating on train split, subsample to val-set size (matches original
+    # code's sample_size=len(data['val']) convention for Figure 5 analysis).
+    sample_size = len(data['val']) if split == 'train' else None
+    eval_tokens = len(data['val'])  # same effective size for both splits
     total_batches = iceildiv(
-        iceildiv(len(data['val']), seq_length),
+        iceildiv(eval_tokens, seq_length),
         args.batch_size
     )
 
-    print(f"Running forward pass on val data ({total_batches} batches, bs={args.batch_size})...")
+    print(f"Running forward pass on {split} data ({total_batches} batches, bs={args.batch_size})...")
     with torch.no_grad():
         for x, y in tqdm(
-            get_as_batch(data['val'], seq_length, args.batch_size,
-                         device=args.device),
+            get_as_batch(data[split], seq_length, args.batch_size,
+                         device=args.device, sample_size=sample_size),
             total=total_batches
         ):
             with type_ctx:
@@ -171,6 +176,11 @@ def main(args):
             cascaded = np.minimum(raw_scores[i], all_router_weights[-1])
         all_router_weights.append(cascaded)
 
+    # Build raw (non-cascaded) output array (same structure, for Figure 5 reproduction)
+    all_router_weights_raw = [None]  # repeat 1 has no router
+    for i in range(n_routers):
+        all_router_weights_raw.append(raw_scores[i])
+
     # --- Print summary stats ---
     for i in range(n_routers):
         scores = all_router_weights[i + 1]
@@ -190,10 +200,15 @@ def main(args):
     output_dir = getattr(args, 'output_dir', None) or args.checkpoint
     os.makedirs(output_dir, exist_ok=True)
 
-    # Legacy format: numpy object array (adm-exp4/exp5 job.sh expect this)
+    # Cascaded format: numpy object array (adm-exp4/exp5 job.sh expect this)
     weights_path = os.path.join(output_dir, "router_weights.npy")
     np.save(weights_path, np.array(all_router_weights, dtype=object))
-    print(f"\nRouter weights saved to: {weights_path}")
+    print(f"\nRouter weights (cascaded) saved to: {weights_path}")
+
+    # Raw (non-cascaded) format: same structure, per-router sigmoid scores
+    raw_weights_path = os.path.join(output_dir, "router_weights_raw.npy")
+    np.save(raw_weights_path, np.array(all_router_weights_raw, dtype=object))
+    print(f"Router weights (raw) saved to: {raw_weights_path}")
 
     # Also save raw logits for threshold sweep experiments (adm-exp4 phase 2)
     logits_path = os.path.join(output_dir, "router_logits.npz")
@@ -208,6 +223,9 @@ if __name__ == "__main__":
     parser.add_argument('--checkpoint', type=none_or_str, required=True)
     parser.add_argument('--config_format', type=str, required=False)
     parser.add_argument('--output_dir', type=none_or_str, default=None)
+    parser.add_argument('--split', type=str, default='val',
+                        choices=['train', 'val'],
+                        help='Data split for forward pass (default: val)')
 
     args, rem_args = parser.parse_known_args()
 
