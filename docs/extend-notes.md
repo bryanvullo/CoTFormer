@@ -1,403 +1,326 @@
 # Extension Notes
 
-> Design rationale, method selection, and architectural decisions for the
-> MLA-LN-CoTFormer extension. This document explains **what** we are extending,
-> **why** we chose this direction, and **how** the design maps to the original
-> components.
+> Scientific investigation and architectural extension of the CoTFormer
+> (Mohtashami et al., ICLR 2025). This document records the team's
+> methodology, research questions, experimental designs, and extension
+> proposals across three milestones.
 >
-> For concrete numerical divergences from the paper, see `reprod-notes.md`.
-> For canonical training commands, see `experiments.md`.
+> For reproduction divergences, see `reprod-notes.md`.
+> For training commands, see `experiments.md`.
 
 ## Table of Contents
 
-- [1. Problem Statement](#1-problem-statement)
-- [2. Why Multi-Head Latent Attention](#2-why-multi-head-latent-attention)
-- [3. Why Not Other Approaches](#3-why-not-other-approaches)
-- [4. Where MLA Meets CoTFormer](#4-where-mla-meets-cotformer)
-- [5. Design Decisions](#5-design-decisions)
-- [6. Expected Outcomes](#6-expected-outcomes)
-- [7. Experimental Plan](#7-experimental-plan)
-- [8. MLA Implementation Reference](#8-mla-implementation-reference)
-- [9. mcHC Extension (Phase 5)](#9-mchc-extension-phase-5)
-- [Appendix: MLA Dimensionality Reference](#appendix-mla-dimensionality-reference)
+- [0. Methodology](#0-methodology)
+- [1. Milestone 2: Mechanistic Analysis](#1-milestone-2-mechanistic-analysis)
+  - [1.1 Ontological Framework](#11-ontological-framework)
+  - [1.2 Research Questions](#12-research-questions)
+  - [1.3 Experimental Protocols](#13-experimental-protocols)
+  - [1.4 Theoretical Predictions](#14-theoretical-predictions)
+  - [1.5 Analysis Matrix](#15-analysis-matrix)
+- [2. Milestone 3: Architectural Extensions](#2-milestone-3-architectural-extensions)
+  - [2.1 Multi-Head Latent Attention (MLA)](#21-multi-head-latent-attention-mla)
+  - [2.2 Manifold-Constrained HyperConnections (mcHC)](#22-manifold-constrained-hyperconnections-mchc)
+  - [2.3 Causal Cross-Repeat Mask for ADM](#23-causal-cross-repeat-mask-for-adm)
+  - [2.4 Residual Attention](#24-residual-attention)
+- [Appendix A: MLA Dimensionality Reference](#appendix-a-mla-dimensionality-reference)
 - [References](#references)
 
 ---
 
-## 1. Problem Statement
+## 0. Methodology
 
-### The CoTFormer KV cache bottleneck
+### Three Milestones
 
-CoTFormer's core mechanism — repeating the mid-block stack R times — gives each
-token multiple "thinking rounds" through the same transformer layers. During
-each repeat, the attention layers accumulate keys and values from all previous
-repeats into a cross-repeat KV cache, so that later thinking rounds can attend
-over the representations produced by earlier ones.
+| # | Milestone | Goal | Status |
+|---|-----------|------|--------|
+| 1 | Reproduce | Verify paper claims (Tables 1-2, Figures 2-5, Section 5) | Near-complete |
+| 2 | Unpick and Analyze | Understand what iterative computation computes | Active |
+| 3 | Extend | Improve architecture informed by Milestone 2 findings | Blocked on M2 |
 
-This is architecturally powerful but creates a memory problem: the KV cache
-grows linearly with the number of repeats.
+The milestones are sequential: each informs the next. Milestone 2 is
+self-contained -- understanding is the goal, not a stepping stone to
+engineering. The fact that we use M2 insights to design M3 extensions is a
+consequence of the scientific method, not the purpose of M2.
 
-For an LN-CoTFormer with `n_head=12`, `d_head=64`, `n_mid=21` mid-layers,
-`R=5` repeats, and sequence length `T`:
+### Scientific Ethos
 
-```
-Standard Transformer:  KV per layer = 2 × n_head × d_head × T
-                       = 2 × 12 × 64 × T = 1,536T values
+The authors write (Appendix F): "a thorough discussion around understanding
+how these models operate is outside the scope of the current work, we hope
+these results encourage such investigations." No existing work applies
+mechanistic interpretability to iterative/recurrent transformers [7]. This is
+the contribution gap.
 
-LN-CoTFormer:          KV per mid layer = 2 × n_head × d_head × (R × T)
-                       = 2 × 12 × 64 × 5T = 7,680T values
-```
+Every experiment in M2 must satisfy:
+1. **Specificity**: name the model, checkpoint, layer range, data split, and
+   evaluation mode.
+2. **Variable isolation**: one independent variable per experiment.
+3. **Falsifiability**: state what would disprove the hypothesis.
+4. **Ontological purpose**: what truth do we learn, independent of engineering
+   utility?
+5. **Confounder control**: explicitly list and mitigate confounders.
 
-Each mid-layer's attention window is 5x larger than a standard transformer's.
-Across 21 mid-layers, the total cache is `21 × 7,680T = 161,280T` values,
-compared to `24 × 1,536T = 36,864T` for a 24-layer standard transformer.
-That is a **4.4x increase in KV cache memory** for the same model width and
-sequence length.
+### Checkpoint Matrix
 
-### Why this matters
+| ID | Architecture | Config | Steps | PPL | Purpose |
+|----|-------------|--------|-------|-----|---------|
+| C1 | CoT+Reserved | cotformer_full_depth, 2+21*5+1 | 40k | TBD | Baseline (no ln_mid, no depth_emb) |
+| C2 | LN-CoT | cotformer_full_depth_lnmid_depthemb | 40k | 24.13 | Isolate ln_mid + depth_emb effect |
+| C3 | LN-CoT | cotformer_full_depth_lnmid_depthemb | 60k | 23.59 | Effect of additional training |
+| C4 | ADM v2 | adaptive_cotformer_..._single_final | 40k | TBD | Isolate router effect |
+| C5 | ADM v2 | adaptive_cotformer_..._single_final | 60k | 24.06 | Router maturation |
+| C4' | ADM v1 | Same architecture, pre-B4 RNG fix | 40k | -- | RNG divergence control |
+| C5' | ADM v1 | Same architecture, pre-B4 RNG fix | 60k | -- | RNG divergence control |
 
-1. **Training**: The accumulated KV cache is the primary reason batch_size=16
-   OOMs on L4 24 GB GPUs during backward (19.6 GiB + 786 MiB needed). We had
-   to halve the micro-batch to 8 (see `reprod-notes.md` §3).
-
-2. **Inference**: At longer sequence lengths (1024+), the cross-repeat cache
-   becomes the dominant memory consumer. This limits CoTFormer's practical
-   deployment at the very sequence lengths where iterative reasoning is most
-   valuable.
-
-3. **Scaling**: Increasing repeat depth R (the "thinking budget") linearly
-   increases cache size. The original paper acknowledges this trade-off but
-   does not address it.
-
----
-
-## 2. Why Multi-Head Latent Attention
-
-### What MLA does
-
-Multi-Head Latent Attention (MLA), introduced in DeepSeek-V2 [1], compresses
-the KV representation through a low-rank bottleneck before caching. Instead of
-caching the full K and V projections (`2 × n_head × d_head` per token), MLA
-caches a compact latent vector (`d_c` per token) plus a small RoPE component
-(`d_R` per token). The full K and V are reconstructed from the latent on each
-attention call via a learned up-projection.
-
-For our model dimensions (d=768, n_head=12, d_head=64):
-
-| | Per-token cache | With R=5, T=256 |
-|---|---|---|
-| Standard MHA | 1,536 values | 1,966,080 per mid-layer |
-| MLA (d_c=192, d_R=32) | 224 values | 286,720 per mid-layer |
-| **Compression** | **6.9x** | **6.9x** |
-
-### Why this is a natural fit for CoTFormer
-
-The compression ratio is multiplicative with the repeat count. A standard
-transformer gets modest benefit from MLA (caching T tokens either way). But
-CoTFormer caches `R × T` tokens in its mid-layers, so the absolute savings
-scale with R:
-
-| Repeats | MHA cache (mid) | MLA cache (mid) | Savings |
-|---------|-----------------|-----------------|---------|
-| R=2 | 2 × 1,536T | 2 × 224T | 65.5 KB/token |
-| R=5 | 5 × 1,536T | 5 × 224T | 163.8 KB/token |
-| R=10 | 10 × 1,536T | 10 × 224T | 327.6 KB/token |
-
-The higher the thinking budget, the more MLA saves. This makes MLA
-specifically valuable for CoTFormer in a way that it would not be for a
-standard non-recurrent transformer.
-
-### DeepSeek-V2's validation at scale
-
-MLA was validated on a 236B-parameter MoE model (DeepSeek-V2) trained on 8.1T
-tokens, achieving performance comparable to standard MHA despite the 6.9x
-cache compression. While our model is much smaller (~200M params), the
-projection mathematics are scale-independent: the low-rank structure of KV
-representations is a property of the attention mechanism itself, not of model
-size.
+Comparison C2-vs-C1 isolates ln_mid. C4-vs-C2 isolates the router.
+C5-vs-C4 isolates training duration. C5'-vs-C5 isolates the B4 RNG fix
+(which produces fundamentally different routing patterns -- see
+`reprod-notes.md` B12).
 
 ---
 
-## 3. Why Not Other Approaches
+## 1. Milestone 2: Mechanistic Analysis
 
-We considered several alternatives before settling on MLA.
+### 1.1 Ontological Framework
 
-### 3a. Grouped-Query Attention (GQA)
+The central question is: **"What does iterative computation in CoTFormer
+actually compute?"**
 
-GQA (Ainslie et al., 2023) [2] reduces KV cache by sharing K/V heads across
-query head groups. For example, GQA with 4 KV groups on 12 query heads gives
-3x compression.
+This decomposes into five specific sub-questions, each targeting a distinct
+aspect of the model's internal dynamics:
 
-**Why we rejected it**: GQA is a coarser compression — it forces groups of
-query heads to share identical K/V representations. MLA preserves per-head
-expressiveness through the learned up-projection `W_kvb`, which produces
-distinct K/V for each head from the shared latent. For cross-repeat attention,
-where different repeats may need to attend to earlier repeats in head-specific
-ways, per-head expressiveness matters more than in standard single-pass
-attention.
+| ID | Sub-Question | What Truth We Seek |
+|----|-------------|-------------------|
+| SQ1 | Does the model refine predictions monotonically across repeats, or does it restructure representations non-monotonically? | Whether repeats implement iterative refinement (converging toward a fixed point) or multi-phase processing (qualitative restructuring). This determines whether the "chain-of-thought" analogy is accurate or misleading. |
+| SQ2 | Do attention heads specialize by repeat, and does this specialization vary with layer depth within the mid-block? | Whether the weight-tied transformer blocks develop emergent functional specialization despite identical parameters. If yes, the cross-repeat KV cache carries structurally different information at different repeats. |
+| SQ3 | Does the ADM router learn a meaningful proxy for token difficulty, or does it approximate random pruning? | Whether the budget-adaptive claim is scientifically supported. The B4 RNG divergence (v1 vs v2 routing patterns) makes this urgent -- if the router converges to different patterns under minor training perturbations, it may not learn a robust difficulty signal. |
+| SQ4 | When only a fraction of tokens survive to repeat 5, do the surviving tokens lose contextual information because their sequence neighbours halted earlier? | Whether the cross-repeat KV cache (containing mixed-depth frozen representations from halted tokens) provides meaningful context, or whether surviving tokens become informationally isolated. No existing literature addresses this. |
+| SQ5 | Does the absence of a proper causal mask in the ADM's cross-repeat attention degrade routing quality? | Whether the ADM's routing decisions are less informed than they could be. The current mask (`k_indices <= indices`) enforces temporal ordering but does not account for repeat-depth relationships. |
 
-Additionally, GQA's max compression is bounded by `n_head / n_kv_groups`. With
-12 heads, the maximum (single KV group = Multi-Query Attention) gives 12x
-compression but significantly degrades quality at small model scales. MLA
-achieves 6.9x compression while preserving full per-head diversity.
+### 1.2 Research Questions
 
-### 3b. Quantized KV Cache
+Each sub-question generates specific, falsifiable research questions with
+full variable isolation.
 
-Post-training KV cache quantization (INT8, INT4) can halve or quarter cache
-memory at inference time.
+#### RQ1: Prediction Convergence Across Repeats (SQ1)
 
-**Why we rejected it**: (1) Quantization is an inference-time optimization
-that does not help training memory — and training is our current bottleneck.
-(2) It does not compose well with cross-repeat attention: quantization error
-compounds across R rounds of accumulation. (3) It is orthogonal to MLA — you
-could quantize the MLA latent too, stacking the savings.
+**Statement**: During evaluation on OWT2 validation data, does the
+LN-CoTFormer (C3, 60k) converge monotonically toward the correct next-token
+prediction across repeats 1 to 5, as measured by top-1 accuracy of the
+logit-lens projection at each repeat's `ln_mid` output?
 
-### 3c. Sparse Attention / Sliding Window
+- **IV**: Repeat index r in {1, 2, 3, 4, 5}
+- **DV**: Top-1 accuracy of `lm_head(ln_mid(h_r))` vs ground-truth next token;
+  KL divergence `D_KL(P_r || P_{r-1})`; entropy `H(P_r)`
+- **Controls**: Same checkpoint (C3), same data (OWT2 val), same forward pass
+- **Confounders**: `ln_mid` normalisation distorts the logit-lens projection
+  differently at each repeat (norm varies). Mitigation: also measure WITHOUT
+  `ln_mid` (project raw `h_r` through `lm_head`). Compare both.
+- **H0**: Top-1 accuracy is flat across repeats. Repeats add compute, not signal.
+- **Falsifies H0**: Monotonic increase (paired t-test, p < 0.01).
+- **What truth**: the RATE of convergence reveals whether most useful work
+  happens in repeats 1-2 (diminishing returns) or is distributed (each repeat
+  adds substantial value).
+- **Cross-checkpoint**: repeat on C1 (no ln_mid) and C5 (ADM). C1-vs-C3
+  reveals whether ln_mid changes the convergence trajectory. C5-vs-C3 reveals
+  whether the router alters which tokens converge early.
 
-Limiting the cross-repeat attention window (e.g., attending only to the
-previous 2 repeats instead of all R) would reduce cache linearly.
+#### RQ2: Representation Structural Similarity (SQ1)
 
-**Why we rejected it**: The whole point of CoTFormer's cross-repeat cache is
-that later thinking rounds can build on the full context of earlier rounds.
-Restricting the window undermines the architectural thesis. MLA preserves the
-full attention pattern while compressing the representation.
+**Statement**: Across the 105 (layer, repeat) activation sites in the
+LN-CoTFormer mid-block, which pairs produce structurally similar
+representations, as measured by CKA?
 
-### 3d. Reducing Repeat Count
+- **IV**: Pair of (layer_i, repeat_j) activation sites
+- **DV**: CKA (linear + RBF kernels) over 2048 validation tokens
+- **Controls**: Same checkpoint (C3), same data batch
+- **Confounders**: CKA with linear kernel saturates at high similarity for
+  wide representations. Mitigation: RBF kernel check; finite-sample
+  correction [9].
+- **H0**: CKA > 0.9 across all cross-repeat pairs within each layer (redundant
+  representations through same weights).
+- **Falsifies H0**: CKA < 0.7 for any adjacent-repeat pair.
+- **What truth**: if H0 holds, cross-repeat KV is redundant and highly
+  compressible. If rejected, each repeat's contribution is unique. The
+  layer-resolved CKA map shows WHERE the model does its most distinctive work.
 
-Simply using R=3 instead of R=5 reduces cache by 40%.
+#### RQ3: Attention Head Specialization (SQ2)
 
-**Why we rejected it**: This changes the model's computational budget, not its
-efficiency. The goal is to enable *more* thinking at *less* memory cost, not to
-think less. MLA decouples cache size from thinking depth.
+**Statement**: In the LN-CoTFormer (C3), do attention heads partition into
+functionally distinct classes based on cross-repeat attention patterns, and
+does this differ between early (layers 3-7) and late (layers 17-21) mid-layers?
 
-### 3e. Gradient Checkpointing
+- **IV**: (Layer index, head index) -- 252 heads
+- **DV**: Average attention distribution of the final token at repeat 5 over
+  all (token, repeat) pairs. K-means clustering (k=4-6).
+- **Controls**: Same checkpoint, averaged over full validation set
+- **Confounders**: Flash Attention does not return weights. Use non-flash pass.
+  Verify PPL matches to 4 decimal places.
+- **H0**: Head cluster assignments are uniformly distributed across layers.
+- **What truth**: if early layers favour "broad" heads (all repeats) while late
+  layers favour "current-repeat specialists," it reveals a division of labour.
 
-Recomputing activations during backward would reduce training memory.
+#### RQ4: Router Validity (SQ3)
 
-**Why we rejected it for the extension (but considered for training)**: The
-`InPlaceSetSlice` KV cache accumulation in the current codebase is incompatible
-with `torch.utils.checkpoint` — recomputation during backward would
-double-write the cache, producing incorrect gradients. A compatible
-implementation would require refactoring the cache as explicit function I/O
-rather than in-place mutation. This is a valid engineering task but does not
-address the fundamental cache growth problem at inference time.
+**Statement**: In the ADM (C5), do tokens halted at early repeats have
+systematically lower next-token CE loss than tokens surviving to repeat 5?
 
----
+- **IV**: Token halting depth (repeat at which cascaded score drops below 0.5)
+- **DV**: Per-token cross-entropy loss at final output
+- **Controls**: Same checkpoint (C5), same data (OWT2 val)
+- **Confounders**: Position-in-sequence correlates with both loss and halting.
+  Mitigation: partial correlation controlling for position.
+- **H0**: No correlation (Pearson |r| < 0.1 after position control).
+- **What truth**: if H0 rejected, router learns difficulty proxy. If H0 holds,
+  router decisions are not meaningfully related to difficulty. C5'-vs-C5
+  tests robustness to training perturbations.
 
-## 4. Where MLA Meets CoTFormer
+#### RQ5: Context Preservation Under Adaptive Depth (SQ4)
 
-### Architecture mapping
+**Statement**: In the ADM (C5), do tokens surviving to repeat 5 produce
+higher-quality predictions when their context tokens also survived deep,
+compared to when most context halted at repeat 1-2?
 
-The LN-CoTFormer has three structural regions:
+- **IV**: Fraction of context tokens surviving to same depth
+- **DV**: Per-token CE loss for the target token
+- **Controls**: Conditioned on target surviving to repeat 5
+- **Confounders**: Sequence difficulty. Mitigation: z-score loss per sequence.
+- **H0**: Target loss independent of context survival fraction.
+- **What truth**: if H0 rejected, surviving tokens suffer "contextual
+  isolation" -- a fundamental limitation of adaptive depth.
 
-```
-h_begin (2 prefix blocks)  →  standard CausalSelfAttention
-h_mid   (21 blocks × 5 repeats)  →  CausalSelfAttention with cross-repeat KV cache
-h_end   (1 suffix block)  →  standard CausalSelfAttention
-```
+#### RQ6: Effective Dimensionality (SQ1)
 
-MLA replaces the attention **only in `h_mid` blocks**, where the cross-repeat
-cache creates the bottleneck. The prefix and suffix blocks use standard MHA
-because:
+**Statement**: Does intrinsic dimensionality decrease across repeats 1 to 5
+in the LN-CoTFormer (C3)?
 
-1. They run only once (no repeat-induced cache growth).
-2. They process the initial/final token representations, which benefit from
-   full-rank attention for embedding quality.
-3. Keeping them standard simplifies the implementation and reduces the number
-   of changed variables in the experiment.
+- **IV**: Repeat index r in {1, 2, 3, 4, 5}
+- **DV**: Participation ratio with finite-sample correction [9] at each
+  (layer, repeat) site
+- **Controls**: Same checkpoint, same 2048 tokens
+- **H0**: d_eff constant (+/- 5%) across repeats within each layer.
+- **What truth**: if d_eff decreases, later repeats operate in
+  lower-dimensional subspaces, directly determining MLA rank allocation.
 
-### What changes in the forward pass
+### 1.3 Experimental Protocols
 
-**Before (standard cross-repeat attention)**:
-```
-For each mid-layer:
-  1. Project x → Q, K, V  (3 × n_head × d_head = 2304 dims)
-  2. Append K, V to cross-repeat buffer  (InPlaceSetSlice)
-  3. Attend Q over full buffer  (Flash Attention)
-```
+| Protocol | Serves | Implementation | Compute |
+|----------|--------|---------------|---------|
+| A: Logit Lens | RQ1 | `analyze_model.py --logit-lens` | ~10 min/ckpt (GPU) |
+| B: CKA Matrix | RQ2 | `analyze_model.py --cka` | ~20 min total (CPU) |
+| C: Attention Taxonomy | RQ3 | `analyze_model.py --attention-taxonomy` | ~30 min/ckpt (GPU, non-flash) |
+| D: Router-Loss Correlation | RQ4, RQ5 | `analyze_model.py --router-analysis` | ~15 min/ADM ckpt (GPU) |
+| E: Residual Diagnostics | SQ1 | `analyze_model.py --residual-diagnostics` | Piggybacks on A |
+| F: Effective Dimensionality | RQ6 | `analyze_model.py --effective-dim` | ~5 min (CPU) |
+| G: KV Compressibility | M3 design | `analyze_model.py --kv-compressibility` | ~15 min/ckpt (GPU) |
 
-**After (MLA cross-repeat attention)**:
-```
-For each mid-layer:
-  1. Compress x → kv_latent, k_rope  (d_c + d_R = 224 dims)
-  2. Append compressed kv_latent, k_rope to cross-repeat buffer
-  3. Decompress buffer → K, V  (via W_kvb up-projection)
-  4. Project x → Q  (via down-norm-up path)
-  5. Attend Q over decompressed K, V  (Flash Attention)
-```
+All protocols share a unified analysis framework (`analyze_model.py`) with
+modular backends. Protocols A-F share the same forward pass to minimize GPU
+time.
 
-The buffer stores 224 values per token instead of 1,536. The decompression
-(`W_kvb` matmul) adds compute cost at each attention call, but the memory
-savings enable larger batches or longer sequences that more than compensate.
+### 1.4 Theoretical Predictions
 
-### What does NOT change
+**Prediction 1** (from [11]): Weight decay (wd=0.1) on weight-tied QK/OV
+matrices drives them to low-rank solutions. The 5x repetition compounds this.
+*Test*: Protocol G; measure 95% effective rank of K/V activations. Confirmed
+if rank < 40 (< 63% of nominal d_head=64).
 
-- The repeat loop structure
-- Depth embeddings (`LinearLearnedDepthPositionalEncoder`)
-- Inter-repeat LayerNorm (`ln_mid`)
-- The MLP blocks within each transformer block
-- Prefix/suffix blocks
-- The training loop, optimizer, scheduler, and data pipeline
-- The ADM router mechanism (if composing MLA + ADM later)
+**Prediction 2** (from [12]): Repetition accelerates sparse attention
+emergence. *Test*: Protocol C; measure per-head attention entropy across
+repeats. Confirmed if entropy decreases monotonically (Spearman rho < -0.8).
 
----
+### 1.5 Analysis Matrix
 
-## 5. Design Decisions
+| Protocol | C1 | C2 | C3 | C4 | C5 | C4' | C5' | GPU? |
+|----------|:--:|:--:|:--:|:--:|:--:|:---:|:---:|:----:|
+| A: Logit Lens | X | X | X | X | X | -- | -- | Yes |
+| B: CKA | X | X | X | X | X | -- | -- | No |
+| C: Attn Taxonomy | X | X | -- | X | -- | -- | -- | Yes |
+| D: Router-Loss | -- | -- | -- | X | X | X | X | Yes |
+| E: Residual | X | X | -- | X | -- | -- | -- | No |
+| F: Eff. Dim | X | X | X | X | X | -- | -- | No |
+| G: KV Compress. | -- | -- | X | -- | X | -- | -- | Yes |
 
-### DEC-EXT-001: Uniform compression rank across layers
-
-**Decision**: Use a single `kv_lora_rank=192` for all 21 mid-layers.
-
-**Rationale**: DeepSeek-V2 uses uniform rank across all layers in a 60-layer
-model and finds no benefit from per-layer tuning. Our model has fewer layers
-(21 mid), reducing the variance in per-layer compressibility. The
-`analyze_kv_compression.py` tool will validate this post-training: if any
-layers show effective rank > 192, we can increase the rank for those layers in
-a follow-up experiment.
-
-**Alternative considered**: Per-layer adaptive rank based on SVD analysis.
-Rejected for Phase 4 due to complexity; deferred to future work.
-
-### DEC-EXT-002: Separate RoPE branch for keys
-
-**Decision**: The compressed latent `c_KV` contains content information only.
-Positional (RoPE) information is carried in a separate `k_rope` branch that
-bypasses the compression bottleneck.
-
-**Rationale**: This is DeepSeek-V2's design, motivated by the observation that
-position-dependent and position-independent attention patterns require
-different representational capacity. Compressing RoPE embeddings through the
-same bottleneck as content would force the low-rank space to represent both
-absolute position and semantic content simultaneously, likely degrading both.
-
-### DEC-EXT-003: RMSNorm on compressed representations
-
-**Decision**: Apply RMSNorm after the down-projection for both the query and
-KV paths (`q_norm`, `kv_norm`).
-
-**Rationale**: The down-projection reduces dimensionality from 768 to 192-384.
-Without normalisation, the compressed activations can have very different
-magnitude distributions than the original hidden states, destabilising the
-up-projection. DeepSeek-V2 uses RMSNorm here (not LayerNorm) because RMSNorm
-has no mean-centering, preserving directional information in the compressed
-space.
-
-### DEC-EXT-004: Standard MHA in prefix/suffix blocks
-
-**Decision**: Only mid-blocks use MLA. The 2 prefix and 1 suffix blocks retain
-standard `CausalSelfAttention`.
-
-**Rationale**: See §4 above. Prefix/suffix blocks have no repeat-induced cache
-growth. Using standard MHA provides stronger baselines for the first/last
-layers that set up and consolidate the repeated computation. This also means
-MLA failures (if any) are isolated to the mid-blocks and do not contaminate
-the embedding or prediction layers.
-
-### DEC-EXT-005: Train from scratch (not fine-tune)
-
-**Decision**: Train MLA-LN-CoTFormer from random initialisation for 40k steps,
-matching the LN-CoTFormer training protocol.
-
-**Rationale**: Fine-tuning from a trained LN-CoTFormer checkpoint would require
-the MLA projections to learn compressed representations that are compatible
-with pre-existing attention patterns. This is a harder optimisation problem than
-learning both simultaneously from scratch. Additionally, training from scratch
-provides a fair comparison — both models see the same data for the same number
-of steps.
-
-### DEC-EXT-006: Cache compressed latents, decompress on access
-
-**Decision**: The cross-repeat buffer stores the compressed `c_KV` (192 dims)
-and `k_rope` (32 dims) rather than the decompressed K, V (1,536 dims).
-
-**Rationale**: The whole point of MLA is cache compression. Storing
-decompressed K/V would negate the memory benefit. The trade-off is additional
-compute: each attention call must run the `W_kvb` up-projection on the full
-buffer (R × T tokens). For R=5, T=256, this is a matmul of shape
-(batch, heads, 1280, d_c) — approximately 0.3 GFLOPs per layer per micro-step.
-This is small compared to the attention computation itself.
+Total GPU: ~3h on L4.
 
 ---
 
-## 6. Expected Outcomes
+## 2. Milestone 3: Architectural Extensions
 
-### Primary hypothesis
+Each extension is motivated by specific M2 findings. Implementation details
+are deliberately brief -- they will be expanded once M2 results inform design.
 
-MLA-LN-CoTFormer achieves perplexity within +0.5 PPL of standard
-LN-CoTFormer while using 6.9x less KV cache memory in the mid-blocks.
+### 2.1 Multi-Head Latent Attention (MLA)
 
-### What we expect to observe
+#### Motivation
 
-| Metric | LN-CoTFormer | MLA-LN-CoTFormer | Direction |
-|--------|-------------|------------------|-----------|
-| Final PPL (40k steps) | ~24.1 (paper Table 2) | ~24.1–24.6 | Slight degradation acceptable |
-| Peak VRAM (batch=8, 2 GPU) | ~15 GB | ~10–12 GB | Lower |
-| Max batch_size on L4 | 8 | 12–16 | Higher |
-| Training throughput (steps/sec) | baseline | ~0.85–0.95x | Slight slowdown from decompression |
-| KV cache memory (R=5, T=256) | 161,280T vals | 23,520T vals | 6.9x smaller |
+CoTFormer's cross-repeat KV cache grows as `R*T` per mid-layer (4.4x overhead
+at R=5). MLA [1] compresses KV through a low-rank latent bottleneck: 224
+values/token instead of 1536 (6.9x compression). Savings scale with R.
 
-### What would invalidate the approach
+Alternatives (GQA [2], KV quantization, sparse attention, fewer repeats) are
+either less expressive, orthogonal, or change the compute budget rather than
+efficiency. MLA preserves full per-head diversity and the complete attention
+pattern while compressing the cache.
 
-- PPL degradation > 1.0 compared to standard LN-CoTFormer at matched training
-  steps. This would indicate that `kv_lora_rank=192` is insufficient for the
-  cross-repeat attention pattern.
-- Training instability (loss spikes, NaN gradients) in the first 1000 steps.
-  This would suggest the RMSNorm + low-rank initialisation needs adjustment.
+#### Design Decisions (provisional, pending M2)
 
-### Fallback plan
+| ID | Decision | Contingent On |
+|----|----------|---------------|
+| DEC-EXT-001 | Rank allocation: uniform kv_lora_rank=192 | RQ6. If d_eff varies >2x, adopt CARE [14]. |
+| DEC-EXT-002 | Separate RoPE branch (d_R=32) | MHA2MLA [15] analysis |
+| DEC-EXT-003 | RMSNorm on compressed latents | Standard [5] |
+| DEC-EXT-004 | Mid-blocks only (prefix/suffix keep MHA) | No cache growth there |
+| DEC-EXT-005 | Train from scratch, 40k steps, matched hyperparams | Fair comparison |
+| DEC-EXT-006 | Cache compressed latents, decompress on access | Core MLA [1] |
 
-If `kv_lora_rank=192` proves insufficient:
-1. Run `analyze_kv_compression.py` on the trained LN-CoTFormer checkpoint to
-   determine per-layer effective rank.
-2. Increase to `kv_lora_rank=256` or `kv_lora_rank=384` (still 4.6x or 2.3x
-   compression).
-3. If no rank works, try hybrid: MLA for early repeats (where representations
-   are less differentiated), standard MHA for later repeats.
+Target: PPL < +0.5 vs LN-CoT, 6.9x mid-block KV compression, peak VRAM < 12 GB.
+
+See Appendix A for projection architecture and dimensionality reference.
+
+### 2.2 Manifold-Constrained HyperConnections (mcHC)
+
+mcHC [6] generalises residual connections via multi-stream routing (`alpha`
+streams, learned `C in R^{alpha x alpha}` per layer, Stiefel-constrained).
+For CoTFormer: different subspaces routed through different repeats.
+
+**Decision gate** (from M2): strong RQ4 correlation = mcHC as complement;
+weak = mcHC as router replacement. CKA collapse (RQ2) = strong motivation.
+
+Design: alpha=2, mid-layers only. Memory: 2x hidden state. Params: 8/layer.
+
+### 2.3 Causal Cross-Repeat Mask for ADM
+
+The ADM uses `is_causal=False` with an index-based mask (`k_indices <= indices`)
+that enforces temporal ordering but ignores repeat-depth structure. A token at
+repeat 3 attends uniformly to ALL previous tokens at ALL repeats.
+
+**Research question** (SQ5): does adding repeat-depth-aware causal constraints
+improve the perplexity-compute trade-off? Ablation: same ADM architecture,
+modified mask, identical hyperparameters.
+
+Design pending M2 Protocol C (attention taxonomy) and literature findings.
+
+### 2.4 Residual Attention
+
+Instead of compressing the full accumulated KV cache (grows linearly with R),
+attend directly to per-position residual deltas across repeats. The "residual
+cache" has size `R * d_model` per position (depth dimension), not `R * T *
+d_model` (sequence times depth), avoiding linear growth entirely.
+
+**Research question**: does attending to residual deltas preserve cross-repeat
+information quality while eliminating the KV growth problem?
+
+Design pending targeted literature review on differential/residual attention.
 
 ---
 
-## 7. Experimental Plan
+## Appendix A: MLA Dimensionality Reference
 
-### Phase 4a: Implementation (no GPU needed)
-
-1. Create `models/mla_cotformer.py` — copy `cotformer_full_depth_lnmid_depthemb.py`,
-   replace `CausalSelfAttention` with `MLACausalSelfAttention` in mid-blocks only.
-2. Register in `models/__init__.py`.
-3. Add MLA config args to `config/base.py`:
-   `--kv_lora_rank 192`, `--q_lora_rank 384`, `--qk_rope_head_dim 32`,
-   `--qk_nope_head_dim 64`, `--v_head_dim 64`.
-4. Verify model instantiation and forward pass locally (CPU, batch=1).
-5. Compare parameter counts: MLA model should have ~24% fewer attention params.
-
-### Phase 4b: Training (GPU needed)
-
-1. Create `iridis/mla-train/job.sh` — same template as `lncot-train/job.sh`
-   with `--model mla_cotformer` and MLA dimension args.
-2. Train for 40k steps, same hyperparameters as LN-CoTFormer (lr=1e-3,
-   warmup=0.2, cosine schedule, seed=0).
-3. Monitor: loss curve, gradient norms, VRAM usage in first 100 steps.
-4. If stable, let it run to completion.
-
-### Phase 4c: Validation
-
-1. Run `analyze_kv_compression.py` on both the LN-CoTFormer and MLA checkpoints.
-2. Compare per-layer effective rank to our chosen `kv_lora_rank=192`.
-3. Evaluate final perplexity on full validation set.
-4. Profile peak VRAM at batch sizes 8, 12, 16, 32 (single GPU) to quantify
-   the practical memory benefit.
-5. If composing with ADM: train an adaptive MLA-LN-CoTFormer for Figure 4
-   comparison.
-
----
-
-## 8. MLA Implementation Reference
-
-### `MLACausalSelfAttention` Projections
+### Projection Architecture
 
 ```python
 class MLACausalSelfAttention(nn.Module):
     def __init__(self, config):
-        super().__init__()
         d = config.n_embd          # 768
         n_h = config.n_head        # 12
         d_c = config.kv_lora_rank  # 192
@@ -421,8 +344,7 @@ class MLACausalSelfAttention(nn.Module):
         self.c_proj = nn.Linear(n_h * d_v, d, bias=False)
 ```
 
-`RMSNorm` is needed in `models/utils.py` (no mean-centering, preserves directional
-information in compressed space):
+### RMSNorm
 
 ```python
 class RMSNorm(nn.Module):
@@ -436,166 +358,83 @@ class RMSNorm(nn.Module):
         return x * norm * self.weight
 ```
 
-### RoPE Handling
-
-The existing `rotary.py` already supports arbitrary head dims via `adapt_queries` /
-`adapt_keys`. Pass the smaller d_R-dimensional tensors directly. **No changes to
-`rotary.py` needed.**
-
-### New File: `models/mla_cotformer.py`
-
-Copy `cotformer_full_depth_lnmid_depthemb.py` and make these surgical changes:
-
-1. Replace `CausalSelfAttention` with `MLACausalSelfAttention` in mid-blocks only
-2. Replace `InPlaceSetSlice` K/V buffers with compressed `kv_latent` + `k_rope` buffers
-3. `h_begin`/`h_end` keep standard MHA (no repeat-induced cache growth)
-4. Everything else identical: depth embeddings, ln_mid, repeat loop
-
-Register in `models/__init__.py`:
-```python
-from . import mla_cotformer
-MODELS["mla_cotformer"] = mla_cotformer.GPTBase
-```
-
-### Parameter Count
-
-MLA attention is ~24% fewer params per layer than standard MHA (fewer projection
-weights due to the low-rank bottleneck). Report parameter counts alongside perplexity
-for fair comparison.
-
----
-
-## 9. mcHC Extension (Phase 5)
-
-### Background
-
-Manifold-Constrained HyperConnections (mcHC) generalise the standard residual
-connection `y = x + f(x)` by replacing it with a learned linear transformation that
-routes information between layers through multiple "streams." Introduced by Wang et
-al. (2024) and adopted in DeepSeek-V3 [6], mcHC addresses representation collapse in
-very deep networks by allowing each layer to selectively read from and write to
-different subspaces of the hidden representation.
-
-In the standard formulation, the hidden state h is expanded into alpha > 1 streams of
-dimension d each. Each layer reads a weighted combination of streams, processes it,
-and writes its output back as a weighted combination. The connection weights form a
-matrix C in R^{alpha x alpha} per layer, constrained to lie on a smooth manifold
-(e.g., the Stiefel manifold of orthonormal frames) to prevent degeneration during
-training.
-
-### Motivation for CoTFormer
-
-CoTFormer's cross-repeat architecture creates a natural multi-pass information flow
-where the same transformer block processes tokens n_repeat times. Three properties
-make mcHC particularly attractive:
-
-1. **Repeat-aware information routing**: Different repeats serve different purposes
-   (early repeats: broad context gathering; late repeats: refinement). mcHC could
-   learn to route different subspaces through different repeats, effectively
-   specialising the repeat loop without explicit gating.
-
-2. **Complementary to MLA**: MLA (Phase 4) compresses the KV cache, an inference-time
-   memory optimisation. mcHC modifies the residual stream structure, a capacity
-   optimisation that changes what the model can learn. They operate on orthogonal axes
-   and can be combined.
-
-3. **Potential router replacement**: The ADM router decides per-token whether to
-   continue processing. mcHC's multi-stream structure could subsume this: if a
-   stream's write-weight goes to zero for a given layer, that stream is effectively
-   "halted" -- a softer, differentiable alternative to the hard top-k selection.
-
-### Architectural Sketch
-
-For d=768 and alpha=2 streams (minimal configuration):
+### Dimensionality Map
 
 ```
-Hidden state: h in R^{2 x 768} (2 streams of 768 dims)
-
-Per-layer processing:
-  h_read = C_read @ h           C_read in R^{1 x 2}  (combine streams for layer input)
-  h_out  = TransformerBlock(h_read)
-  h      = h + C_write @ h_out  C_write in R^{2 x 1}  (distribute output across streams)
+Standard MHA:  Cache/token = 2 * 12 * 64 = 1536 floats
+MLA:           Cache/token = 192 + 32 = 224 floats
+Compression:   6.9x
 ```
-
-**Memory overhead**: 2x hidden state size during forward pass. No additional KV cache
-cost (mcHC operates on the residual stream, not on attention keys/values).
-
-**Parameter overhead**: 2 x alpha x alpha scalars per layer = 8 parameters per layer
-for alpha=2. Negligible relative to the ~8.7M parameters per transformer layer.
-
-### Design Questions (To Resolve Before Implementation)
-
-| Question | Options | Decision Criteria |
-|----------|---------|-------------------|
-| Number of streams (alpha) | 2, 4, 8 | Trade-off: expressiveness vs memory. Start with alpha=2 |
-| Manifold constraint | Stiefel (orthogonal), unconstrained + regularisation | Stiefel if training instability observed; unconstrained otherwise |
-| Scope of mcHC | Mid layers only, all layers, cross-repeat only | KV analysis results will reveal which layers benefit most |
-| Interaction with MLA | Shared latent space, independent | Independent first; explore shared compression after baseline ablation |
-| Interaction with ADM router | Co-exist (mcHC + router), replace router | Ablation required: mcHC-only vs router-only vs combined |
-
-### Dependencies
-
-Phase 5 begins only after Phase 4 (MLA) training is complete. Prerequisites:
-- Trained MLA model with measured perplexity and KV cache savings
-- KV compression analysis results to identify which layers have the most/least
-  compressible representations
-- Attention entropy analysis to understand per-layer information flow patterns
-
-The mcHC module will be developed as a standalone component that can be inserted into
-any CoTFormer variant (MLA or standard MHA).
-
----
-
-## Appendix: MLA Dimensionality Reference
-
-```
-STANDARD MHA (per layer):
-  Q = W_Q . h_t    W_Q in R^(768x768)
-  K = W_K . h_t    W_K in R^(768x768)
-  V = W_V . h_t    W_V in R^(768x768)
-  Cache per token: K + V = 1536 floats
-
-MLA (per layer):
-  Query path:
-    c_Q = RMSNorm(W_qa . h_t)           W_qa in R^(384x768)  -> c_Q in R^384
-    q_nope = W_qb . c_Q                 W_qb in R^(768x384)  -> 12 heads x 64
-    q_rope = RoPE(W_qr . c_Q)           W_qr in R^(384x384)  -> 12 heads x 32
-    q = [q_nope ; q_rope]  per head: R^96
-
-  KV path:
-    [c_KV ; k_pe] = W_kva . h_t         W_kva in R^(224x768) -> c_KV in R^192, k_pe in R^32
-    c_KV = RMSNorm(c_KV)
-    [k_nope ; v] = W_kvb . c_KV         W_kvb in R^(1536x192)
-    k_rope = RoPE(k_pe)                 shared across heads
-    k = [k_nope ; k_rope]  per head: R^96
-
-  Cache per token: c_KV + k_pe = 224 floats  (6.9x compression)
-```
-
-### Weight Absorption (Inference-Only)
-
-At inference, absorb `W_kvb` into the attention dot product to avoid materialising
-full K/V. Not needed during training -- deferred to post-training optimisation.
 
 ---
 
 ## References
 
-[1] DeepSeek-AI. (2024). *DeepSeek-V2: A Strong, Economical, and Efficient
-    Mixture-of-Experts Language Model.* arXiv:2405.04434.
+[1] DeepSeek-AI. *DeepSeek-V2: A Strong, Economical, and Efficient
+    Mixture-of-Experts Language Model.* arXiv:2405.04434, 2024.
 
-[2] Ainslie, J. et al. (2023). *GQA: Training Generalized Multi-Query
-    Transformer Models from Multi-Head Checkpoints.* arXiv:2305.13245.
+[2] J. Ainslie et al. *GQA: Training Generalized Multi-Query Transformer
+    Models from Multi-Head Checkpoints.* arXiv:2305.13245, 2023.
 
-[3] Mohtashami, A. et al. (2025). *CoTFormer: A Chain-of-Thought Driven
-    Architecture with Budget-Adaptive Computation Cost at Inference.*
-    ICLR 2025.
+[3] A. Mohtashami et al. *CoTFormer: A Chain-of-Thought Driven Architecture
+    with Budget-Adaptive Computation Cost at Inference.* In ICLR, 2025.
 
-[4] Shazeer, N. (2019). *Fast Transformer Decoding: One Write-Head is All
-    You Need.* arXiv:1911.02150. (Original Multi-Query Attention.)
+[4] N. Shazeer. *Fast Transformer Decoding: One Write-Head is All You Need.*
+    arXiv:1911.02150, 2019.
 
-[5] Zhang, B. & Sennrich, R. (2019). *Root Mean Square Layer Normalization.*
-    NeurIPS 2019.
+[5] B. Zhang and R. Sennrich. *Root Mean Square Layer Normalization.* In
+    NeurIPS, 2019.
 
-[6] DeepSeek-AI. (2024). *DeepSeek-V3 Technical Report.* arXiv:2412.19437.
-    (Manifold-Constrained HyperConnections, Section 3.1.)
+[6] DeepSeek-AI. *DeepSeek-V3 Technical Report.* arXiv:2412.19437, 2024.
+
+[7] Z. Zheng et al. *Attention Heads of Large Language Models: A Survey.* In
+    Patterns (Cell Press), 2025. arXiv:2409.03752.
+
+[8] J. Chen et al. *KV-CoRE: Benchmarking Data-Dependent Low-Rank
+    Compressibility of KV-Caches in LLMs.* arXiv:2602.05929, 2026.
+
+[9] C. Chun et al. *Estimating Dimensionality of Neural Representations from
+    Finite Samples.* arXiv:2509.26560, 2025.
+
+[10] T. Nait Saada et al. *Mind the Gap: A Spectral Analysis of Rank Collapse
+     and Signal Propagation in Attention Layers.* arXiv:2410.07799, 2025.
+
+[11] S. Kobayashi et al. *Weight Decay Induces Low-Rank Attention Layers.*
+     arXiv:2410.23819, 2024.
+
+[12] N. Zucchet et al. *The Emergence of Sparse Attention: Impact of Data
+     Distribution and Benefits of Repetition.* arXiv:2505.17863, 2025.
+
+[13] Y. Xu et al. *Tracking the Feature Dynamics in LLM Training: A
+     Mechanistic Study.* arXiv:2412.17626, 2024.
+
+[14] Z. Zhou et al. *CARE: Covariance-Aware and Rank-Enhanced Decomposition
+     for Enabling Multi-Head Latent Attention.* arXiv:2603.17946, 2026.
+
+[15] T. Ji et al. *MHA2MLA: Towards Economical Inference -- Enabling
+     DeepSeek's Multi-Head Latent Attention in Any Transformer.* In ACL, 2025.
+     arXiv:2502.14837.
+
+[16] J. Geiping et al. *Scaling up Test-Time Compute with Latent Reasoning: A
+     Recurrent Depth Approach.* arXiv:2502.05171, 2025.
+
+[17] W. Merrill and A. Sabharwal. *The Expressive Power of Transformers with
+     Chain of Thought.* In ICLR, 2024. arXiv:2310.07923.
+
+[18] S. Hao et al. *Training Large Language Models to Reason in a Continuous
+     Latent Space (Coconut).* arXiv:2412.06769, 2024.
+
+[19] B. Wang et al. *Grokked Transformers are Implicit Reasoners.* In
+     NeurIPS, 2024. arXiv:2405.15071.
+
+[20] H. Yao et al. *Thin Keys, Full Values: Reducing KV Cache via
+     Low-Dimensional Attention Selection.* arXiv:2603.04427, 2026.
+
+[21] J. Sok et al. *Garbage Attention in LLMs: BOS Sink Heads and Sink-aware
+     Pruning.* arXiv:2601.06787, 2026.
+
+[22] D. Lesens et al. *KQ-SVD: Compressing the KV Cache with Provable
+     Guarantees on Attention Fidelity.* arXiv:2512.05916, 2025.
+
+[23] X. Chen et al. *Reasoning Beyond Language: A Comprehensive Survey on
+     Latent Chain-of-Thought Reasoning.* arXiv:2505.16782, 2025.

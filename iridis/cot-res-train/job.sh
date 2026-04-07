@@ -85,7 +85,9 @@ source "$REPO_DIR/iridis/env.sh"
 
 # --- Scratch-based output dirs (off home quota) ---
 EXPS_DIR="/scratch/ab3u21/exps"
-mkdir -p "$EXPS_DIR" "$DATA_DIR" "$HF_HOME" "$TIKTOKEN_CACHE_DIR" "$WANDB_DIR"
+EXP_NAME="cotformer_full_depth_lr0.001_bs${BATCH_SIZE}x${ACC_STEPS}_seqlen256"
+CKPT_PARENT="$EXPS_DIR/owt2/cotformer_full_depth/$EXP_NAME"
+mkdir -p "$CKPT_PARENT" "$DATA_DIR" "$HF_HOME" "$TIKTOKEN_CACHE_DIR" "$WANDB_DIR"
 
 echo "========================================="
 echo " CoTFormer + Reserved Layers Training"
