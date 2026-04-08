@@ -43,16 +43,16 @@ class InPlaceSetSlice(torch.autograd.Function):
     def backward(ctx, grad_out):
         prefix_slice = [slice(None)] * ctx.dim 
         if ctx.prev_length == 0:
-            return None, None, grad_out[prefix_slice + [slice(None, ctx.new_length)]], None
+            return None, None, grad_out[prefix_slice + [slice(None, ctx.new_length)]], None #return one gradient for every input passed into forward excluding ctx
         else:
             return None, grad_out[prefix_slice + [slice(None, ctx.prev_length)]], grad_out[prefix_slice + [slice(ctx.prev_length, ctx.new_length)]], None
-
+# second return value belongs to tokens generated in previous layers/repeats. Goes baclwards through last_slice. second belongs to token that was just generated now. Goes through x_val.
 
 def apply_inplace_set(x_acc, x_val, dim):
     full_tensor, last_slice = x_acc
-    new_slice = InPlaceSetSlice.apply(full_tensor, last_slice, x_val, dim)
-    return full_tensor, new_slice
-
+    new_slice = InPlaceSetSlice.apply(full_tensor, last_slice, x_val, dim) # never call .forward() directly on torch.autograd.Function  
+    return full_tensor, new_slice                                         # .apply(creates graph node generates ctx links unputs to engine then pytorch itself calls custom .forward(ctx...) running
+                                                                           # running inplacesetslide.forward directly would mean it would run as standard python code and torch ignores during backward pass         
 
 class CausalSelfAttention(nn.Module):
 
@@ -80,7 +80,7 @@ class CausalSelfAttention(nn.Module):
         else:
             print("WARNING: using slow attention. Flash Attention requires PyTorch >= 2.0")
             # causal mask to ensure that attention is only applied to the left in the input sequence
-        bias = torch.tril(torch.ones(config.sequence_length, config.sequence_length))
+        bias = torch.tril(torch.ones(config.sequence_length, config.sequence_length)) # returns lower triangular
         if config.attention_window_length is not None:
             bias = torch.triu(bias, diagonal=-config.attention_window_length)
         self.register_buffer("bias", bias.view(1, 1, config.sequence_length, config.sequence_length))
@@ -90,7 +90,7 @@ class CausalSelfAttention(nn.Module):
     def init_cache(self, expected_total_length):
         self._lazy_init_cache_length = expected_total_length
 
-    def drop_cache(self):
+    def drop_cache(self): # THIS is for the CoT cache not the KV cache.
         self.all_keys = None
         self.all_values = None
         self.all_indices = None
@@ -162,7 +162,9 @@ class CausalSelfAttention(nn.Module):
                 current_size = att.shape[-1]
                 att = torch.cat((att_prefix, att), dim=-1)
             att = F.softmax(att, dim=-1)
-            att = self.attn_dropout(att)
+            att = self.attn_dropout(att) # this is what needs to be captured in order to see wether it attends to its own passed thoughts. maybe modify the function signature to accept output_att = True then append to the list that gets returned?
+            if not self.training:                                 # new
+                self.diagnose_attn = att.clone().detach() # NEW 
             if att_prefix is not None:
                 att_prefix, att = torch.split(att, (prefix_size, current_size), dim=-1)
             y = att @ v # (B, nh, T, T) x (B, nh, T, hs) -> (B, nh, T, hs)
@@ -260,7 +262,7 @@ class GPTBase(nn.Module):
         # apply special scaled init to the residual projections, per GPT-2 paper
         for pn, p in self.named_parameters():
             if pn.endswith('c_proj.weight'):
-                torch.nn.init.normal_(p, mean=0.0, std=0.02/math.sqrt(2 * config.n_layer))
+                torch.nn.init.normal_(p, mean=0.0, std=0.02/math.sqrt(2 * config.n_layer)) # IMPORTANT: in our report lets make sure to talk about why projection layers are intialised like this.
 
         def _post_init_fn(module):
             if hasattr(module, "post_init"):
@@ -293,6 +295,7 @@ class GPTBase(nn.Module):
     def forward(self, idx, targets=None, get_logits=False, use_cache=False, iter=None):
         device = idx.device
         b, t = idx.size()
+        diag_metrics = {} # We will pack everything into a dict to keep it clean
         assert t <= self.config.sequence_length, f"Cannot forward sequence of length {t}, block size is only {self.config.sequence_length}"
         
         
@@ -311,21 +314,49 @@ class GPTBase(nn.Module):
         x = pos_emb_closure.adapt_model_input(x, start_index=index_shift)
        
         for block in self.transformer.h_begin:
-            x = block(x, pos_emb_closure, cache_context, start_index=index_shift)
+            x = block(x, pos_emb_closure, cache_context, start_index=index_shift) # NOTICE that they dont initialise the CoT cache for these blocks. KV cache is something entirely different than the CoT cache.
         
         B, T, D = x.shape
 
         total_expected_length = self.n_repeat * T
-        for block in self.transformer.h_mid:
+        for block in self.transformer.h_mid:                      # IMPORTANT: only initialise CoT cache for repeat blocks. EVERY SINGLE BLOCK has its own CoT cache and every single block can attend to past representations of that block only
             block.attn.init_cache(total_expected_length)
+        if not self.training:
+            x_into_mid = x.clone.detach() # We log the x going into mid blocks
         sum_active = 0
         for rep_idx in range(1, self.n_repeat+1):
             
             for block in self.transformer.h_mid:
-                x = block(x, pos_emb_closure, cache_context, start_index=index_shift)
+                x = block(x, pos_emb_closure, cache_context, start_index=index_shift) # for logit lens or something similar take the current hidden state x, pass it through the final layer norm (i assume self.transformer.ln_f(x)) and shove that through the lm head prematurely (we do this to empirically measure representations getting more mature or ritcher or whatever you wanna call it)
 
-        for block in self.transformer.h_mid:
-            block.attn.drop_cache()
+        for block in self.transformer.h_mid: # When n repeat blocks are finished, we drop the CoT cache.
+            block.attn.drop_cache() # NOTICE again this is not the same thing as
+        if not self.training:
+            x_outof_mid = x.clone().detach() # We log the x coming out of mid blocks as well. This way we can compare the representations going into and coming out of the repeat blocks to see how they evolve through the CoT process.
+            sim_of_xs = F.cosine_similarity(x_into_mid, x_outof_mid, dim=-1).mean()
+            var_into = x_into_mid.var(dim=-1).mean()
+            var_outof = x_outof_mid.var(dim=-1).mean()
+            end_att = self.transformer.h_end[0].attn._diag_att
+            B_d, H_d, Q_d, K_tot = end_att.shape
+            
+            # 1. Reshape: (B, H, Q, 5, 256)
+            reshaped_att = end_att.view(B_d, H_d, Q_d, self.n_repeat, Q_d)
+            
+            # 2. Budgets: Sum across the tokens inside each loop -> (B, H, Q, 5)
+            loop_sums = reshaped_att.sum(dim=-1) 
+            
+            # 3. Entropy: Normalize the slice so it sums to 1 locally, then -p * log(p)
+            # Add 1e-9 (epsilon) to prevent dividing by zero or log(0) crashes
+            local_p = reshaped_att / (loop_sums.unsqueeze(-1) + 1e-9)
+            local_entropy = - (local_p * torch.log(local_p + 1e-9)).sum(dim=-1) # -> (B, H, Q, 5)
+            
+            # 4. Aggregate Budgets
+            diag_metrics['macro_budgets'] = loop_sums.mean(dim=(0, 1, 2)).cpu().numpy()
+            diag_metrics['head_budgets'] = loop_sums.mean(dim=(0, 2)).cpu().numpy()
+            
+            # 5. Aggregate Entropy
+            diag_metrics['macro_entropy'] = local_entropy.mean(dim=(0, 1, 2)).cpu().numpy()
+            diag_metrics['head_entropy'] = local_entropy.mean(dim=(0, 2)).cpu().numpy()
 
         for block in self.transformer.h_end:
             x = block(x, pos_emb_closure, cache_context, start_index=index_shift)
@@ -345,10 +376,18 @@ class GPTBase(nn.Module):
             loss = None
             cross_entropy_loss = None
         logits = logits if get_logits else None
-        return {'logits': logits, 'loss': loss, 'cross_entropy_loss': cross_entropy_loss, 'average_depth': torch.as_tensor(self.n_repeat) * len(self.transformer.h_mid) + len(self.transformer.h_begin) + len(self.transformer.h_end)}
+        return {'logits': logits, 
+                'loss': loss, 
+                'cross_entropy_loss': cross_entropy_loss,
+                'average_depth': torch.as_tensor(self.n_repeat) * len(self.transformer.h_mid) + len(self.transformer.h_begin) + len(self.transformer.h_end),
+                'sim_of_xs': sim_of_xs if not self.training else None,   # NEW
+                'var_into': var_into if not self.training else None,       #NEW
+                'var_outof': var_outof if not self.training else None,          #NEW 
+                'diag_metrics': diag_metrics if not self.training else None          #NEW 
+                }
 
     def clear_state(self):
-        self.lm_cache.clear_state()
+        self.lm_cache.clear_state() # NOTICE that this clears the KV cache. and NOT the CoT cache.
 
     def crop_sequence_length(self, sequence_length):
         # model surgery to decrease the block size if necessary

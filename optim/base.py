@@ -134,6 +134,14 @@ def train_base(model, opt, data, data_seed, scheduler, iterations, acc_steps, ba
                 epoch = substep//num_substeps_per_epoch
 
                 model.eval()
+                ### NEW BEGIN
+                x_diag, y_diag = get_batch(data_val_iter, device=extra_args.device)
+                with torch.no_grad(), type_ctx:
+                    diag_outputs = model(x_diag, targets=y_diag)
+                    b_sim = diag_outputs.get('boundary_sim', torch.tensor(0.0)).item()
+                    v_in = diag_outputs.get('var_into', torch.tensor(0.0)).item()
+                    v_out = diag_outputs.get('var_outof', torch.tensor(0.0)).item()
+
                 train_loss = loss.detach().cpu().item() * acc_steps
                 current_lr = scheduler.get_last_lr()[0] if scheduler is not None else extra_args.lr
                 eval_steps = (
@@ -169,6 +177,7 @@ def train_base(model, opt, data, data_seed, scheduler, iterations, acc_steps, ba
                 if scheduler is not None:
                     print_string += f" [lr] {current_lr:.5f}"
                 print_string += f" [grad_norm] {cur_grad_norm:.4f} [max_grad_norm] {max_grad_norm:.4f}"
+                print_string += f" [sim] {b_sim:.3f} [v_in] {v_in:.2f} [v_out] {v_out:.2f}" # NEW
                 print(print_string)
 
                 stats["train_loss"].append(train_loss)
@@ -192,6 +201,9 @@ def train_base(model, opt, data, data_seed, scheduler, iterations, acc_steps, ba
                         "train/grad_norm": cur_grad_norm,
                         "train/max_grad_norm": max_grad_norm,
                         "train/mean_grad_norm": mean_grad_norm,
+                        "diag/boundary_sim": b_sim,#new
+                        "diag/var_into": v_in, #new
+                        "diag/var_outof": v_out #NEW
                     }
 
                     if itr == iterations:
