@@ -412,7 +412,7 @@ class GPTBase(nn.Module):
             repeat_mass = reshaped_att.sum(dim=-1) 
 
             # 3. Repeat Entropy: (B, H, Q)
-            repeat_entropy = -(repeat_mass * torch.log(repeat_mass + 1e-9)).sum(dim=-1) # B, H Q, R -> B, H, Q
+            repeat_entropy = -(repeat_mass * torch.log(repeat_mass + 1e-9)).sum(dim=-1) # B, H Q, R -> B, H, Q  this is too big to make sense out of so we will use statistics on it later
 
             # 4. Within-Repeat Entropy: (B, H, Q, R)
             local_p = reshaped_att / (repeat_mass.unsqueeze(-1) + 1e-9) # unsqueeze adds fake dimension for broadcasting   #  B, h q r q / (B, h q r 1) -> (B, H, Q, R, Q)  this is the local distribution of attention within each repeat. how is the attention distributed across the tokens inside each repeat? if it attends to one token a lot then low entropy if it attends to many tokens more evenly then high entropy    
@@ -434,6 +434,11 @@ class GPTBase(nn.Module):
             it to the end so transpose it to get how much it attended to the same pos 
             then just subtract from the repeat mass to get the difference also reshape 
             '''
+                        # 2. Repeat Probabilitiy mass: (B, H, Q, R)
+                                    # 3. Repeat Entropy: (B, H, Q)
+                                        # 4. Within-Repeat Entropy: (B, H, Q, R)
+
+
 
             diag_metrics['macro_budget'] = repeat_mass.mean(dim=(0, 1, 2)).cpu().numpy() # (R,) ACCRoss the entire network what was the average percentages of attention?
             diag_metrics['macro_rep_entropy'] = repeat_entropy.mean().item()        # Scalar        # overall is the model's attention focused on specific looops or is it semared
@@ -462,9 +467,8 @@ class GPTBase(nn.Module):
             plt.ylabel("Repeat Index")
             plt.show()
             '''
-            # ------------------------------------------------
         for block in self.transformer.h_mid: # When n repeat blocks are finished, we drop the CoT cache.
-            block.attn.drop_cache() # NOTICE again this is not the same thing as
+            block.attn.drop_cache() # NOTICE again this is not the same thing as kv cache in the common sense
 
 
         for block in self.transformer.h_end:

@@ -133,15 +133,45 @@ def train_base(model, opt, data, data_seed, scheduler, iterations, acc_steps, ba
                 dt = t1 - t0
                 epoch = substep//num_substeps_per_epoch
 
+                # model.eval()
+                # ### NEW BEGIN
+                # x_diag, y_diag = get_batch(data_val_iter, device=extra_args.device)
+                # with torch.no_grad(), type_ctx:
+                #     diag_outputs = model(x_diag, targets=y_diag)
+                #     b_sim = diag_outputs.get('boundary_sim', torch.tensor(0.0)).item()
+                #     v_in = diag_outputs.get('var_into', torch.tensor(0.0)).item()
+                #     v_out = diag_outputs.get('var_outof', torch.tensor(0.0)).item()
+                
+                # train_loss = loss.detach().cpu().item() * acc_steps
                 model.eval()
+                
                 ### NEW BEGIN
                 x_diag, y_diag = get_batch(data_val_iter, device=extra_args.device)
                 with torch.no_grad(), type_ctx:
                     diag_outputs = model(x_diag, targets=y_diag)
-                    b_sim = diag_outputs.get('boundary_sim', torch.tensor(0.0)).item()
-                    v_in = diag_outputs.get('var_into', torch.tensor(0.0)).item()
-                    v_out = diag_outputs.get('var_outof', torch.tensor(0.0)).item()
-                
+                    
+                    # 1. Grab stream geometry and the new attention dictionary
+                    b_sim = diag_outputs.get('sim_of_xs')
+                    v_in = diag_outputs.get('var_into')
+                    v_out = diag_outputs.get('var_outof')
+                    d_metrics = diag_outputs.get('diag_metrics')
+                    
+                    # 2. Track LayerNorm Gamma Magnitudes for h_mid
+                    raw_model = distributed_backend.get_raw_model(model)
+                    ln1_norm, ln2_norm = 0.0, 0.0
+                    mid_blocks = raw_model.transformer.h_mid
+                    
+                    if len(mid_blocks) > 0:
+                        for block in mid_blocks:
+                            ln1_norm += block.ln_1.weight.abs().mean().item()
+                            ln2_norm += block.ln_2.weight.abs().mean().item()
+                        ln1_norm /= len(mid_blocks)
+                        ln2_norm /= len(mid_blocks)
+                        avg_ln_gamma_magnitude = (ln1_norm + ln2_norm) / 2.0
+                    else:
+                        avg_ln_gamma_magnitude = 0.0
+                ### NEW END
+
                 train_loss = loss.detach().cpu().item() * acc_steps
                 current_lr = scheduler.get_last_lr()[0] if scheduler is not None else extra_args.lr
                 eval_steps = (
@@ -189,6 +219,29 @@ def train_base(model, opt, data, data_seed, scheduler, iterations, acc_steps, ba
                 if len(grad_norm_accumulator) > eval_freq and max_grad_norm > 5 * mean_grad_norm:
                     print(f"  >> SPIKE WARNING: max_grad_norm={max_grad_norm:.4f} is {max_grad_norm/mean_grad_norm:.1f}x the mean ({mean_grad_norm:.4f})")
 
+                # if extra_args.wandb:
+                #     logs = {
+                #         "iter": itr,
+                #         "train/loss": train_loss,
+                #         "val/loss": val_loss,
+                #         "val/perplexity": val_perplexity,
+                #         "val/acc": val_acc,
+                #         "val/avg_depth": avg_depth or extra_args.n_layer,
+                #         "lr": current_lr,
+                #         "train/grad_norm": cur_grad_norm,
+                #         "train/max_grad_norm": max_grad_norm,
+                #         "train/mean_grad_norm": mean_grad_norm,
+                #         "diag/boundary_sim": b_sim,#new
+                #         "diag/var_into": v_in, #new
+                #         "diag/var_outof": v_out #NEW
+                #     }
+
+                #     if itr == iterations:
+                #         logs["val/final-ppl"] = val_perplexity
+                #         logs["val/final-acc"] = val_acc
+                #         logs["val/final-loss"] = val_loss
+
+                #     wandb.log(logs)
                 if extra_args.wandb:
                     logs = {
                         "iter": itr,
@@ -201,10 +254,35 @@ def train_base(model, opt, data, data_seed, scheduler, iterations, acc_steps, ba
                         "train/grad_norm": cur_grad_norm,
                         "train/max_grad_norm": max_grad_norm,
                         "train/mean_grad_norm": mean_grad_norm,
-                        "diag/boundary_sim": b_sim,#new
-                        "diag/var_into": v_in, #new
-                        "diag/var_outof": v_out #NEW
+                        
+                        # --- Custom Stream & LN Diagnostics ---
+                        "diag/boundary_sim": b_sim,
+                        "diag/var_into": v_in,
+                        "diag/var_outof": v_out,
+                        "diag/avg_ln_gamma": avg_ln_gamma_magnitude,
+                        "diag/ln1_gamma": ln1_norm,
+                        "diag/ln2_gamma": ln2_norm,
                     }
+
+                    # --- Custom Attention Diagnostics ---
+                    if d_metrics is not None:
+                        # Macro Logging (Network-wide averages)
+                        logs["diag_macro/repeat_entropy"] = float(d_metrics.get('macro_rep_entropy', 0.0))
+                        
+                        if 'macro_budget' in d_metrics:
+                            num_repeats = len(d_metrics['macro_budget'])
+                            for r in range(num_repeats):
+                                loop_num = r + 1
+                                logs[f"diag_macro/budget_loop_{loop_num}"] = float(d_metrics['macro_budget'][r])
+                                logs[f"diag_macro/within_entropy_loop_{loop_num}"] = float(d_metrics['macro_in_entropy'][r])
+                                logs[f"diag_macro/same_pos_budget_loop_{loop_num}"] = float(d_metrics['macro_same_pos'][r])
+                            
+                            # Micro Logging (Track specific heads to watch them specialize)
+                            for h in [0, 5, 11]:
+                                if h < len(d_metrics['head_rep_entropy']): # Safety check
+                                    logs[f"diag_head_{h}/repeat_entropy"] = float(d_metrics['head_rep_entropy'][h])
+                                    for r in range(num_repeats):
+                                        logs[f"diag_head_{h}/budget_loop_{r+1}"] = float(d_metrics['head_budget'][h, r])
 
                     if itr == iterations:
                         logs["val/final-ppl"] = val_perplexity

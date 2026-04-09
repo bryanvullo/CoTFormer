@@ -8,6 +8,8 @@ from . import adaptive_cotformer_mod_efficient_sigmoid_crw_lnmid_de_random_facto
 from . import pondernet
 from . import but_mod_efficient_sigmoid_lnmid_depthemb_random_factor_for_mac_compute
 from . import tak_custom_cot
+from . import fixed_cot_attn
+
 MODELS = {
     "base": base.GPTBase,
     "adaptive_cotformer_mod_efficient_sigmoid_crw_lnmid_de_random_factor_single_final": adaptive_cotformer_mod_efficient_sigmoid_crw_lnmid_de_random_factor_single_final.GPTBase,
@@ -19,6 +21,7 @@ MODELS = {
     "pondernet": pondernet.GPTBase,
     "but_halting_freeze_input_on_stop": but_halting_freeze_input_on_stop.GPTBase,
     "tak_custom_cot" : tak_custom_cot.GPTBase,
+    "fixed_cot_attn" : fixed_cot_attn.GPTBase,
 }
 
 
