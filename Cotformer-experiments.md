@@ -1,3 +1,36 @@
+---
+banner: https://images.unsplash.com/photo-1614850523296-d8c1af93d400?q=80&w=2070&auto=format&fit=crop
+banner_y: 0.6
+cssclass: wide
+type: paper
+tags:
+  - literature
+  - subject/temp
+authors:
+year:
+reviewed: "true"
+---
+
+# 📄 Cotformer-experiments
+
+> [!abstract] Metadata
+> - **Authors:** > - **Year:** > - **Zotero Link:** [Open in Zotero](zotero://select/items/...)
+> - **Related Topics:** [[Deep Learning]], [[Bayesian RL]]
+
+## 🎯 The Core Idea
+*What is the "one thing" this paper is trying to solve?*
+
+## 🏗️ Key Methodology
+- **Approach:** - **Algorithm:** ## 🔢 Mathematical Formulation
+$$
+\mathcal{L}(\theta) = \mathbb{E}_{q(z|x)} [\log p(x|z)] - \beta D_{KL}(q(z|x) || p(z))
+$$
+
+## 📝 Critical Review
+- **Strengths:** - **Weaknesses:** - **How it relates to my work:** ---
+**Next Actions:**
+- [ ] Summarize the experimental results
+- [ ] Check citations for:
 
 | Model                | Activation | Repeat | Learning Rate | Batch Size | Notes | Kv Cache                                                                                                                                                                                                                                                                                                                                                                                   | Mask                                                                                                                                                                                                                                                                                                                                                                                      |
 | -------------------- | ---------- | ------ | ------------- | ---------- | ----- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -114,3 +147,83 @@ base 2 ->4->5
 I think MHLA is a good idea. I think that it would benefit this model, and it would be a huge flex and it would grab a lot of attention. ***But*** it screams premature optimisation. And it's an engineering optimisation (which I don't like because in all of our modules we are encouraged to be scientific). CoTFormer an untested, very new and innovative model. It has basically zero documentation, thousands of lines of spaghetti research code etc. Before we fully understand why it "works" and why it doesnt work, I can't justify for myself slapping on MHLA . Additionally it would require rewriting the custom PyTorch InPlaceSetSlice autograd functions and the horizontallt tilted causal mask. It's a massive engineering challenge. Im not even gonna go in to how that affects tokenization (I probably couldn't). If we managed to do it it would be hugely rewarding but like I said its difficult to do. IMO the main thing they want us to do in this exercise is to "be scientific".  Ablations require writing minimal code, our main bottleneck would be waiting for training runs to end, and interpreting results. Even if the results don't come as expected, I find the questions interesting enough, and I have a feeling that they will too. I also think it aligns better with Antonia and John's seminar lectures and general thinking style, and what they expect from this assignment. Also it would allow us to use the things they literally teach.
 
 When it comes to compute we will still use around 12 Blocks, helping us avoid OOM.
+
+
+
+
+
+  Based on the code in
+  models/adaptive_cotformer_mod_efficient_sigmoid_crw_lnmid_de_random_factor_single_fin
+  al.py 
+
+
+  1. Token Similarity Decay (Measuring Redundancy)
+  This experiment checks if tokens that stay active but have low router weights are
+  actually redundant.
+   * The Goal: Measure the Cosine Similarity or Euclidean Distance between $x^{(i)}$
+     and $x^{(i+1)}$ for tokens as they progress through repeats.
+   * How to do it:
+       * Register a hook on the transformer.ln_mid output and the input x_in within the
+         rep_idx loop of GPTBase.forward.
+       * Calculate $Sim(x_{active}^{(i)}, x_{active}^{(i+1)})$ for each token.
+       * Metric: If similarity is $>0.99$, the token is functionally redundant in that
+         repeat. You can then calculate the "Redundancy Percentage" as:
+          $\frac{\text{Tokens with Sim} > 0.99}{\text{Total Tokens in Sequence} \times
+  \text{n\_repeat}}$
+
+
+  2. Router Weight vs. State Delta
+  This validates if the router is "smart" about redundancy.
+   * The Goal: Correlate the router_weights ($s_i$) with the magnitude of the update
+     ($B(x^{(i)}) - x^{(i)}$).
+   * Hypothesis: If the model is efficient, tokens with low $s_i$ should also have low
+     "delta" (the attention/MLP block isn't proposing a big change anyway).
+   * How to do it:
+       * Capture router_weights from line 479: is_final, selected_indices,
+         router_weights = self.transformer.mod[rep_idx - 1](...).
+       * Plot $s_i$ against $\|x_{out} - x_{in}\|$.
+       * Insight: If you see many tokens with high $s_i$ but low delta, the model is
+         wasting compute. If $s_i$ is low, the interpolation formula (line 473) is
+         already suppressing the redundant update.
+
+
+  3. KV Cache "Stall" Analysis
+  This measures how much memory you are saving by halting tokens.
+   * The Goal: Compare the actual KV cache size used vs. the "Worst Case" (Universal
+     Transformer without halting).
+   * How to do it:
+       * Track the sum_active variable (line 475) across a validation set.
+       * Metrics:
+           * Compression Ratio: $\frac{\text{sum\_active}}{\text{Batch Size} \times
+             \text{Seq Len} \times \text{n\_repeat}}$.
+           * Halting Distribution: Histogram of final_indices to see if tokens halt
+             mostly at the beginning, middle, or end.
+
+
+  Summary of what to look for in the code:
+   * Interpolation Logic (Line 473): x = x_in * (1 - router_weights) + x *
+     router_weights. This is the "gate" that controls redundancy.
+   * Token Removal (Line 488): x = x.take_along_dim(selected_indices, dim=1). This is
+     the "hard halt" that stops KV cache growth.
+   * Analysis Script: You can extend analyze_kv_compression.py by adding a hook to
+     model.transformer.mod to capture the is_final mask and router_weights during the
+     --compute-activations pass.
+
+
+
+Another big concern is, that modern models doing CoT activate very specific QV and OV circuits only during CoT and can become extremely sparse. How did they test gpt2? was it actually doing CoT? Is gpt 2 even capable of CoT? While training a 7b modern model from scartch just for experiments is not feasible and i understand that idk if this is a fair comparison. This needed to be trained and evaluated for much larger models with bigger scale. We need to investigate how much the lower bound on the parameters for reasoning has dropped over the years. If we can find a gpt 2 scale model maybe does it make sense to test with that? But then the dataset and many other things are different so it wouldn't work from an experimental standpoint.
+
+
+
+
+- **Residual Stream Scale:** You can compute this in the `forward` pass by taking `torch.norm(x, p=2, dim=-1).mean()` right before and after the `n_repeat` loop. If the "Pure Reserved Layer Test" ($2 \to 12 \times 5 \to 1$) shows a massive jump here compared to the baseline, you've identified why they felt forced to add the LayerNorm "band-aid".
+    
+- **Attention Entropy:** You can capture the `att` weights (before the dropout) in the `CausalSelfAttention` block. A high entropy (calculated as $-\sum p \log p$) across the repeats would support your theory that the concatenation of history is diluting the model's focus.
+    
+- **Logit Lens on "Reasoning Space":** Since you suspect the middle layers operate in an abstract subspace, you can pass the hidden state from Repeat 1, 2, 3, etc., through the final `ln_f` and `lm_head`. If the "No LN" variant shows readable, evolving predictions (e.g., "Paris" $\to$ "capital" $\to$ "France"), but the "LN" variant shows nonsense until the very end, you've proved the LayerNorm is "resetting the blackboard" and destroying the continuity of the "thought."
+
+Residual Stream Scale: Log the mean absolute value of the hidden states before and after the n_repeat loop. If you see the numbers growing exponentially without the LayerNorm, you've found the "instability" the authors were trying to fix.
+
+Attention Entropy: Log how "flat" the attention weights are. You suspect the extra LayerNorm/Recurrence dilutes the attention; tracking entropy will prove if the model is actually "focusing" or just getting lost in the noise.
+
+Validation Loss per Repeat: If you can, log the loss if you were to "exit" at Repeat 1 vs Repeat 5. This shows if the model is actually using the extra computation to get smarter.
