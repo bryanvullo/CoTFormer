@@ -63,7 +63,6 @@ TRAIN_ARGS=(
     --sequence_length 256
     --acc_steps 2
     --dropout 0.0
-    --compile
     --iterations 40000
     --dataset owt2
     --data_dir "$DATA_DIR"
