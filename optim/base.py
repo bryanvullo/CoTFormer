@@ -141,7 +141,7 @@ def train_base(model, opt, data, data_seed, scheduler, iterations, acc_steps, ba
                     b_sim = diag_outputs.get('boundary_sim', torch.tensor(0.0)).item()
                     v_in = diag_outputs.get('var_into', torch.tensor(0.0)).item()
                     v_out = diag_outputs.get('var_outof', torch.tensor(0.0)).item()
-
+                
                 train_loss = loss.detach().cpu().item() * acc_steps
                 current_lr = scheduler.get_last_lr()[0] if scheduler is not None else extra_args.lr
                 eval_steps = (
