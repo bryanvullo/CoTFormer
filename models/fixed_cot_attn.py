@@ -412,17 +412,17 @@ class GPTBase(nn.Module):
             repeat_mass = reshaped_att.sum(dim=-1) 
 
             # 3. Repeat Entropy: (B, H, Q)
-            repeat_entropy = -(repeat_mass * torch.log(repeat_mass + 1e-9)).sum(dim=-1)
+            repeat_entropy = -(repeat_mass * torch.log(repeat_mass + 1e-9)).sum(dim=-1) # B, H Q, R -> B, H, Q
 
             # 4. Within-Repeat Entropy: (B, H, Q, R)
-            local_p = reshaped_att / (repeat_mass.unsqueeze(-1) + 1e-9) # unsqueeze adds fake dimension for broadcasting
-            within_repeat_entropy = -(local_p * torch.log(local_p + 1e-9)).sum(dim=-1)
+            local_p = reshaped_att / (repeat_mass.unsqueeze(-1) + 1e-9) # unsqueeze adds fake dimension for broadcasting   #  B, h q r q / (B, h q r 1) -> (B, H, Q, R, Q)  this is the local distribution of attention within each repeat. how is the attention distributed across the tokens inside each repeat? if it attends to one token a lot then low entropy if it attends to many tokens more evenly then high entropy    
+            within_repeat_entropy = -(local_p * torch.log(local_p + 1e-9)).sum(dim=-1) # (B, H, Q, R, Q) -> (B, H, Q, R) this is the within repeat entropy. for each repeat, how focused or smeared is the attention across the tokens in that repeat? if it attends to one token a lot then low entropy if it attends to many tokens more evenly then high entropy
 
             # 5. Same-Position vs Different-Position Budget: (B, H, Q, R) so you extract the diagonal between the two Q dimensions (dim 2 and dim 4)
             # torch.diagonal moves the new diagonal dim to the very end -> (B, H, R, Q)
             # you transpose it back to match the pmass shape -> (B, H, Q, R)
             same_pos = torch.diagonal(reshaped_att, dim1=2, dim2=4).transpose(-1, -2) # reason for the transpose: https://docs.pytorch.org/docs/stable/generated/torch.diagonal.html
-            different_pos = repeat_mass - same_pos # i guess this calculates att to itself as well its probably ok though
+            different_pos = repeat_mass - same_pos 
             '''
             NOTE
             so the initial endatt is of size batch head q ktotal then you reshape it into self.n_repeat,
