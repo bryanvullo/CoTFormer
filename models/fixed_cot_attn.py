@@ -32,7 +32,7 @@ class InPlaceSetSlice(torch.autograd.Function):
 
         prefix_slice = [slice(None)] * dim 
         full_tensor[prefix_slice + [slice(prev_length, new_length)]] = x_val
-        print("writing cache slice:", prev_length, "to", new_length, "chunk size:", x_val.shape[dim]) #TODO: remove
+        # print("writing cache slice:", prev_length, "to", new_length, "chunk size:", x_val.shape[dim]) #TODO: remove
         ctx.prev_length = prev_length
         ctx.new_length = new_length
         ctx.dim = dim
@@ -76,11 +76,11 @@ class CausalSelfAttention(nn.Module):
 
         # causal mask to ensure that attention is only applied to the left in the input sequence
         self.flash = False #hasattr(torch.nn.functional, 'scaled_dot_product_attention')
-        print("Using flash attention:", self.flash)
+        # print("Using flash attention:", self.flash)
         if self.flash:
             assert config.attention_window_length is None
         else:
-            print("WARNING: using slow attention. Flash Attention requires PyTorch >= 2.0")
+            # print("WARNING: using slow attention. Flash Attention requires PyTorch >= 2.0")
             # causal mask to ensure that attention is only applied to the left in the input sequence
         bias = torch.tril(torch.ones(config.sequence_length, config.sequence_length)) # returns lower triangular
         if config.attention_window_length is not None:
@@ -99,7 +99,7 @@ class CausalSelfAttention(nn.Module):
         self._lazy_init_cache_length = None
         
 
-    def forward(self, x, pos_emb_closure, cache_context, start_index, indices, rep_idx=None, block_idx=None): # TODO remove rep_idx and block_idx
+    def forward(self, x, pos_emb_closure, cache_context, start_index, indices): # TODO remove rep_idx and block_idx
         B, T, C = x.size() # batch size, sequence length, embedding dimensionality (n_embd)
         C = self.n_embd
         # calculate query, key, values for all heads in batch and move head forward to be the batch dim
@@ -140,7 +140,7 @@ class CausalSelfAttention(nn.Module):
             k = self.all_keys[1]
             v = self.all_values[1]
             if not self.training:
-                print("q shape:", q.shape, "k shape:", k.shape, "v shape:", v.shape)
+                # print("q shape:", q.shape, "k shape:", k.shape, "v shape:", v.shape)
             attn_mask = self.bias[:,:,:T,:T].unsqueeze(3).repeat(
                 1, 1, 1, k.shape[2] // T, 1
             ).unsqueeze(0).view(1, 1, q.shape[2], k.shape[2]) == 1
@@ -150,7 +150,7 @@ class CausalSelfAttention(nn.Module):
             is_causal = True
         
         if self.flash:
-            print("WARNING: Using flash attention with PyTorch's built in scaled_dot_product_attention")
+            # print("WARNING: Using flash attention with PyTorch's built in scaled_dot_product_attention")
             if att_prefix is not None:
                 raise NotImplementedError
             # efficient attention using Flash Attention CUDA kernels
@@ -218,14 +218,14 @@ class Block(nn.Module):
         self.ln_2 = LayerNorm(config.n_embd, bias=config.bias)
         self.mlp = MLP(config)
 
-    # def forward(self, x, pos_emb_closure, cache_context, start_index, indices=None):
-    #     x = x + self.attn(self.ln_1(x), pos_emb_closure, cache_context, start_index, indices)
-    #     x = x + self.mlp(self.ln_2(x))
-    #     return x
-    def forward(self, x, pos_emb_closure, cache_context, start_index, indices=None, rep_idx=None, block_idx=None):         # TODO remove
-        x = x + self.attn(self.ln_1(x), pos_emb_closure, cache_context, start_index, indices, rep_idx=rep_idx, block_idx=block_idx)
+    def forward(self, x, pos_emb_closure, cache_context, start_index, indices=None):
+        x = x + self.attn(self.ln_1(x), pos_emb_closure, cache_context, start_index, indices)
         x = x + self.mlp(self.ln_2(x))
         return x
+    # def forward(self, x, pos_emb_closure, cache_context, start_index, indices=None, rep_idx=None, block_idx=None):         # TODO remove
+    #     x = x + self.attn(self.ln_1(x), pos_emb_closure, cache_context, start_index, indices, rep_idx=rep_idx, block_idx=block_idx)
+    #     x = x + self.mlp(self.ln_2(x))
+    #     return x
 
 
 
@@ -333,65 +333,136 @@ class GPTBase(nn.Module):
         if not self.training:
             x_into_mid = x.clone().detach() # We log the x going into mid blocks
         sum_active = 0
+        # for rep_idx in range(1, self.n_repeat+1):
+            
+        #     for mid_idx, block in enumerate(self.transformer.h_mid):
+        #         x = block(x, pos_emb_closure, cache_context, start_index=index_shift,
+        #         rep_idx = rep_idx,
+        #         block_idx = mid_idx) 
         for rep_idx in range(1, self.n_repeat+1):
             
-            for mid_idx, block in enumerate(self.transformer.h_mid):
-                x = block(x, pos_emb_closure, cache_context, start_index=index_shift,
-                rep_idx = rep_idx,
-                block_idx = mid_idx) # for logit lens or something similar take the current hidden state x, pass it through the final layer norm (i assume self.transformer.ln_f(x)) and shove that through the lm head prematurely (we do this to empirically measure representations getting more mature or ritcher or whatever you wanna call it)
-                
-        if not self.training:
-            x_outof_mid = x.clone().detach() # We log the x coming out of mid blocks as well. This way we can compare the representations going into and coming out of the repeat blocks to see how they evolve through the CoT process.
-            sim_of_xs = F.cosine_similarity(x_into_mid, x_outof_mid, dim=-1).mean()
-            var_into = x_into_mid.var(dim=-1).mean()
-            var_outof = x_outof_mid.var(dim=-1).mean()
-            end_att = self.transformer.h_mid[-1].attn.diagnose_attn
-            att_row_sums = end_att.sum(dim=-1)   # shape: (B, H, Q)
-            print("att row sums min/max/mean:",    # TODO: remove
-                att_row_sums.min().item(),
-                att_row_sums.max().item(),
-                att_row_sums.mean().item())
-            B_d, H_d, Q_d, K_tot = end_att.shape
-            assert K_tot ==self.n_repeat * Q_d     #TODO: remove
-            print("end_att shape (B, H, Q, K_tot): ", end_att.shape)  #TODO: remove
-            # 1. Reshape: (B, H, Q, 5, 256)
-            reshaped_att = end_att.view(B_d, H_d, Q_d, self.n_repeat, Q_d)
-            print("reshaped_att shape (B, H, Q, 5, 256): ", reshaped_att.shape)    #TODO: remove
+            for block in self.transformer.h_mid:
+                x = block(x, pos_emb_closure, cache_context, start_index=index_shift)        # for logit lens or something similar take the current hidden state x, pass it through the final layer norm (i assume self.transformer.ln_f(x)) and shove that through the lm head prematurely (we do this to empirically measure representations getting more mature or ritcher or whatever you wanna call it)
+        # if not self.training:
+        #     x_outof_mid = x.clone().detach() # We log the x coming out of mid blocks as well. This way we can compare the representations going into and coming out of the repeat blocks to see how they evolve through the CoT process.
+        #     sim_of_xs = F.cosine_similarity(x_into_mid, x_outof_mid, dim=-1).mean()
+        #     var_into = x_into_mid.var(dim=-1).mean()
+        #     var_outof = x_outof_mid.var(dim=-1).mean()
+        #     end_att = self.transformer.h_mid[-1].attn.diagnose_attn
+        #     att_row_sums = end_att.sum(dim=-1)   # shape: (B, H, Q)
+        #     print("att row sums min/max/mean:",    # TODO: remove
+        #         att_row_sums.min().item(),
+        #         att_row_sums.max().item(),
+        #         att_row_sums.mean().item())
+        #     B_d, H_d, Q_d, K_tot = end_att.shape
+        #     assert K_tot ==self.n_repeat * Q_d     #TODO: remove
+        #     print("end_att shape (B, H, Q, K_tot): ", end_att.shape)  #TODO: remove
+        #     # 1. Reshape: (B, H, Q, 5, 256)
+        #     reshaped_att = end_att.view(B_d, H_d, Q_d, self.n_repeat, Q_d)
+        #     print("reshaped_att shape (B, H, Q, 5, 256): ", reshaped_att.shape)    #TODO: remove
 
-            # 2. Budgets: Sum across the tokens inside each loop -> (B, H, Q, 5)
-            loop_sums = reshaped_att.sum(dim=-1) 
-            print("loop_sums shape:", loop_sums.shape)
-            print(
-                "repeat budget sums min/max/mean:",
-                loop_sums.min().item(),
-                loop_sums.max().item(),
-                loop_sums.mean().item()
-            )
-            print("end_att row sums:", end_att.sum(dim=-1).min().item(),
-                end_att.sum(dim=-1).max().item(),
-                end_att.sum(dim=-1).mean().item())
+        #     # 2. Budgets: Sum across the tokens inside each loop -> (B, H, Q, 5)
+        #     loop_sums = reshaped_att.sum(dim=-1) 
+        #     print("loop_sums shape:", loop_sums.shape)
+        #     print(
+        #         "repeat budget sums min/max/mean:",
+        #         loop_sums.min().item(),
+        #         loop_sums.max().item(),
+        #         loop_sums.mean().item()
+        #     )
+        #     print("end_att row sums:", end_att.sum(dim=-1).min().item(),
+        #         end_att.sum(dim=-1).max().item(),
+        #         end_att.sum(dim=-1).mean().item())
 
-            print("reshaped total sums:", reshaped_att.sum(dim=(-1, -2)).min().item(),
-                reshaped_att.sum(dim=(-1, -2)).max().item(),
-                reshaped_att.sum(dim=(-1, -2)).mean().item())
+        #     print("reshaped total sums:", reshaped_att.sum(dim=(-1, -2)).min().item(),
+        #         reshaped_att.sum(dim=(-1, -2)).max().item(),
+        #         reshaped_att.sum(dim=(-1, -2)).mean().item())
 
-            repeat_budget_sums = loop_sums.sum(dim=-1)
-            print("repeat budget sums:", repeat_budget_sums.min().item(),
-                repeat_budget_sums.max().item(),
-                repeat_budget_sums.mean().item())
+        #     repeat_budget_sums = loop_sums.sum(dim=-1)
+        #     print("repeat budget sums:", repeat_budget_sums.min().item(),
+        #         repeat_budget_sums.max().item(),
+        #         repeat_budget_sums.mean().item())
 
-            # 3. Entropy: Normalize the slice so it sums to 1 locally, then -p * log(p)
-            # Add 1e-9 (epsilon) to prevent dividing by zero or log(0) crashes
-            local_p = reshaped_att / (loop_sums.unsqueeze(-1) + 1e-9)
-            local_entropy = - (local_p * torch.log(local_p + 1e-9)).sum(dim=-1) # -> (B, H, Q, 5)
-            repeat_entropy = -(loop_sums * torch.log(loop_sums + 1e-9)).sum(dim=-1)   # (B,H,Q)
-            # 4. Aggregate Budgets
-            diag_metrics['macro_budgets'] = loop_sums.mean(dim=(0, 1, 2)).cpu().numpy()
-            diag_metrics['head_budgets'] = loop_sums.mean(dim=(0, 2)).cpu().numpy()
+        #     # 3. Entropy: Normalize the slice so it sums to 1 locally, then -p * log(p)
+        #     # Add 1e-9 (epsilon) to prevent dividing by zero or log(0) crashes
+        #     local_p = reshaped_att / (loop_sums.unsqueeze(-1) + 1e-9)
+        #     local_entropy = - (local_p * torch.log(local_p + 1e-9)).sum(dim=-1) # -> (B, H, Q, 5)
+        #     repeat_entropy = -(loop_sums * torch.log(loop_sums + 1e-9)).sum(dim=-1)   # (B,H,Q)
+        #     # 4. Aggregate Budgets
+        #     diag_metrics['macro_budgets'] = loop_sums.mean(dim=(0, 1, 2)).cpu().numpy()
+        #     diag_metrics['head_budgets'] = loop_sums.mean(dim=(0, 2)).cpu().numpy()
             
-            # 5. Aggregate Entropy
-            diag_metrics['macro_entropy'] = local_entropy.mean(dim=(0, 1, 2)).cpu().numpy()
-            diag_metrics['head_entropy'] = local_entropy.mean(dim=(0, 2)).cpu().numpy()
+        #     # 5. Aggregate Entropy
+        #     diag_metrics['macro_entropy'] = local_entropy.mean(dim=(0, 1, 2)).cpu().numpy()
+        #     diag_metrics['head_entropy'] = local_entropy.mean(dim=(0, 2)).cpu().numpy()
+        if not self.training:
+            x_outof_mid = x.clone().detach() 
+            sim_of_xs = F.cosine_similarity(x_into_mid, x_outof_mid, dim=-1).mean().item()
+            var_into = x_into_mid.var(dim=-1).mean().item()
+            var_outof = x_outof_mid.var(dim=-1).mean().item()
+            
+
+            end_att = self.transformer.h_mid[-1].attn.diagnose_attn # end_att shape (B, H, Q, K_tot):  torch.Size([2, 12, 256, 1280])bathc size head dim query total k
+            B_d, H_d, Q_d, K_tot = end_att.shape 
+            
+            # 1. Base Reshape: (B, H, Q, R, Q)
+            reshaped_att = end_att.view(B_d, H_d, Q_d, self.n_repeat, Q_d) #convert from (B, H, Q, K_tot) to (B, H, Q, R, Q) where R is the repeat dimension and the last Q is the token dimension inside each repeat. K_tot should equal R * Q.
+                # split the full key axis into 5 chunks, one chunk per repeat, each chunk containing the 256 token positions from that repeat
+            # 2. Repeat Probabilitiy mass: (B, H, Q, R)
+            repeat_mass = reshaped_att.sum(dim=-1) 
+
+            # 3. Repeat Entropy: (B, H, Q)
+            repeat_entropy = -(repeat_mass * torch.log(repeat_mass + 1e-9)).sum(dim=-1)
+
+            # 4. Within-Repeat Entropy: (B, H, Q, R)
+            local_p = reshaped_att / (repeat_mass.unsqueeze(-1) + 1e-9) # unsqueeze adds fake dimension for broadcasting
+            within_repeat_entropy = -(local_p * torch.log(local_p + 1e-9)).sum(dim=-1)
+
+            # 5. Same-Position vs Different-Position Budget: (B, H, Q, R) so you extract the diagonal between the two Q dimensions (dim 2 and dim 4)
+            # torch.diagonal moves the new diagonal dim to the very end -> (B, H, R, Q)
+            # you transpose it back to match the pmass shape -> (B, H, Q, R)
+            same_pos = torch.diagonal(reshaped_att, dim1=2, dim2=4).transpose(-1, -2) # reason for the transpose: https://docs.pytorch.org/docs/stable/generated/torch.diagonal.html
+            different_pos = repeat_mass - same_pos # i guess this calculates att to itself as well its probably ok though
+            '''
+            NOTE
+            so the initial endatt is of size batch head q ktotal then you reshape it into self.n_repeat,
+            q_d (last 2 dims) so that you get the per repeat attentions then you sum along the last q so you
+            get per repeat probability mass then you calculate inter repeat entropy by which is a b h q because you summed along 
+            R then to calculate within repeat entropy with unsqueeze you add a dummy dimension and since this is not matmul but mat divide 
+            it just divides each repeat by that repeat so it normalises to 1 then you calculate within repeat entropy from that then you check 
+            same position vs different position budget to do that you extract diagonal between the two Q dimensions dim 2 and dim 4 torch.diag appends 
+            it to the end so transpose it to get how much it attended to the same pos 
+            then just subtract from the repeat mass to get the difference also reshape 
+            '''
+
+            diag_metrics['macro_budget'] = repeat_mass.mean(dim=(0, 1, 2)).cpu().numpy() # (R,) ACCRoss the entire network what was the average percentages of attention?
+            diag_metrics['macro_rep_entropy'] = repeat_entropy.mean().item()        # Scalar        # overall is the model's attention focused on specific looops or is it semared
+            diag_metrics['macro_in_entropy'] = within_repeat_entropy.mean(dim=(0, 1, 2)).cpu().numpy() # (R,)     in a certain loop does it focus on  a specific token or smear?
+            diag_metrics['macro_same_pos'] = same_pos.mean(dim=(0, 1, 2)).cpu().numpy() # (R,)    # on average how much of the attention budget in a loop was spent looking at the exact same position
+            
+            # Per-head stats (keeping the H dimension)
+            diag_metrics['head_budget'] = repeat_mass.mean(dim=(0, 2)).cpu().numpy()     # (H, R)
+            diag_metrics['head_rep_entropy'] = repeat_entropy.mean(dim=(0, 2)).cpu().numpy() # (H,)
+            
+            # --- APPENDIX F HEATMAP DATA (Store for later) ---
+            # "attention from the last token in sequence to all other token-repeat pairs"
+            # We grab the last query token (Q_d - 1) and average across the batch.
+            # Shape becomes: (H, R, Q)
+            diag_metrics['appendix_f_heatmap'] = reshaped_att[:, :, -1, :, :].mean(dim=0).cpu().numpy()
+            '''
+            NOTE
+            THIS HEATMAP WILL BE USED TO GENERATE VIS FOR APPANDIX F
+            import seaborn as sns
+            import matplotlib.pyplot as plt
+
+            # head_data shape is (5, 256) -> 5 repeats, 256 tokens
+            head_data = appendix_f_heatmap[0] # Select Head 0
+            sns.heatmap(head_data, cmap="viridis")
+            plt.xlabel("Token Index")
+            plt.ylabel("Repeat Index")
+            plt.show()
+            '''
+            # ------------------------------------------------
         for block in self.transformer.h_mid: # When n repeat blocks are finished, we drop the CoT cache.
             block.attn.drop_cache() # NOTICE again this is not the same thing as
 
