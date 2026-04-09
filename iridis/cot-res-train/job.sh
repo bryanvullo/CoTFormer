@@ -86,7 +86,9 @@ source "$REPO_DIR/iridis/env.sh"
 # --- Scratch-based output dirs (off home quota) ---
 EXPS_DIR="/scratch/ab3u21/exps"
 EXP_NAME="cotformer_full_depth_lr0.001_bs${BATCH_SIZE}x${ACC_STEPS}_seqlen256"
-CKPT_PARENT="$EXPS_DIR/owt2/cotformer_full_depth/$EXP_NAME"
+# Use cotformer_full_depth_res_only/ (owned by ab3u21) instead of cotformer_full_depth/
+# (owned by tak1e25, mode 755 = no group write). See M-9: cross-user scratch dirs.
+CKPT_PARENT="$EXPS_DIR/owt2/cotformer_full_depth_res_only/$EXP_NAME"
 mkdir -p "$CKPT_PARENT" "$DATA_DIR" "$HF_HOME" "$TIKTOKEN_CACHE_DIR" "$WANDB_DIR"
 
 echo "========================================="
@@ -186,7 +188,7 @@ echo "========================================="
 echo " Training finished: $(date)"
 echo " Exit code: $EXIT_CODE"
 echo ""
-echo " Checkpoints: $EXPS_DIR/owt2/cotformer_full_depth/"
+echo " Checkpoints: $EXPS_DIR/owt2/cotformer_full_depth_res_only/"
 echo ""
 echo " If training incomplete, resubmit:"
 echo "   bash iridis/cot-res-train/job.sh"

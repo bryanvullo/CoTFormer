@@ -57,7 +57,7 @@
   - [B10. LR Schedule Discontinuity on 40k-to-60k Extension](#b10-lr-schedule-discontinuity-on-40k-to-60k-extension)
   - [B11. Evaluation Batch Size Independence](#b11-evaluation-batch-size-independence)
 - [Part C: Original Code Bugs](#part-c-original-code-bugs)
-  - [C1. Figure 5 Data Source: Training Split (Reclassified)](#c1-figure-5-data-source-training-split-reclassified)
+  - [C1. Figure 5 Cascading Bug: Position-Indexed Minimum on Reordered Tokens](#c1-figure-5-cascading-bug-position-indexed-minimum-on-reordered-tokens)
   - [C2. Underspecified Training Schedule (Reproducibility Gap)](#c2-underspecified-training-schedule-reproducibility-gap)
   - [References](#references)
 
@@ -822,63 +822,109 @@ paper's evaluation conditions (no DDP data sharding during eval).
 > because they were discovered during our reproduction process and primarily
 > affected our DDP setup. They are cross-referenced here for completeness.
 
-## C1. Figure 5 Data Source: Training Split (Reclassified)
+## C1. Figure 5 Cascading Bug: Position-Indexed Minimum on Reordered Tokens
 
-**Original classification:** Bug (training data used instead of validation)
-**Reclassification:** Intentional design choice for training dynamics analysis
-**Status:** Our reproduction now matches the paper's methodology
+**Impact:** Figure 5 of the paper shows an artifactually broad router weight
+distribution. The underlying data is produced by a cascading bug in the
+original `get_router_weights.py`.
 
-### Background
+**Status:** Root-caused and confirmed empirically. Evaluation pipeline now
+generates both the buggy (paper-matching) and corrected extractions for
+comparison.
 
-The original `get_router_weights.py` (commit `2723e30`) extracts router
-weight distributions from the **training** split, subsampled to
-validation-set size (`sample_size=len(data['val'])`). This was initially
-classified as a bug (training data used where validation was expected).
+### The bug
 
-### Why this is not a bug
+The original `get_router_weights.py` (commit `2723e30`) defines a custom
+`forward()` function that manually executes the model's repeat loop,
+collecting router weights from each `MoDBlock`. At each repeat, the MoDBlock
+selects tokens via `torch.topk(router_logits, top_k, sorted=False)`, which
+**reorders tokens by score**. The custom forward then applies
+`x.take_along_dim(selected_indices, dim=1)`, so the representation passed to
+the next repeat has tokens in a different order.
 
-Section 5 of the paper analyses **training dynamics**: how the model
-*learns* to utilise the deepest repeat over the course of training. For
-this analysis, using training data is the natural choice:
+After collecting all per-repeat router weights, the script cascades via:
 
-1. **Training dynamics context**: The paper's claim is that "the model
-   starts to favor using the final repeat more when trained for longer."
-   This describes learned routing behaviour, which is most directly
-   observable on data the model has been optimised on.
+```python
+for i in range(2, len(router_weights)):
+    for j in range(len(router_weights[i])):
+        router_weights[i][j] = torch.minimum(
+            router_weights[i][j], router_weights[i - 1][j]
+        )
+```
 
-2. **Consistent with the original code**: The original `get_router_weights.py`
-   intentionally uses `data['train']` with `sample_size=len(data['val'])`
-   (a val-sized random subsample of training data). This is a deliberate
-   sizing choice, not an accidental variable swap.
+This takes the element-wise minimum at the same **position index** `k`
+across repeats. But position `k` at repeat `i` is a **different token** than
+position `k` at repeat `i-1`, because tokens were reordered between repeats
+by `take_along_dim`. The cascading therefore computes the minimum of
+randomly-paired scores from different tokens, rather than the per-token
+minimum across all routers.
 
-3. **Empirical confirmation**: Our initial validation-only extraction
-   produced router weight distributions heavily concentrated near zero
-   (Router 4 mean=0.033 at 60k), diverging materially from the paper's
-   Figure 5. Re-running on the training split is expected to recover the
-   paper's distribution shape, confirming the original code's intent.
+### Why it matters
 
-### Our approach: two Figure 5 variants
+The correct per-token cascaded minimum (implemented in our rewritten
+`get_router_weights.py` at commit `a9df8fd`) produces distributions
+**heavily concentrated near zero**: Router 4 cascaded mean = 0.033,
+with 94% of scores below 0.1. This is because any single router scoring
+low for a given token drives the cascaded value to near zero.
 
-We generate both a faithful reproduction and a supplementary analysis:
+The buggy position-indexed minimum produces a **much broader distribution**
+(tail extending to x = 0.5, density peak clipped at 0.6--0.7), because
+random pairing occasionally combines high scores from different tokens.
+This broader distribution is what the paper's Figure 5 shows.
 
-1. **`figure5_reproduction.png`** (matches paper): Training data,
-   raw per-router sigmoid scores (no cascaded minimums). This uses
-   the same data source and router weight semantics as the original code.
+### How we confirmed this
 
-2. **`figure5_analysis.png`** (supplementary): Validation data, cascaded
-   minimum scores through all routers. This provides a methodologically
-   rigorous view of effective routing behaviour on held-out data, showing
-   the conservative routing strategy the model adopts on unseen tokens.
+| Extraction Method | Split | Router 4 Mean | frac < 0.1 | Density Peak |
+|------------------|-------|--------------|-----------|-------------|
+| Buggy (original code) | train | ~0.15 | ~50% | ~0.6 (matches paper) |
+| Buggy (original code) | val | ~0.15 | ~50% | ~0.6 |
+| Fixed (hook-based) | train | 0.033 | 94% | ~29 |
+| Fixed (hook-based) | val | 0.033 | 94% | ~29 |
 
-   The cascaded minimum representation captures the *effective* depth each
-   token reaches: if Router 1 halts a token at repeat 2, the cascaded
-   score at repeat 5 reflects that halt regardless of Router 4's output.
-   Combined with validation data, this plot answers "how does the trained
-   model actually route unseen tokens?" rather than "what routing strategy
-   did the model learn on its training data?"
+The buggy extraction recovers the paper's distribution shape on **both**
+train and val splits. The fixed extraction produces the concentrated
+distribution on **both** splits. This confirms the divergence is caused
+by the cascading method, not the data split.
 
-Both plots use side-by-side bars with the paper's colour coding
-(blue = 40k, green = 60k).
+### Prior misdiagnosis
+
+This finding supersedes an earlier hypothesis (originally written in this
+entry) that attributed the Figure 5 divergence to the choice of data split
+(train vs val). That hypothesis predicted that switching from validation
+to training data would recover the paper's distribution. Empirical testing
+(eval-adm run_2) disproved this: both splits produce the same concentrated
+distribution under correct cascading.
+
+The use of `data['train']` with `sample_size=len(data['val'])` in the
+original code remains an intentional design choice for training dynamics
+analysis (Section 5 examines how routing behaviour evolves during training).
+This is not a bug, but it is also not the cause of the distribution shape
+difference.
+
+### Our approach: four Figure 5 variants
+
+We now generate figures under both extraction methods and both data splits,
+stored in `run_N/broken/` and `run_N/fixed/` respectively:
+
+| Directory | Reproduction (train split) | Analysis (val split) |
+|-----------|---------------------------|---------------------|
+| `broken/` | Buggy cascaded, matches paper's Figure 5 | Buggy cascaded, held-out data |
+| `fixed/` | Raw per-router sigmoid scores | Correct per-token cascaded |
+
+The `broken/` reproduction plot is the closest match to the paper's Figure 5,
+confirming that the paper's distribution is an artifact of this cascading bug.
+The `fixed/` plots show the actual routing behaviour of the trained model:
+nearly all tokens halt well before the final repeat.
+
+### Implications
+
+The paper claims (Section 5): "the model starts to favor using the final
+repeat more when the model is trained for longer." Under correct extraction,
+Router 4 scores are near-zero for both 40k and 60k checkpoints (mean 0.021
+vs 0.033), with negligible mass above 0.5. The 40k-to-60k shift is real but
+far smaller than Figure 5 suggests. The model does learn to use deeper
+repeats with more training, but the magnitude is overstated by the buggy
+extraction.
 
 ### Cross-references
 
@@ -889,6 +935,11 @@ Both plots use side-by-side bars with the paper's colour coding
   `summary.json`.
 - **B8** (missing nullcontext import): Original code bug. `eval.py` crashed
   on CPU-only evaluation due to missing import; latent on GPU runs.
+- `broken_get_router_weights.py`: Faithful reproduction of the original
+  extraction method, adapted for CLI compatibility. Documents the bug in
+  inline comments.
+- `get_router_weights.py`: Corrected hook-based extraction (commit `a9df8fd`).
+  Uses `register_forward_hook` on `mod_router` for per-logit capture.
 
 ## C2. Underspecified Training Schedule (Reproducibility Gap)
 
