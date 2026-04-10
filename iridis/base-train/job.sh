@@ -1,12 +1,12 @@
 #!/bin/sh
 
 ################################################################################
-# Job Script — Run main.py
+# Job Script - Run main.py
 #
 # sbatch job.sh
 ################################################################################
 
-#SBATCH --job-name=base_cotformer
+#SBATCH --job-name=base_cotformer_12L_5R
 #SBATCH --nodes=1
 #SBATCH -p l4               # partition
 #SBATCH --gres=gpu:1        # request 1 GPU
@@ -36,6 +36,8 @@ echo " Started:   $(date)"
 which python
 python --version
 python -c "import sys; print('PYTHONPATH:', sys.path[:3])"
+ulimit -n 4096
+echo "ulimit:" $(ulimit -n)
 echo "========================================="
 
 # --- GPU diagnostics ---
@@ -56,12 +58,15 @@ fi
 TRAIN_ARGS=(
     --config_format base
     --model cotformer_full_depth
+    --exp_name "BaseCot_12L_5R"
     --n_embd 768
     --n_head 12
     --n_layer 12
+    --n_repeat 5
+    --min_repeat 5
     --batch_size 32
     --sequence_length 256
-    --acc_steps 2
+    --acc_steps 4
     --dropout 0.0
     --iterations 40000
     --dataset owt2
@@ -75,7 +80,6 @@ TRAIN_ARGS=(
     --depth_random_method uniform_random_range
     --n_layer_begin 0
     --n_layer_end 0
-    --min_repeat 3
     --depth_embedding linear_learned
     --save_checkpoint_freq 2000
     --results_base_folder "$RESULTS_DIR"
