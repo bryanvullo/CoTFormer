@@ -11,37 +11,23 @@
 ################################################################################
 # Adaptive LN-CoTFormer (ADM v2) -- Evaluation + Figures 4 & 5
 #
-# Single sequential job that evaluates the trained ADM v2 and produces both
-# BROKEN (original authors' code) and FIXED (hook-based) router weight
-# extractions. This isolates the cascading bug discovered in the original
-# get_router_weights.py (see reprod-notes.md C1).
-#
-# The original code takes element-wise minimums at the same POSITION INDEX
-# across repeats, but after top-k reordering, positions correspond to
-# DIFFERENT tokens at each repeat. The result is a minimum of randomly-paired
-# scores, producing the broader distribution shown in the paper's Figure 5.
-# Our fixed version hooks into mod_router directly and cascades per-logit,
-# yielding distributions concentrated near zero (the correct result).
+# Single sequential job: PPL evaluation, Figure 4 (once), and a systematic
+# Figure 5 experiment matrix isolating methodological confounders.
 #
 # Output structure:
 #   run_N/
-#     eval_4k0.txt, eval_6k0.txt        -- PPL evaluations
-#     eval_summary_ckpt_*.json           -- full eval summaries
-#     broken/                            -- original authors' extraction method
-#       figure4_pareto.png               -- PPL vs MACs (buggy router weights)
-#       figure5_reproduction.png         -- train split, buggy cascaded (matches paper)
-#       figure5_analysis.png             -- val split, buggy cascaded
+#     eval_4k0.txt, eval_6k0.txt          PPL evaluations
+#     eval_summary_ckpt_*.json             Full eval summaries
+#     exp4/                                Figure 4 (PPL vs MACs), one copy
+#       figure4_pareto.png
 #       eval_per_threshold.npy, eval_per_layer.npy
-#     fixed/                             -- corrected hook-based extraction
-#       figure4_pareto.png               -- PPL vs MACs (correct router weights)
-#       figure5_reproduction.png         -- train split, raw per-router scores
-#       figure5_analysis.png             -- val split, correct cascaded
-#       eval_per_threshold.npy, eval_per_layer.npy
+#     exp5-original/                       CF, raw dict config (saves PI+PT+raw)
+#     exp5-hooks/                          Hooks extraction, raw dict config
+#     exp5-cf-sorted/                      CF + sorted topk + PI cascade
+#     exp5-cf-argparse/                    CF + PI cascade, argparse config
 #
-# Paper targets:
-#   PPL:     60k ~23.83, average_depth < 108
-#   Fig 4:   Pareto curves (Router vs Fixed Depth) from ~46 to ~228 GMACs
-#   Fig 5:   Router weight distribution shift between 40k and 60k training
+# Each exp5-*/ contains per-checkpoint outputs and a Figure 5 plot.
+# See README.md in this directory for the experiment matrix rationale.
 #
 # Usage:
 #   cd ~/CoTFormer && bash iridis/eval-adm/job.sh
@@ -52,8 +38,19 @@
 ADM_BASE="/scratch/ab3u21/exps/owt2/adaptive_cotformer_mod_efficient_sigmoid_crw_lnmid_de_random_factor_single_final"
 CKPT_DIR="$ADM_BASE/adm_v2_lr0.001_bs8x16_seqlen256"
 
-# Checkpoints to evaluate (step number -> filename)
 CKPTS=("40000" "60000")
+
+# Experiment matrix: method, config-loading, output-subdir
+# Format: "method|config-loading|dirname"
+# Note: exp5-original saves all cascade variants (PI, PT, raw) from a single
+# extraction. The "bug vs fix" comparison is between PI and PT cascade files
+# within this directory, not between separate runs.
+EXPERIMENTS=(
+    "cf|raw|exp5-original"
+    "hooks|raw|exp5-hooks"
+    "cf-sorted|raw|exp5-cf-sorted"
+    "cf|argparse|exp5-cf-argparse"
+)
 
 # ========================= END CONFIGURATION ================================
 
@@ -63,7 +60,6 @@ if [ -z "$SLURM_JOB_ID" ]; then
     REPO_DIR="$(cd "$PACKAGE_DIR/../.." && pwd)"
     source "$REPO_DIR/iridis/env.sh"
 
-    # Pre-flight: verify checkpoints exist
     for step in "${CKPTS[@]}"; do
         ckpt_file="$CKPT_DIR/ckpt_${step}.pt"
         if [ ! -f "$ckpt_file" ]; then
@@ -77,10 +73,18 @@ if [ -z "$SLURM_JOB_ID" ]; then
     fi
 
     RUN_DIR=$(next_run_dir "$PACKAGE_DIR")
-    echo "=== ADM v2 Evaluation + Figures 4 & 5 (broken + fixed) ==="
+
+    # Create all experiment subdirectories
+    mkdir -p "$RUN_DIR/exp4"
+    for exp_spec in "${EXPERIMENTS[@]}"; do
+        IFS='|' read -r _method _config _dirname <<< "$exp_spec"
+        mkdir -p "$RUN_DIR/$_dirname"
+    done
+
+    echo "=== ADM v2 Evaluation + Figures 4 & 5 (experiment matrix) ==="
     echo "  Checkpoint:  $CKPT_DIR"
     echo "  Steps:       ${CKPTS[*]}"
-    echo "  Phases:      eval -> broken extraction -> fixed extraction -> Figs"
+    echo "  Experiments: ${#EXPERIMENTS[@]} exp5 variants + exp4"
     echo "  Logs:        $RUN_DIR/"
     echo ""
     exec sbatch \
@@ -113,7 +117,6 @@ echo " Checkpoint:    $CKPT_DIR"
 echo " Started:       $(date)"
 echo "========================================="
 
-# --- Environment ---
 module load conda
 eval "$(conda shell.bash hook)"
 conda activate "$CONDA_ENV_PREFIX"
@@ -125,19 +128,17 @@ echo "GPU Info:"
 nvidia-smi --query-gpu=index,name,memory.total,driver_version --format=csv,noheader
 echo ""
 
-# Create output subdirectories
-mkdir -p "$RUN_DIR/broken" "$RUN_DIR/fixed"
 
-
-# ========================= PHASE 1-2: PPL Evaluation =========================
+# ========================= PHASE 1: PPL Evaluation ==========================
+echo "###################################################################"
+echo " PHASE 1: PPL Evaluation"
+echo "###################################################################"
 
 for step in "${CKPTS[@]}"; do
     CKPT_FILE="$CKPT_DIR/ckpt_${step}.pt"
-    OUT_FILE="$RUN_DIR/eval_${step/000/k}.txt"
-
+    OUT_FILE="$RUN_DIR/eval_${step%000}k.txt"
     echo ""
-    echo "--- Phase 1-2: Evaluating ckpt_${step}.pt ---"
-
+    echo "--- Evaluating ckpt_${step}.pt ---"
     python eval.py \
         --checkpoint "$CKPT_FILE" \
         --config_format base \
@@ -147,110 +148,93 @@ for step in "${CKPTS[@]}"; do
 done
 
 
-# ========================= PHASE 3: BROKEN Router Extraction =================
-# Uses the original authors' custom forward method with the cascading bug.
-# Position-indexed min across reordered repeats = mismatched token scores.
+# ========================= PHASE 2: Figure 4 (once) ========================
+# Figure 4 depends on router_weights.npy in CKPT_DIR. We generate it once
+# using the hooks method (raw scores), since Figure 4's MAC sweep only needs
+# the weight values, not their cascade ordering.
 echo ""
 echo "###################################################################"
-echo " PHASE 3: BROKEN extraction (original authors' method)"
+echo " PHASE 2: Figure 4 -- PPL vs MACs (single run)"
 echo "###################################################################"
 
-echo "  3a: 60k val (broken)"
-python broken_get_router_weights.py --checkpoint "$CKPT_DIR" --split val --distributed_backend None
-cp "$CKPT_DIR/router_weights.npy" "$CKPT_DIR/broken_router_weights_60k_val.npy"
+python get_router_weights.py \
+    --method hooks --config-loading raw \
+    --checkpoint "$CKPT_DIR" --split val \
+    --output-dir "$RUN_DIR/exp4" \
+    --distributed_backend None
 
-echo "  3b: 40k val (broken)"
-python broken_get_router_weights.py --checkpoint "$CKPT_DIR/ckpt_40000.pt" --split val --distributed_backend None
-cp "$CKPT_DIR/router_weights.npy" "$CKPT_DIR/broken_router_weights_40k_val.npy"
+# get_ppl_per_mac.py and plot_fig4.py expect router_weights.npy in CKPT_DIR
+cp "$RUN_DIR/exp4/router_weights_ptcascade.npy" "$CKPT_DIR/router_weights.npy"
 
-echo "  3c: 60k train (broken)"
-python broken_get_router_weights.py --checkpoint "$CKPT_DIR" --split train --distributed_backend None
-cp "$CKPT_DIR/router_weights.npy" "$CKPT_DIR/broken_router_weights_60k_train.npy"
-
-echo "  3d: 40k train (broken)"
-python broken_get_router_weights.py --checkpoint "$CKPT_DIR/ckpt_40000.pt" --split train --distributed_backend None
-cp "$CKPT_DIR/router_weights.npy" "$CKPT_DIR/broken_router_weights_40k_train.npy"
-
-# Set broken val cascaded as default for Figure 4 (broken)
-cp "$CKPT_DIR/broken_router_weights_60k_val.npy" "$CKPT_DIR/router_weights.npy"
-
-echo ""
-echo "--- BROKEN Phase 4: Figure 4 -- PPL vs MACs sweep ---"
 python get_ppl_per_mac.py --checkpoint "$CKPT_DIR"
 python plot_fig4.py --checkpoint "$CKPT_DIR"
-cp "$CKPT_DIR/figure4_pareto.png" "$RUN_DIR/broken/"
-cp "$CKPT_DIR/eval_per_threshold.npy" "$RUN_DIR/broken/"
-cp "$CKPT_DIR/eval_per_layer.npy" "$RUN_DIR/broken/"
+cp "$CKPT_DIR/figure4_pareto.png" "$RUN_DIR/exp4/"
+cp "$CKPT_DIR/eval_per_threshold.npy" "$RUN_DIR/exp4/"
+cp "$CKPT_DIR/eval_per_layer.npy" "$RUN_DIR/exp4/"
 
-echo ""
-echo "--- BROKEN Phase 5a: Figure 5 -- Reproduction (train, buggy cascaded) ---"
-python plot_fig5.py \
-    --weights-40k "$CKPT_DIR/broken_router_weights_40k_train.npy" \
-    --weights-60k "$CKPT_DIR/broken_router_weights_60k_train.npy" \
-    --output "$RUN_DIR/broken/figure5_reproduction.png"
-
-echo "--- BROKEN Phase 5b: Figure 5 -- Analysis (val, buggy cascaded) ---"
-python plot_fig5.py \
-    --weights-40k "$CKPT_DIR/broken_router_weights_40k_val.npy" \
-    --weights-60k "$CKPT_DIR/broken_router_weights_60k_val.npy" \
-    --output "$RUN_DIR/broken/figure5_analysis.png"
+echo "  Figure 4 saved to $RUN_DIR/exp4/"
 
 
-# ========================= PHASE 6: FIXED Router Extraction ==================
-# Uses hook-based extraction with correct per-logit cascading.
+# ========================= PHASE 3: Figure 5 experiment matrix ==============
 echo ""
 echo "###################################################################"
-echo " PHASE 6: FIXED extraction (hook-based, correct cascading)"
+echo " PHASE 3: Figure 5 -- Experiment Matrix"
 echo "###################################################################"
 
-echo "  6a: 60k val (fixed)"
-python get_router_weights.py --checkpoint "$CKPT_DIR" --split val --distributed_backend None
-cp "$CKPT_DIR/router_weights.npy" "$CKPT_DIR/fixed_router_weights_60k_val.npy"
-cp "$CKPT_DIR/router_weights_raw.npy" "$CKPT_DIR/fixed_router_weights_raw_60k_val.npy"
+for exp_spec in "${EXPERIMENTS[@]}"; do
+    IFS='|' read -r METHOD CONFIG_LOADING DIRNAME <<< "$exp_spec"
+    EXP_DIR="$RUN_DIR/$DIRNAME"
 
-echo "  6b: 40k val (fixed)"
-python get_router_weights.py --checkpoint "$CKPT_DIR/ckpt_40000.pt" --split val --distributed_backend None
-cp "$CKPT_DIR/router_weights.npy" "$CKPT_DIR/fixed_router_weights_40k_val.npy"
-cp "$CKPT_DIR/router_weights_raw.npy" "$CKPT_DIR/fixed_router_weights_raw_40k_val.npy"
+    echo ""
+    echo "=== $DIRNAME (method=$METHOD, config=$CONFIG_LOADING) ==="
 
-echo "  6c: 60k train (fixed)"
-python get_router_weights.py --checkpoint "$CKPT_DIR" --split train --distributed_backend None
-cp "$CKPT_DIR/router_weights.npy" "$CKPT_DIR/fixed_router_weights_60k_train.npy"
-cp "$CKPT_DIR/router_weights_raw.npy" "$CKPT_DIR/fixed_router_weights_raw_60k_train.npy"
-cp "$CKPT_DIR/router_logits.npz" "$CKPT_DIR/fixed_router_logits_60k.npz"
+    for step in "${CKPTS[@]}"; do
+        CKPT_FILE="$CKPT_DIR/ckpt_${step}.pt"
+        STEP_DIR="$EXP_DIR/${step%000}k"
+        mkdir -p "$STEP_DIR"
 
-echo "  6d: 40k train (fixed)"
-python get_router_weights.py --checkpoint "$CKPT_DIR/ckpt_40000.pt" --split train --distributed_backend None
-cp "$CKPT_DIR/router_weights.npy" "$CKPT_DIR/fixed_router_weights_40k_train.npy"
-cp "$CKPT_DIR/router_weights_raw.npy" "$CKPT_DIR/fixed_router_weights_raw_40k_train.npy"
-cp "$CKPT_DIR/router_logits.npz" "$CKPT_DIR/fixed_router_logits_40k.npz"
+        echo "  Extracting ckpt_${step}.pt -> $STEP_DIR/"
+        python get_router_weights.py \
+            --method "$METHOD" \
+            --config-loading "$CONFIG_LOADING" \
+            --checkpoint "$CKPT_FILE" \
+            --split train \
+            --output-dir "$STEP_DIR" \
+            --distributed_backend None
+    done
 
-# Set fixed val cascaded as default for Figure 4 (fixed)
-cp "$CKPT_DIR/fixed_router_weights_60k_val.npy" "$CKPT_DIR/router_weights.npy"
+    # --- Generate Figure 5 plots ---
+    # Each experiment produces raw and cascade variants. Plot the primary
+    # comparison: the cascade type that defines this experiment.
+    W40="$EXP_DIR/${CKPTS[0]%000}k"
+    W60="$EXP_DIR/${CKPTS[1]%000}k"
 
-echo ""
-echo "--- FIXED Phase 7: Figure 4 -- PPL vs MACs sweep ---"
-python get_ppl_per_mac.py --checkpoint "$CKPT_DIR"
-python plot_fig4.py --checkpoint "$CKPT_DIR"
-cp "$CKPT_DIR/figure4_pareto.png" "$RUN_DIR/fixed/"
-cp "$CKPT_DIR/eval_per_threshold.npy" "$RUN_DIR/fixed/"
-cp "$CKPT_DIR/eval_per_layer.npy" "$RUN_DIR/fixed/"
+    # PI cascade figure (for cf/cf-sorted/cf-argparse experiments)
+    if [ -f "$W40/router_weights_picascade.npy" ]; then
+        python plot_fig5.py \
+            --weights-40k "$W40/router_weights_picascade.npy" \
+            --weights-60k "$W60/router_weights_picascade.npy" \
+            --output "$EXP_DIR/figure5_picascade.png"
+    fi
 
-echo ""
-echo "--- FIXED Phase 8a: Figure 5 -- Reproduction (train, raw per-router) ---"
-python plot_fig5.py \
-    --weights-40k "$CKPT_DIR/fixed_router_weights_raw_40k_train.npy" \
-    --weights-60k "$CKPT_DIR/fixed_router_weights_raw_60k_train.npy" \
-    --output "$RUN_DIR/fixed/figure5_reproduction.png"
+    # PT cascade figure (for all experiments)
+    if [ -f "$W40/router_weights_ptcascade.npy" ]; then
+        python plot_fig5.py \
+            --weights-40k "$W40/router_weights_ptcascade.npy" \
+            --weights-60k "$W60/router_weights_ptcascade.npy" \
+            --output "$EXP_DIR/figure5_ptcascade.png"
+    fi
 
-echo "--- FIXED Phase 8b: Figure 5 -- Analysis (val, correct cascaded) ---"
-python plot_fig5.py \
-    --weights-40k "$CKPT_DIR/fixed_router_weights_40k_val.npy" \
-    --weights-60k "$CKPT_DIR/fixed_router_weights_60k_val.npy" \
-    --output "$RUN_DIR/fixed/figure5_analysis.png"
+    # Raw (no cascade) figure (for all experiments)
+    if [ -f "$W40/router_weights_raw.npy" ]; then
+        python plot_fig5.py \
+            --weights-40k "$W40/router_weights_raw.npy" \
+            --weights-60k "$W60/router_weights_raw.npy" \
+            --output "$EXP_DIR/figure5_raw.png"
+    fi
 
-# Restore fixed val cascaded as default (for any downstream tools)
-cp "$CKPT_DIR/fixed_router_weights_60k_val.npy" "$CKPT_DIR/router_weights.npy"
+    echo "  Figures saved to $EXP_DIR/"
+done
 
 
 # ========================= SUMMARY ==========================================
@@ -259,17 +243,11 @@ echo "========================================="
 echo " Evaluation complete: $(date)"
 echo " Results in: $RUN_DIR/"
 echo ""
-echo " PPL (top-level):"
-echo "   eval_4k0.txt / eval_6k0.txt"
-echo "   eval_summary_ckpt_*.json"
-echo ""
-echo " broken/ -- original authors' extraction (cascading bug):"
-echo "   figure4_pareto.png"
-echo "   figure5_reproduction.png   (train, buggy cascaded = matches paper)"
-echo "   figure5_analysis.png       (val, buggy cascaded)"
-echo ""
-echo " fixed/ -- corrected hook-based extraction:"
-echo "   figure4_pareto.png"
-echo "   figure5_reproduction.png   (train, raw per-router scores)"
-echo "   figure5_analysis.png       (val, correct cascaded)"
+echo " PPL: eval_${CKPTS[0]%000}k.txt, eval_${CKPTS[1]%000}k.txt"
+echo " Figure 4: exp4/"
+echo " Figure 5 experiments:"
+for exp_spec in "${EXPERIMENTS[@]}"; do
+    IFS='|' read -r _m _c _d <<< "$exp_spec"
+    echo "   $_d/ (method=$_m, config=$_c)"
+done
 echo "========================================="

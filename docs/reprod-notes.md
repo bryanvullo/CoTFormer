@@ -57,7 +57,8 @@
   - [B10. LR Schedule Discontinuity on 40k-to-60k Extension](#b10-lr-schedule-discontinuity-on-40k-to-60k-extension)
   - [B11. Evaluation Batch Size Independence](#b11-evaluation-batch-size-independence)
 - [Part C: Original Code Bugs](#part-c-original-code-bugs)
-  - [C1. Figure 5 Cascading Bug: Position-Indexed Minimum on Reordered Tokens](#c1-figure-5-cascading-bug-position-indexed-minimum-on-reordered-tokens)
+  - [C1. Figure 5: Position-Indexed Cascade Bug and Methodological Critique](#c1-figure-5-position-indexed-cascade-bug-and-methodological-critique)
+  - [C3. Orphan MoDBlock: 5 Allocated, 4 Used](#c3-orphan-modblock-5-allocated-4-used)
   - [C2. Underspecified Training Schedule (Reproducibility Gap)](#c2-underspecified-training-schedule-reproducibility-gap)
   - [References](#references)
 
@@ -822,17 +823,16 @@ paper's evaluation conditions (no DDP data sharding during eval).
 > because they were discovered during our reproduction process and primarily
 > affected our DDP setup. They are cross-referenced here for completeness.
 
-## C1. Figure 5 Cascading Bug: Position-Indexed Minimum on Reordered Tokens
+## C1. Figure 5: Position-Indexed Cascade Bug and Methodological Critique
 
-**Impact:** Figure 5 of the paper shows an artifactually broad router weight
-distribution. The underlying data is produced by a cascading bug in the
-original `get_router_weights.py`.
+**Impact:** Figure 5 of the paper shows a broad router weight distribution
+whose shape depends on an environment-specific interaction between a
+cascading bug and `torch.topk` reordering behaviour.
 
-**Status:** Root-caused and confirmed empirically. Evaluation pipeline now
-generates both the buggy (paper-matching) and corrected extractions for
-comparison.
+**Status:** Root-caused. Systematic experiment matrix designed to isolate
+confounders. See `iridis/eval-adm/README.md` for the full methodology.
 
-### The bug
+### The bug (technical)
 
 The original `get_router_weights.py` (commit `2723e30`) defines a custom
 `forward()` function that manually executes the model's repeat loop,
@@ -859,87 +859,100 @@ by `take_along_dim`. The cascading therefore computes the minimum of
 randomly-paired scores from different tokens, rather than the per-token
 minimum across all routers.
 
-### Why it matters
+### Environment dependence
 
-The correct per-token cascaded minimum (implemented in our rewritten
-`get_router_weights.py` at commit `a9df8fd`) produces distributions
-**heavily concentrated near zero**: Router 4 cascaded mean = 0.033,
-with 94% of scores below 0.1. This is because any single router scoring
-low for a given token drives the cascaded value to near zero.
+The magnitude of this bug depends on how much `torch.topk(sorted=False, k=T)`
+actually reorders tokens. This is **implementation-dependent** across CUDA
+compute capabilities and PyTorch versions:
 
-The buggy position-indexed minimum produces a **much broader distribution**
-(tail extending to x = 0.5, density peak clipped at 0.6--0.7), because
-random pairing occasionally combines high scores from different tokens.
-This broader distribution is what the paper's Figure 5 shows.
+- **Our environment** (L4 SM89, PyTorch 2.2.0+cu118): `topk(sorted=False,
+  k=T)` returns approximately the identity permutation. The buggy cascade
+  produces results within 2% of the correct per-token cascade.
+- **Authors' probable environment** (A100 SM80, unknown PyTorch version):
+  `topk(sorted=False)` likely produced more significant reordering, causing
+  the cascade to mix scores from genuinely different tokens and producing the
+  broader distribution seen in Figure 5.
 
-### How we confirmed this
+| Extraction (eval-adm/run_3) | Router 4 Mean | frac < 0.1 |
+|-----------------------------|--------------|-----------|
+| CF + position-indexed cascade (buggy) | 0.034 | 93.8% |
+| Hooks + per-token cascade (correct) | 0.033 | 94.0% |
 
-| Extraction Method | Split | Router 4 Mean | frac < 0.1 | Density Peak |
-|------------------|-------|--------------|-----------|-------------|
-| Buggy (original code) | train | ~0.15 | ~50% | ~0.6 (matches paper) |
-| Buggy (original code) | val | ~0.15 | ~50% | ~0.6 |
-| Fixed (hook-based) | train | 0.033 | 94% | ~29 |
-| Fixed (hook-based) | val | 0.033 | 94% | ~29 |
+The <2% difference confirms the bug is **invisible on our hardware**. The
+previously reported broader statistics (mean ~0.15, frac <0.1 ~50%) were
+erroneous and have been removed.
 
-The buggy extraction recovers the paper's distribution shape on **both**
-train and val splits. The fixed extraction produces the concentrated
-distribution on **both** splits. This confirms the divergence is caused
-by the cascading method, not the data split.
+### The critique (methodological)
 
-### Prior misdiagnosis
+Beyond the technical bug, the original Figure 5 experiment does not answer
+the question the authors claim it addresses. The paper states (Section 5):
+"the model starts to favor using the final repeat more when the model is
+trained for longer." However, the position-indexed cascade answers a
+different question: *"At position k in the reordered sequence, what is the
+minimum repeat score across repeats?"*
 
-This finding supersedes an earlier hypothesis (originally written in this
-entry) that attributed the Figure 5 divergence to the choice of data split
-(train vs val). That hypothesis predicted that switching from validation
-to training data would recover the paper's distribution. Empirical testing
-(eval-adm run_2) disproved this: both splits produce the same concentrated
-distribution under correct cascading.
+This formulation conflates token identity with sequence position. After each
+repeat's `topk` reordering, position `k` refers to a different token. The
+cascaded score at position `k` is the minimum of scores from several
+unrelated tokens, not a single token's depth trajectory. The resulting
+distribution is dominated by the reordering mechanics, not by the model's
+routing behaviour.
 
-The use of `data['train']` with `sample_size=len(data['val'])` in the
-original code remains an intentional design choice for training dynamics
-analysis (Section 5 examines how routing behaviour evolves during training).
-This is not a bug, but it is also not the cause of the distribution shape
-difference.
+We propose a per-token cascade as a sounder alternative, answering the more
+interpretable question: *"What is the minimum router score token X received
+across all repeats?"* This tracks each token's actual trajectory through the
+repeat loop by mapping scores back to original positions via `active_indices`
+before cascading. The resulting distribution shows the model's genuine depth
+utilisation: the 40k-to-60k shift is real (mean 0.021 to 0.033) but far
+smaller than Figure 5 suggests.
 
-### Our approach: four Figure 5 variants
+### Experiment matrix
 
-We now generate figures under both extraction methods and both data splits,
-stored in `run_N/broken/` and `run_N/fixed/` respectively:
-
-| Directory | Reproduction (train split) | Analysis (val split) |
-|-----------|---------------------------|---------------------|
-| `broken/` | Buggy cascaded, matches paper's Figure 5 | Buggy cascaded, held-out data |
-| `fixed/` | Raw per-router sigmoid scores | Correct per-token cascaded |
-
-The `broken/` reproduction plot is the closest match to the paper's Figure 5,
-confirming that the paper's distribution is an artifact of this cascading bug.
-The `fixed/` plots show the actual routing behaviour of the trained model:
-nearly all tokens halt well before the final repeat.
-
-### Implications
-
-The paper claims (Section 5): "the model starts to favor using the final
-repeat more when the model is trained for longer." Under correct extraction,
-Router 4 scores are near-zero for both 40k and 60k checkpoints (mean 0.021
-vs 0.033), with negligible mass above 0.5. The 40k-to-60k shift is real but
-far smaller than Figure 5 suggests. The model does learn to use deeper
-repeats with more training, but the magnitude is overstated by the buggy
-extraction.
+We designed a systematic matrix of 5 extraction experiments to isolate each
+confounder (cascade method, extraction method, topk reordering, config
+loading). The full methodology, hypotheses, and expected results are
+documented in `iridis/eval-adm/README.md`.
 
 ### Cross-references
 
-- **B6** (orphan MoDBlock): Original code bug affecting DDP training.
-  Harmless on single-GPU (the authors' setup) but fatal under DDP.
-- **B7** (empty training summary): Original code bug. `stats` dict was
-  initialised but never populated, losing training curve data in
-  `summary.json`.
-- **B8** (missing nullcontext import): Original code bug. `eval.py` crashed
-  on CPU-only evaluation due to missing import; latent on GPU runs.
-- `broken_get_router_weights.py`: Faithful reproduction of the original
-  extraction method, adapted for CLI compatibility. Documents the bug in
-  inline comments.
-- `get_router_weights.py`: Corrected hook-based extraction (commit `a9df8fd`).
-  Uses `register_forward_hook` on `mod_router` for per-logit capture.
+- **C3** (orphan MoDBlock): 5 MoDBlocks allocated, only 4 called (original
+  code bug).
+- `get_router_weights.py`: Unified extraction script with `--method` and
+  `--config-loading` flags for the experiment matrix.
+
+## C3. Orphan MoDBlock: 5 Allocated, 4 Used
+
+**Impact:** The model allocates one more MoDBlock router than it uses. The
+authors report `n_repeat=5` repeats, but the forward loop only invokes
+routers for repeats 1 through 4. The 5th repeat unconditionally finalises
+all remaining tokens without consulting a router. The orphan module
+(`mod[n_repeat-1]`) is created, initialised with random weights, and
+occupies GPU memory, but never receives gradients and never affects
+inference.
+
+**Status:** Original author bug (commit `2723e30`), present in all 5 model
+variants. Fixed in commit `657de47` by changing `range(self.n_repeat)` to
+`range(self.n_repeat - 1)`. See B6 for the DDP discovery story.
+
+### Why it matters
+
+The model is configured with `n_repeat=5`, implying 5 routing decisions.
+In reality, there are only 4 routing decisions and 5 passes through the
+mid-block stack. The final pass always applies and blends unconditionally.
+This is a documentation/intent mismatch: the code allocates resources for
+a router that never participates in computation.
+
+For reproduction, this has no practical impact: the orphan was never trained,
+its weights are random initialisation artifacts, and dropping them via
+`strict=False` loading changes nothing. For extension work, the fix
+(`n_repeat - 1` blocks) saves memory for one unused router module.
+
+### Cross-references
+
+- **B6**: How this bug manifests under DDP (`find_unused_parameters=False`
+  crashes with parameter index 152 not receiving gradients).
+
+---
 
 ## C2. Underspecified Training Schedule (Reproducibility Gap)
 
