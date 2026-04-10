@@ -85,9 +85,9 @@ source "$REPO_DIR/iridis/env.sh"
 
 # --- Scratch-based output dirs (off home quota) ---
 EXPS_DIR="/scratch/ab3u21/exps"
-EXP_NAME="cotformer_full_depth_lr0.001_bs${BATCH_SIZE}x${ACC_STEPS}_seqlen256"
+EXP_NAME="cotformer_full_depth_res_only_lr0.001_bs${BATCH_SIZE}x${ACC_STEPS}_seqlen256"
 # Use cotformer_full_depth_res_only/ (owned by ab3u21) instead of cotformer_full_depth/
-# (owned by tak1e25, mode 755 = no group write). See M-9: cross-user scratch dirs.
+# (owned by tak1e25, mode 755 = no group write):
 CKPT_PARENT="$EXPS_DIR/owt2/cotformer_full_depth_res_only/$EXP_NAME"
 mkdir -p "$CKPT_PARENT" "$DATA_DIR" "$HF_HOME" "$TIKTOKEN_CACHE_DIR" "$WANDB_DIR"
 

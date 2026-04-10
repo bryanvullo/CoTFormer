@@ -45,16 +45,19 @@
 # ========================= CONFIGURATION ======================================
 # Adjust these to match your --gres and architecture choices.
 
-N_GPUS=2          # Must match --gres=gpu:N above
+N_GPUS=2          # Must match --gres=gpu:N above (max 2 on ecsstudents_l4)
 N_LAYER=24        # Total transformer layers
 N_REPEAT=5        # Number of block repeats
 ITERATIONS=40000  # Training steps
-BATCH_SIZE=8      # Per-GPU micro-batch (L4 24GB is tight — start conservative)
-ACC_STEPS=16      # Gradient accumulation (DDP halves: per-GPU = ACC_STEPS/N_GPUS)
-                  # Effective batch size = BATCH_SIZE * ACC_STEPS
+BATCH_SIZE=8      # Per-GPU micro-batch (L4 24GB is tight -- start conservative)
+ACC_STEPS=16      # Gradient accumulation (DDP halves per GPU, x N_GPUS -> cancels)
+                  # Effective batch size = BATCH_SIZE * ACC_STEPS (always, regardless of N_GPUS)
 CKPT_FREQ=2000    # Save checkpoint every N steps
+SEED=0            # Random seed (change for multi-seed runs)
 
-# Reserved layers (prefix/suffix not repeated):
+# Reserved layers (prefix/suffix not repeated).
+# Set both to 0 for Table 1 (base CoTFormer, no reserved layers).
+# Set to 2/1 for Table 2 (LN-CoTFormer with reserved layers).
 N_LAYER_BEGIN=2
 N_LAYER_END=1
 
@@ -73,6 +76,7 @@ if [ -z "$SLURM_JOB_ID" ]; then
     echo "  Layers:    $N_LAYER (${N_LAYER_BEGIN}+mid*${N_REPEAT}+${N_LAYER_END})"
     echo "  Steps:     $ITERATIONS"
     echo "  Eff. BS:   $((BATCH_SIZE * ACC_STEPS))"
+    echo "  Seed:      $SEED"
     echo "  Logs:      $RUN_DIR/"
     echo ""
     exec sbatch \
@@ -98,8 +102,14 @@ fi
 source "$REPO_DIR/iridis/env.sh"
 
 # --- Scratch-based output dirs (off home quota) ---
+# main.py constructs checkpoint path: EXPS_DIR / dataset / model / EXP_NAME.
+# Pre-create the FULL path here to catch permission errors early (not at step 39999).
+# If the model dir (e.g. cotformer_full_depth/) is owned by another user with
+# mode 755, mkdir fails -- fix by asking them to chmod g+w, or use a fresh parent.
 EXPS_DIR="/scratch/$USER/exps"
-mkdir -p "$EXPS_DIR" "$DATA_DIR" "$HF_HOME" "$TIKTOKEN_CACHE_DIR" "$WANDB_DIR"
+EXP_NAME="<MODEL_NAME>_lr0.001_bs${BATCH_SIZE}x${ACC_STEPS}_seqlen256_seed${SEED}"
+CKPT_DIR="$EXPS_DIR/owt2/<MODEL_NAME>/$EXP_NAME"
+mkdir -p "$CKPT_DIR" "$DATA_DIR" "$HF_HOME" "$TIKTOKEN_CACHE_DIR" "$WANDB_DIR"
 
 echo "========================================="
 echo " <PKG_NAME> Training"
@@ -125,6 +135,10 @@ conda activate "$CONDA_ENV_PREFIX"
 # WandB offline (compute nodes have no internet)
 export WANDB_MODE=offline
 
+# NCCL: force Simple protocol to avoid LL-protocol hangs during DDP
+# checkpoint coordination (see reprod-notes B9)
+export NCCL_PROTO=Simple
+
 cd "$REPO_DIR"
 
 # --- GPU diagnostics ---
@@ -143,37 +157,53 @@ fi
 
 # --- Build training args ---
 TRAIN_ARGS=(
-    --config_format base
-    --model <MODEL_NAME>
-    --n_embd 768
-    --n_head 12
-    --n_layer "$N_LAYER"
-    --n_repeat "$N_REPEAT"
-    --batch_size "$BATCH_SIZE"
-    --sequence_length 256
-    --acc_steps "$ACC_STEPS"
-    --dropout 0.0
-    --iterations "$ITERATIONS"
-    --dataset owt2
-    --data_dir "$DATA_DIR"
-    --data_in_ram
-    --lr 1e-3
-    --weight_decay 0.1
-    --warmup_percent 0.2
-    --eval_freq 100
-    --seed 0
-    --depth_random_method uniform_random_range
-    --n_layer_begin "$N_LAYER_BEGIN"
-    --n_layer_end "$N_LAYER_END"
-    --min_repeat "$N_REPEAT"
-    --depth_embedding linear_learned
-    --save_checkpoint_freq "$CKPT_FREQ"
-    --results_base_folder "$EXPS_DIR"
-    --exp_name "<MODEL_NAME>_lr0.001_bs${BATCH_SIZE}x${ACC_STEPS}_seqlen256"
-    --use_pretrained auto
-    --wandb
-    --wandb_project rcotformer
-    "$@"
+    # --- Config format ---
+    --config_format base          # Which config parser to use (only "base" exists)
+
+    # --- Architecture ---
+    --model <MODEL_NAME>          # Model class from models/__init__.py
+    --n_embd 768                  # Hidden dimension (paper: 768 for all models)
+    --n_head 12                   # Attention heads (paper: 12 for all models)
+    --n_layer "$N_LAYER"          # Number of transformer layers per block
+    --n_repeat "$N_REPEAT"        # How many times the block is repeated (CoT depth)
+    --n_layer_begin "$N_LAYER_BEGIN"  # Prefix layers NOT repeated (0 for Table 1)
+    --n_layer_end "$N_LAYER_END"     # Suffix layers NOT repeated (0 for Table 1)
+
+    # --- Training hyperparameters ---
+    --batch_size "$BATCH_SIZE"    # Per-GPU micro-batch size (tokens per forward pass)
+    --sequence_length 256         # Context window length (paper: 256)
+    --acc_steps "$ACC_STEPS"      # Gradient accumulation steps before optimizer update
+    --dropout 0.0                 # Dropout rate (paper: 0.0 for all models)
+    --iterations "$ITERATIONS"    # Total training steps
+    --lr 1e-3                     # Peak learning rate for OneCycleLR (paper: 0.001)
+    --weight_decay 0.1            # AdamW weight decay
+    --warmup_percent 0.2          # Fraction of steps for LR warmup (0.2 * 40k = 8000)
+    --seed "$SEED"                # RNG seed for reproducibility
+
+    # --- Dataset ---
+    --dataset owt2                # Dataset name (determines subdir in data_dir)
+    --data_dir "$DATA_DIR"        # Parent dir containing owt2/train.bin and owt2/val.bin
+    --data_in_ram                 # Load full dataset into RAM (faster, needs ~16 GB)
+
+    # --- Checkpointing and output ---
+    --save_checkpoint_freq "$CKPT_FREQ"  # Save ckpt_<step>.pt every N steps
+    --results_base_folder "$EXPS_DIR"    # Root for checkpoint tree (see path note above)
+    --exp_name "$EXP_NAME"        # Explicit experiment name (avoids auto-generated mess)
+    --use_pretrained auto         # On resubmit: scan for latest ckpt and resume from it
+    --eval_freq 100               # Run validation every N steps
+
+    # --- Logging ---
+    --wandb                       # Enable Weights & Biases logging
+    --wandb_project rcotformer    # WandB project name
+
+    # --- Model-specific args (uncomment ONLY for models that use them) ---
+    # cotformer_full_depth IGNORES these three; cotformer_full_depth_lnmid_depthemb
+    # USES them. Including unused args pollutes the auto-generated exp_name.
+    # --depth_random_method uniform_random_range  # How to sample repeat depth during training
+    # --min_repeat "$N_REPEAT"                    # Minimum repeats when using random depth
+    # --depth_embedding linear_learned            # Learned embedding indicating current repeat
+
+    "$@"                          # Pass-through args from the command line
 )
 
 # --- Launch ---
