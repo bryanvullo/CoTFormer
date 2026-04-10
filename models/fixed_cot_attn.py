@@ -80,7 +80,7 @@ class CausalSelfAttention(nn.Module):
         if self.flash:
             assert config.attention_window_length is None
         else:
-            # print("WARNING: using slow attention. Flash Attention requires PyTorch >= 2.0")
+            print("WARNING: using slow attention. Flash Attention requires PyTorch >= 2.0")
             # causal mask to ensure that attention is only applied to the left in the input sequence
         bias = torch.tril(torch.ones(config.sequence_length, config.sequence_length)) # returns lower triangular
         if config.attention_window_length is not None:
@@ -139,7 +139,7 @@ class CausalSelfAttention(nn.Module):
             self.all_values = apply_inplace_set(self.all_values, v, dim=2)
             k = self.all_keys[1]
             v = self.all_values[1]
-            if not self.training:
+            # if not self.training:
                 # print("q shape:", q.shape, "k shape:", k.shape, "v shape:", v.shape)
             attn_mask = self.bias[:,:,:T,:T].unsqueeze(3).repeat(
                 1, 1, 1, k.shape[2] // T, 1
