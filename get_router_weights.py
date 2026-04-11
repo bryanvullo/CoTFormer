@@ -193,7 +193,7 @@ def run_cf_extraction(model, data_iter, total_batches, type_ctx, n_repeat, metho
                 scattered.append(None)
                 continue
             s = torch.zeros(B, T, 1, device='cpu')
-            s.scatter_(1, ai.unsqueeze(-1).cpu(), rw.detach().cpu())
+            s.scatter_(1, ai.unsqueeze(-1).cpu(), rw.detach().float().cpu())
             scattered.append(s)
 
         pt_cascaded = [None]
@@ -341,6 +341,12 @@ def load_config_argparse(checkpoint_dir, checkpoint_filename, config_format, rem
 
 def accum_to_npy(accum):
     """Convert list-of-lists accumulator to numpy object array."""
+    # M1: stores float32; original used float64 (np.array default). Immaterial:
+    # source values have float16 precision (from autocast), which float32
+    # represents exactly. Histogram binning is dtype-agnostic.
+    # M2: empty accumulators become None; original produced np.array([]).
+    # Immaterial: repeat-0 slot has no router weights in any model config
+    # and is never read by downstream analysis or plotting code.
     return np.array([
         np.array(x, dtype=np.float32) if len(x) > 0 else None
         for x in accum
@@ -455,6 +461,9 @@ def main():
         device_type=device_type, dtype=dtype)
 
     # --- Batching ---
+    # M3: original hardcodes config.sequence_length; we fall back through
+    # eval_seq_length first. Immaterial for ADM v2: eval_seq_length is None
+    # in summary.json, so both paths resolve to sequence_length (256).
     seq_length = getattr(config, 'eval_seq_length', None) or config.sequence_length
     sample_size = len(data['val']) if split == 'train' else None
     eval_tokens = len(data['val'])

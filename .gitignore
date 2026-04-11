@@ -6,6 +6,11 @@
 !docs/reprod-notes.md
 !docs/extend-notes.md
 
+# Ignore all checkpoints
+*.pt
+*.chkpt
+*.npy
+
 # Dataset folder
 data/datasets/
 wandb/
