@@ -84,13 +84,15 @@ def train_base(model, opt, data, data_seed, scheduler, iterations, acc_steps, ba
             
         for microstep_idx in range(acc_steps):  # gradient accumulation
             x, y = get_batch(data_train_iter, device=extra_args.device)
-            
+
+            # NEW
+            is_log_step = ((itr + 1) % eval_freq == 0) and (microstep_idx == acc_steps - 1)  # log on the last microstep of eval steps
             with type_ctx:
                 with distributed_backend.get_context_for_microstep_forward(model=model, microstep_idx=microstep_idx, gradient_accumulation_steps=acc_steps):
                     if getattr(distributed_backend.get_raw_model(model), "needs_iter", False):
-                        outputs = model(x, targets=y, iter=itr)
+                        outputs = model(x, targets=y, iter=itr, log_metrics=is_log_step)  # Pass log_metrics flag to model
                     else:
-                        outputs = model(x, targets=y)
+                        outputs = model(x, targets=y, log_metrics=is_log_step)  # Pass log_metrics flag to model
 
             loss = outputs['loss'] / acc_steps
             loss.backward()
@@ -148,7 +150,10 @@ def train_base(model, opt, data, data_seed, scheduler, iterations, acc_steps, ba
                 ### NEW BEGIN
                 x_diag, y_diag = get_batch(data_val_iter, device=extra_args.device)
                 with torch.no_grad(), type_ctx:
-                    diag_outputs = model(x_diag, targets=y_diag)
+                    # Get raw model ONCE
+                    raw_model = distributed_backend.get_raw_model(model)
+                    
+                    diag_outputs = raw_model(x_diag, targets=y_diag)
                     
                     # 1. Grab stream geometry and the new attention dictionary
                     b_sim = diag_outputs.get('sim_of_xs')
@@ -157,7 +162,6 @@ def train_base(model, opt, data, data_seed, scheduler, iterations, acc_steps, ba
                     d_metrics = diag_outputs.get('diag_metrics')
                     
                     # 2. Track LayerNorm Gamma Magnitudes for h_mid
-                    raw_model = distributed_backend.get_raw_model(model)
                     ln1_norm, ln2_norm = 0.0, 0.0
                     mid_blocks = raw_model.transformer.h_mid
                     
@@ -170,14 +174,16 @@ def train_base(model, opt, data, data_seed, scheduler, iterations, acc_steps, ba
                             ln2_norms.append(block.ln_2.weight.abs().mean().item())
                     
                     # Store the arrays in the metrics dictionary
-                    d_metrics['ln1_gamma_per_layer'] = ln1_norms
-                    d_metrics['ln2_gamma_per_layer'] = ln2_norms
+                    if d_metrics is not None:
+                        d_metrics['ln1_gamma_per_layer'] = ln1_norms
+                        d_metrics['ln2_gamma_per_layer'] = ln2_norms
                 train_loss = loss.detach().cpu().item() * acc_steps
                 current_lr = scheduler.get_last_lr()[0] if scheduler is not None else extra_args.lr
-                eval_steps = (
-                    24 if itr < iterations else len(data_val)
-                )
+                # eval_steps = (
+                #     24 if itr < iterations else len(data_val)
+                # )
                 # If we are at the last iteration, re-initialize the data iterator
+                eval_steps = 24
                 if itr == iterations:
                     data_val_iter = iter(data_val)
 
@@ -263,12 +269,22 @@ def train_base(model, opt, data, data_seed, scheduler, iterations, acc_steps, ba
                         # "diag/ln1_gamma": ln1_norm,
                         # "diag/ln2_gamma": ln2_norm,
                     }
+                    if hasattr(raw_model, 'backward_metrics'):       # NEW PER REPEAT GRADS
+                        for key, val in raw_model.backward_metrics.items():
+                            logs[f"diag_grad/{key}"] = val
+                        raw_model.backward_metrics.clear()
+                    # CLEAR MEMORY
+                    if hasattr(raw_model, 'forward_metrics'):
+                        for key, val in raw_model.forward_metrics.items():
+                            logs[f"diag_step/{key}"] = val  
+                        raw_model.forward_metrics.clear() # Clear memory 
+                    
+
                     if 'ln1_gamma_per_layer' in d_metrics:
                         for idx, val in enumerate(d_metrics['ln1_gamma_per_layer']):           # still not sure about these. look into it tomorrow
                             logs[f"diag_ln/ln1_layer_{idx}"] = float(val)
                             logs[f"diag_ln/ln2_layer_{idx}"] = float(d_metrics['ln2_gamma_per_layer'][idx])
-
-                    # --- Custom Attention Diagnostics ---
+                    raw_model = distributed_backend.get_raw_model(model)
                     if d_metrics is not None:
                         # Macro Logging (Network-wide averages)
                         logs["diag_macro/repeat_entropy"] = float(d_metrics.get('macro_rep_entropy', 0.0))

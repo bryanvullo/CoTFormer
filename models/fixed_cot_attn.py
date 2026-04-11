@@ -301,12 +301,16 @@ class GPTBase(nn.Module):
         elif isinstance(module, nn.Embedding):
             torch.nn.init.normal_(module.weight, mean=0.0, std=0.02)
 
-    def forward(self, idx, targets=None, get_logits=False, use_cache=False, iter=None):
+    def forward(self, idx, targets=None, get_logits=False, use_cache=False, iter=None,log_metrics=False):
         device = idx.device
         b, t = idx.size()
         diag_metrics = {} # We will pack everything into a dict to keep it clean
         assert t <= self.config.sequence_length, f"Cannot forward sequence of length {t}, block size is only {self.config.sequence_length}"
-        
+        if log_metrics:
+            self.backward_metrics = {}
+            self.forward_metrics = {}
+
+        prev_x_last = None
         
         # forward the GPT model itself
         if use_cache:
@@ -339,62 +343,35 @@ class GPTBase(nn.Module):
         #         x = block(x, pos_emb_closure, cache_context, start_index=index_shift,
         #         rep_idx = rep_idx,
         #         block_idx = mid_idx) 
+        if not hasattr(self, 'backward_metrics'):
+            self.backward_metrics = {}
         for rep_idx in range(1, self.n_repeat+1):
             
             for block in self.transformer.h_mid:
                 x = block(x, pos_emb_closure, cache_context, start_index=index_shift)        # for logit lens or something similar take the current hidden state x, pass it through the final layer norm (i assume self.transformer.ln_f(x)) and shove that through the lm head prematurely (we do this to empirically measure representations getting more mature or ritcher or whatever you wanna call it)
-        # if not self.training:
-        #     x_outof_mid = x.clone().detach() # We log the x coming out of mid blocks as well. This way we can compare the representations going into and coming out of the repeat blocks to see how they evolve through the CoT process.
-        #     sim_of_xs = F.cosine_similarity(x_into_mid, x_outof_mid, dim=-1).mean()
-        #     var_into = x_into_mid.var(dim=-1).mean()
-        #     var_outof = x_outof_mid.var(dim=-1).mean()
-        #     end_att = self.transformer.h_mid[-1].attn.diagnose_attn
-        #     att_row_sums = end_att.sum(dim=-1)   # shape: (B, H, Q)
-        #     print("att row sums min/max/mean:",    # TODO: remove
-        #         att_row_sums.min().item(),
-        #         att_row_sums.max().item(),
-        #         att_row_sums.mean().item())
-        #     B_d, H_d, Q_d, K_tot = end_att.shape
-        #     assert K_tot ==self.n_repeat * Q_d     #TODO: remove
-        #     print("end_att shape (B, H, Q, K_tot): ", end_att.shape)  #TODO: remove
-        #     # 1. Reshape: (B, H, Q, 5, 256)
-        #     reshaped_att = end_att.view(B_d, H_d, Q_d, self.n_repeat, Q_d)
-        #     print("reshaped_att shape (B, H, Q, 5, 256): ", reshaped_att.shape)    #TODO: remove
+            if log_metrics:
+                curr_x_last = x[:, -1, :].clone().detach() # we take the last token in the sequence 
+                # pre ln var
+                var_val = curr_x_last.var(dim=-1).mean().item()
+                self.forward_metrics[f'var_end_rep_{rep_idx}'] = var_val
+                if prev_x_last is not None:
+                        # Calculate Cosine Similarity across the hidden dimension
+                        cos_sim = F.cosine_similarity(curr_x_last, prev_x_last, dim=-1).mean().item()
+                        cos_dist = 1.0 -cos_sim
+                        self.forward_metrics[f'cos_dist_{rep_idx}_vs_{rep_idx-1}'] = cos_dist
 
-        #     # 2. Budgets: Sum across the tokens inside each loop -> (B, H, Q, 5)
-        #     loop_sums = reshaped_att.sum(dim=-1) 
-        #     print("loop_sums shape:", loop_sums.shape)
-        #     print(
-        #         "repeat budget sums min/max/mean:",
-        #         loop_sums.min().item(),
-        #         loop_sums.max().item(),
-        #         loop_sums.mean().item()
-        #     )
-        #     print("end_att row sums:", end_att.sum(dim=-1).min().item(),
-        #         end_att.sum(dim=-1).max().item(),
-        #         end_att.sum(dim=-1).mean().item())
 
-        #     print("reshaped total sums:", reshaped_att.sum(dim=(-1, -2)).min().item(),
-        #         reshaped_att.sum(dim=(-1, -2)).max().item(),
-        #         reshaped_att.sum(dim=(-1, -2)).mean().item())
+                prev_x_last = curr_x_last
 
-        #     repeat_budget_sums = loop_sums.sum(dim=-1)
-        #     print("repeat budget sums:", repeat_budget_sums.min().item(),
-        #         repeat_budget_sums.max().item(),
-        #         repeat_budget_sums.mean().item())
-
-        #     # 3. Entropy: Normalize the slice so it sums to 1 locally, then -p * log(p)
-        #     # Add 1e-9 (epsilon) to prevent dividing by zero or log(0) crashes
-        #     local_p = reshaped_att / (loop_sums.unsqueeze(-1) + 1e-9)
-        #     local_entropy = - (local_p * torch.log(local_p + 1e-9)).sum(dim=-1) # -> (B, H, Q, 5)
-        #     repeat_entropy = -(loop_sums * torch.log(loop_sums + 1e-9)).sum(dim=-1)   # (B,H,Q)
-        #     # 4. Aggregate Budgets
-        #     diag_metrics['macro_budgets'] = loop_sums.mean(dim=(0, 1, 2)).cpu().numpy()
-        #     diag_metrics['head_budgets'] = loop_sums.mean(dim=(0, 2)).cpu().numpy()
-            
-        #     # 5. Aggregate Entropy
-        #     diag_metrics['macro_entropy'] = local_entropy.mean(dim=(0, 1, 2)).cpu().numpy()
-        #     diag_metrics['head_entropy'] = local_entropy.mean(dim=(0, 2)).cpu().numpy()
+            if self.training and x.requires_grad and log_metrics:
+                def make_hook(current_rep):
+                    def hook(grad):
+                        # Norm of the gradient for the last token
+                        grad_norm = grad[:, -1, :].norm(p=2).item()
+                        self.backward_metrics[f'grad_norm_enter_rep_{current_rep}'] = grad_norm
+                    return hook
+                
+                x.register_hook(make_hook(rep_idx))
         if not self.training:
             x_outof_mid = x.clone().detach() 
             sim_of_xs = F.cosine_similarity(x_into_mid, x_outof_mid, dim=-1).mean().item()
@@ -599,3 +576,55 @@ class GPTBase(nn.Module):
         idx = torch.tensor(self.tokenizer.encode(in_str, allowed_special={"<|endoftext|>"})).view(1,-1).to(self.lm_head.weight.device)
         out_idx = self.generate(idx, max_new_tokens, temperature, top_k).view(-1).to('cpu').numpy()
         return self.tokenizer.decode(out_idx)
+ # if not self.training:
+        #     x_outof_mid = x.clone().detach() # We log the x coming out of mid blocks as well. This way we can compare the representations going into and coming out of the repeat blocks to see how they evolve through the CoT process.
+        #     sim_of_xs = F.cosine_similarity(x_into_mid, x_outof_mid, dim=-1).mean()
+        #     var_into = x_into_mid.var(dim=-1).mean()
+        #     var_outof = x_outof_mid.var(dim=-1).mean()
+        #     end_att = self.transformer.h_mid[-1].attn.diagnose_attn
+        #     att_row_sums = end_att.sum(dim=-1)   # shape: (B, H, Q)
+        #     print("att row sums min/max/mean:",    # TODO: remove
+        #         att_row_sums.min().item(),
+        #         att_row_sums.max().item(),
+        #         att_row_sums.mean().item())
+        #     B_d, H_d, Q_d, K_tot = end_att.shape
+        #     assert K_tot ==self.n_repeat * Q_d     #TODO: remove
+        #     print("end_att shape (B, H, Q, K_tot): ", end_att.shape)  #TODO: remove
+        #     # 1. Reshape: (B, H, Q, 5, 256)
+        #     reshaped_att = end_att.view(B_d, H_d, Q_d, self.n_repeat, Q_d)
+        #     print("reshaped_att shape (B, H, Q, 5, 256): ", reshaped_att.shape)    #TODO: remove
+
+        #     # 2. Budgets: Sum across the tokens inside each loop -> (B, H, Q, 5)
+        #     loop_sums = reshaped_att.sum(dim=-1) 
+        #     print("loop_sums shape:", loop_sums.shape)
+        #     print(
+        #         "repeat budget sums min/max/mean:",
+        #         loop_sums.min().item(),
+        #         loop_sums.max().item(),
+        #         loop_sums.mean().item()
+        #     )
+        #     print("end_att row sums:", end_att.sum(dim=-1).min().item(),
+        #         end_att.sum(dim=-1).max().item(),
+        #         end_att.sum(dim=-1).mean().item())
+
+        #     print("reshaped total sums:", reshaped_att.sum(dim=(-1, -2)).min().item(),
+        #         reshaped_att.sum(dim=(-1, -2)).max().item(),
+        #         reshaped_att.sum(dim=(-1, -2)).mean().item())
+
+        #     repeat_budget_sums = loop_sums.sum(dim=-1)
+        #     print("repeat budget sums:", repeat_budget_sums.min().item(),
+        #         repeat_budget_sums.max().item(),
+        #         repeat_budget_sums.mean().item())
+
+        #     # 3. Entropy: Normalize the slice so it sums to 1 locally, then -p * log(p)
+        #     # Add 1e-9 (epsilon) to prevent dividing by zero or log(0) crashes
+        #     local_p = reshaped_att / (loop_sums.unsqueeze(-1) + 1e-9)
+        #     local_entropy = - (local_p * torch.log(local_p + 1e-9)).sum(dim=-1) # -> (B, H, Q, 5)
+        #     repeat_entropy = -(loop_sums * torch.log(loop_sums + 1e-9)).sum(dim=-1)   # (B,H,Q)
+        #     # 4. Aggregate Budgets
+        #     diag_metrics['macro_budgets'] = loop_sums.mean(dim=(0, 1, 2)).cpu().numpy()
+        #     diag_metrics['head_budgets'] = loop_sums.mean(dim=(0, 2)).cpu().numpy()
+            
+        #     # 5. Aggregate Entropy
+        #     diag_metrics['macro_entropy'] = local_entropy.mean(dim=(0, 1, 2)).cpu().numpy()
+        #     diag_metrics['head_entropy'] = local_entropy.mean(dim=(0, 2)).cpu().numpy()

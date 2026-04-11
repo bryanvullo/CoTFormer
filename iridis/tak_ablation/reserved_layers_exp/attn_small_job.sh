@@ -1,5 +1,5 @@
 #!/bin/bash
-#SBATCH --job-name=attn_metrics_ablation_test
+#SBATCH --job-name=attn_metrics_ablation_real
 #SBATCH --partition=ecsstudents_l4
 #SBATCH --account=ecsstudents
 #SBATCH --nodes=1
@@ -35,15 +35,15 @@
 
 N_GPUS=1          # Must match --gres=gpu:N above
 N_LAYER=12        # Paper uses 24 for Table 2 ablation
-N_REPEAT=3        # Number of block repeats
-ITERATIONS=100  # Training steps
-BATCH_SIZE=8      # Per-GPU micro-batch (L4 24GB OOMs at 16 with 108 effective layers)
-ACC_STEPS=16      # Gradient accumulation (DDP halves: per-GPU=8, eff BS = 8*16 = 128)
-CKPT_FREQ=20    # Save every 2000 steps
+N_REPEAT=5        # Number of block repeats
+ITERATIONS=40000  # Training steps
+BATCH_SIZE=4      # Per-GPU micro-batch (L4 24GB OOMs at 16 with 108 effective layers)
+ACC_STEPS=32      # Gradient accumulation (DDP halves: per-GPU=8, eff BS = 8*16 = 128)
+CKPT_FREQ=2000    # Save every 2000 steps
 
 # Reserved layers:
-N_LAYER_BEGIN=2
-N_LAYER_END=1
+N_LAYER_BEGIN=0
+N_LAYER_END=0
 
 # ========================= END CONFIGURATION ================================
 
@@ -107,8 +107,12 @@ echo "========================================="
 module load conda
 eval "$(conda shell.bash hook)"
 conda activate "$CONDA_ENV_PREFIX"
-
+EXPNAME="512_HIGH_SEQ_tak_cotformer_0_12x5_0_REAL_no_ln_WITH_metrics"
 export WANDB_MODE=offline
+export WANDB_RESUME="allow"
+export WANDB_RUN_ID="RUN_40k_${EXPNAME}"
+export WANDB_NAME="CoT 0->12x5->0 No LN (Real)"
+
 
 cd "$REPO_DIR"
 
@@ -137,7 +141,7 @@ TRAIN_ARGS=(
     --n_layer "$N_LAYER"
     --n_repeat "$N_REPEAT"
     --batch_size "$BATCH_SIZE"
-    --sequence_length 256
+    --sequence_length 512
     --acc_steps "$ACC_STEPS"
     --dropout 0.0
     --iterations "$ITERATIONS"
@@ -146,13 +150,13 @@ TRAIN_ARGS=(
     --lr 1e-3
     --weight_decay 0.1
     --warmup_percent 0.2
-    --eval_freq 10
+    --eval_freq 100
     --seed 0
     --n_layer_begin "$N_LAYER_BEGIN"
     --n_layer_end "$N_LAYER_END"
     --save_checkpoint_freq "$CKPT_FREQ"
     --results_base_folder "$EXPS_DIR"
-    --exp_name "attn_metrics_test_cotformer_full_depth_12_layer_3_repeat_diff_new_ln_test_bs${BATCH_SIZE}x${ACC_STEPS}_seqlen256"
+    --exp_name "$EXPNAME"
     --use_pretrained auto
     --wandb
     --wandb_project rcotformer
