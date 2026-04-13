@@ -9,6 +9,7 @@ from . import pondernet
 from . import but_mod_efficient_sigmoid_lnmid_depthemb_random_factor_for_mac_compute
 from . import tak_custom_cot
 from . import fixed_cot_attn
+from . import flash_train_caus_eval
 
 MODELS = {
     "base": base.GPTBase,
@@ -22,6 +23,7 @@ MODELS = {
     "but_halting_freeze_input_on_stop": but_halting_freeze_input_on_stop.GPTBase,
     "tak_custom_cot" : tak_custom_cot.GPTBase,
     "fixed_cot_attn" : fixed_cot_attn.GPTBase,
+    "flash_train_caus_eval" : flash_train_caus_eval.GPTBase,
 }
 
 
