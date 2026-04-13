@@ -1,0 +1,226 @@
+#!/bin/bash
+#SBATCH --job-name=<PKG_NAME>_analysis
+#SBATCH --partition=ecsstudents_l4
+#SBATCH --account=ecsstudents
+#SBATCH --nodes=1
+#SBATCH --ntasks=1
+#SBATCH --cpus-per-task=8
+#SBATCH --gres=gpu:1
+#SBATCH --mem=64G
+#SBATCH --time=06:00:00
+#SBATCH --mail-type=ALL
+#SBATCH --mail-user=your_email@example.com
+################################################################################
+# SLURM Job Script Template for Iridis X -- MECHANISTIC ANALYSIS
+#
+# This is the ANALYSIS template for mechanistic analysis jobs: activation
+# probing, attention pattern extraction, KV compressibility, ablations on
+# trained models, etc. Siblings:
+#   job-train.example -- Training jobs (torchrun DDP, creates ckpts)
+#   job-eval.example  -- Evaluation jobs (single GPU, PPL eval)
+#
+# For cluster access, env setup, GPU partitions, submission and monitoring,
+# see the QuickStart section of README.md. This template only covers the
+# analysis-job-specific fill-in-the-blanks.
+#
+# HOW TO USE:
+#   1. Copy into your package directory:
+#        cp iridis/job-analysis.example iridis/<your-package>/job.sh
+#   2. Fill in the CHECKPOINTS matrix (one entry per model/step combination)
+#   3. Set ANALYSIS_SCRIPT to your analysis entrypoint Python script
+#   4. Fill in ANALYSIS_ARGS with the flags your script needs
+#   5. Replace <PKG_NAME> with your package directory name
+#   6. Adjust SBATCH resources (analysis jobs are usually 1 GPU, 2-8h)
+#   7. Run from the repo root:
+#        cd ~/CoTFormer && bash iridis/<your-package>/job.sh
+#
+# ==============================================================================
+# ANALYSIS-vs-EVAL PATH DIFFERENCE
+# ==============================================================================
+# Analysis differs from eval in output volume and structure:
+#   - Eval  produces a few scalars (PPL) + maybe 1-2 figures per checkpoint
+#   - Analysis produces many artefacts per checkpoint: summary JSONs, figures,
+#     numpy arrays of intermediate activations, per-layer statistics, etc.
+#
+# Output triage rule:
+#   - Large intermediate numpy arrays (>10MB each, regeneratable from ckpt)
+#     go to "$CKPT_DIR/analysis_workspace/" on /scratch — NOT copied to RUN_DIR.
+#     Reason: the Git-tracked RUN_DIR should contain MEANINGFUL experimental
+#     outputs only (figures, JSON summaries, small scalars). Large workspace
+#     blobs encumber the working tree.
+#   - Small meaningful outputs (figures PNG, JSON summaries, scalar sweeps
+#     under a few MB) are copied to RUN_DIR with a per-checkpoint tag prefix.
+#
+# The `kv-analysis-lncot+adm/` package is the canonical reference for this
+# pattern: it writes per-ckpt analysis artefacts into the checkpoint dir,
+# then copies out the meaningful JSON/PNG with tag prefixes.
+#
+# See docs/reprod-notes.md §C4 for why bash must not mirror main.py's
+# training ckpt_path construction.
+# ==============================================================================
+################################################################################
+
+# ========================= CONFIGURATION ======================================
+
+# Analysis script to invoke (relative to $REPO_DIR or absolute).
+ANALYSIS_SCRIPT="analyze_<something>.py"
+
+# Output directory for aggregated/meaningful analysis artefacts.
+# Small outputs (JSON, PNG, scalar .npy <10MB) get copied here with tag prefix.
+OUTPUT_DIR="/scratch/$USER/exps/analysis-<suffix>"
+
+# Checkpoints to analyse. Format: "tag|ckpt_dir|ckpt_file"
+#   tag       -- short identifier used as output filename prefix
+#   ckpt_dir  -- full absolute path to training output dir (contains
+#                summary.json + ckpt*.pt files)
+#   ckpt_file -- filename WITHIN ckpt_dir (e.g. ckpt_40000.pt or ckpt.pt)
+LNCOT_DIR="/scratch/$USER/exps/owt2/cotformer_full_depth_lnmid_depthemb/cotformer_full_depth_lnmid_depthemb_lr0.001_bs8x16_seqlen256"
+ADM_DIR="/scratch/$USER/exps/owt2/adaptive_cotformer_mod_efficient_sigmoid_crw_lnmid_de_random_factor_single_final/adm_v2_lr0.001_bs8x16_seqlen256"
+
+CHECKPOINTS=(
+    "lncot_40k|$LNCOT_DIR|ckpt_40000.pt"
+    "lncot_60k|$LNCOT_DIR|ckpt.pt"
+    "adm_v2_40k|$ADM_DIR|ckpt_40000.pt"
+    "adm_v2_60k|$ADM_DIR|ckpt.pt"
+)
+
+# ========================= END CONFIGURATION ==================================
+
+# --- Self-submitting wrapper (runs on login node) ---
+if [ -z "$SLURM_JOB_ID" ]; then
+    PACKAGE_DIR="$(cd "$(dirname "$0")" && pwd)"
+    REPO_DIR="$(cd "$PACKAGE_DIR/../.." && pwd)"
+    source "$REPO_DIR/iridis/env.sh"
+
+    RUN_DIR=$(next_run_dir "$PACKAGE_DIR")
+
+    echo "=== <PKG_NAME> Analysis ==="
+    echo "  Script:      $ANALYSIS_SCRIPT"
+    echo "  Output dir:  $OUTPUT_DIR"
+    echo "  Checkpoints: ${#CHECKPOINTS[@]}"
+    echo "  Logs:        $RUN_DIR/"
+    echo ""
+    # Pre-flight: report which checkpoints will be analysed
+    for entry in "${CHECKPOINTS[@]}"; do
+        IFS='|' read -r tag path ckpt_file <<< "$entry"
+        if [ -f "$path/$ckpt_file" ]; then
+            echo "  [$tag] $path/$ckpt_file"
+        else
+            echo "  [$tag] $path/$ckpt_file  (WARNING: missing -- will be skipped)"
+        fi
+    done
+    echo ""
+    exec sbatch \
+        --output="$RUN_DIR/slurm_%j.out" \
+        --error="$RUN_DIR/slurm_%j.err" \
+        --mail-type=BEGIN,END,FAIL \
+        --mail-user="$NOTIFY_EMAIL" \
+        --export=ALL,REPO_DIR="$REPO_DIR",RUN_DIR="$RUN_DIR" \
+        "$0" "$@"
+fi
+
+# --- Actual job (runs on compute node) ---
+set -eo pipefail
+export PYTHONUNBUFFERED=1
+
+if [ -z "$REPO_DIR" ]; then
+    REPO_DIR="$HOME/CoTFormer"
+    echo "WARNING: REPO_DIR not set -- falling back to $REPO_DIR"
+fi
+
+source "$REPO_DIR/iridis/env.sh"
+
+# Create the aggregated output dir + caches. We do NOT pre-create the
+# per-checkpoint analysis_workspace/ dirs; the analysis script handles
+# those as a property of each ckpt_dir.
+mkdir -p "$OUTPUT_DIR" "$DATA_DIR" "$HF_HOME" "$TIKTOKEN_CACHE_DIR"
+
+echo "========================================="
+echo " <PKG_NAME> Analysis"
+echo " User:        $USER"
+echo " Node:        $(hostname)"
+echo " Job ID:      $SLURM_JOB_ID"
+echo " Script:      $ANALYSIS_SCRIPT"
+echo " Output:      $OUTPUT_DIR/"
+echo " Started:     $(date)"
+echo "========================================="
+
+# --- Environment ---
+module load conda
+eval "$(conda shell.bash hook)"
+conda activate "$CONDA_ENV_PREFIX"
+
+cd "$REPO_DIR"
+
+echo ""
+echo "GPU Info:"
+nvidia-smi --query-gpu=index,name,memory.total,driver_version --format=csv,noheader
+echo ""
+
+# --- Verify dataset (if analysis needs it) ---
+if [ ! -f "$DATA_DIR/openwebtext2/train.bin" ]; then
+    echo "WARNING: Dataset not found at $DATA_DIR/openwebtext2/train.bin"
+    echo "  Activation/data-driven analyses will fail. Weight-only analyses OK."
+fi
+
+# --- Run analysis on each checkpoint ---
+ANALYSED=0
+SKIPPED=0
+
+for entry in "${CHECKPOINTS[@]}"; do
+    IFS='|' read -r tag ckpt_dir ckpt_file <<< "$entry"
+
+    echo ""
+    echo "========================================="
+    echo " Analysing: $tag"
+    echo " Checkpoint: $ckpt_dir/$ckpt_file"
+    echo "========================================="
+
+    if [ ! -f "$ckpt_dir/summary.json" ]; then
+        echo "  SKIP: no summary.json. Training may not have completed."
+        SKIPPED=$((SKIPPED + 1))
+        continue
+    fi
+    if [ ! -f "$ckpt_dir/$ckpt_file" ]; then
+        echo "  SKIP: $ckpt_file not found."
+        SKIPPED=$((SKIPPED + 1))
+        continue
+    fi
+
+    # Build analysis args. Adjust per your script's CLI.
+    ANALYSIS_ARGS=(
+        --checkpoint "$ckpt_dir"
+        --checkpoint-file "$ckpt_file"
+        # --output-dir "$ckpt_dir/analysis_workspace"   # if script supports it
+        # --data_dir "$DATA_DIR"                        # for activation analyses
+    )
+
+    python "$ANALYSIS_SCRIPT" "${ANALYSIS_ARGS[@]}"
+
+    # --- Output triage: copy MEANINGFUL small outputs to the central
+    # OUTPUT_DIR with a per-checkpoint tag prefix. Leave large intermediate
+    # blobs in the ckpt dir workspace (regeneratable from the checkpoint).
+    # Adjust the glob pattern to match your analysis script's output
+    # filenames.
+    for f in "$ckpt_dir"/analysis_*.{json,png}; do
+        if [ -f "$f" ]; then
+            base=$(basename "$f")
+            cp "$f" "$OUTPUT_DIR/${tag}_${base}"
+            echo "  -> $OUTPUT_DIR/${tag}_${base}"
+        fi
+    done
+
+    ANALYSED=$((ANALYSED + 1))
+done
+
+echo ""
+echo "========================================="
+echo " Analysis complete: $(date)"
+echo " Analysed: $ANALYSED checkpoints"
+echo " Skipped:  $SKIPPED checkpoints"
+echo ""
+echo " Aggregated artefacts: $OUTPUT_DIR/"
+echo " Per-run SLURM logs:   $RUN_DIR/"
+echo "========================================="
+
+exit 0

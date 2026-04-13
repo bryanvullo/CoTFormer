@@ -141,28 +141,15 @@ fi
 source "$REPO_DIR/iridis/env.sh"
 
 # --- Checkpoint output directory ---
-# main.py constructs the checkpoint path as:
-#   results_base_folder / dataset / model / exp_name
-# = RESULTS_BASE / "owt2" / "cotformer_full_depth" / EXP_NAME
+# main.py constructs ckpt_path = RESULTS_BASE / dataset / model / exp_name
+# and creates it via os.makedirs. Job scripts must NOT mirror that formula
+# in bash — see docs/reprod-notes.md §C4 for why.
 #
-# We pre-create this FULL path here to catch permission errors early.
-# Without this, main.py's os.makedirs() can fail at runtime if a parent
-# directory (like cotformer_full_depth/) is owned by another team member
-# with restrictive permissions (mode 755 = no group write).
-RESULTS_BASE="/scratch/ab3u21/exps"
-# EXP_NAME determines the checkpoint subdir. Must stay IDENTICAL across
-# resubmissions for checkpoint resumption to work.
-# Bryan's preferred format: "BaseCot_${N_LAYER}L_${N_REPEAT}R"
+# EXP_NAME is the LEAF dir name. Must stay IDENTICAL across resubmissions
+# for --use_pretrained auto to find the previous checkpoint.
+RESULTS_BASE="/scratch/$USER/exps"
 EXP_NAME="table1_${N_LAYER}L_${N_REPEAT}rep_bs${BATCH_SIZE}x${ACC_STEPS}_seed${SEED}"
-CKPT_DIR="$RESULTS_BASE/owt2/cotformer_full_depth/$EXP_NAME"
-
-mkdir -p "$CKPT_DIR" "$DATA_DIR" "$HF_HOME" "$TIKTOKEN_CACHE_DIR" "$WANDB_DIR" || {
-    echo "ERROR: Cannot create checkpoint dir: $CKPT_DIR"
-    echo "  If 'cotformer_full_depth/' is owned by another user (check with"
-    echo "  'ls -la $RESULTS_BASE/owt2/'), ask them to 'chmod g+w' it,"
-    echo "  or create your exp subdir manually."
-    exit 1
-}
+mkdir -p "$RESULTS_BASE" "$DATA_DIR" "$HF_HOME" "$TIKTOKEN_CACHE_DIR" "$WANDB_DIR"
 
 echo "========================================="
 echo " CoTFormer Base Training (Table 1)"
@@ -177,7 +164,7 @@ echo " Eff. layers:   $((N_LAYER * N_REPEAT))"
 echo " Iterations:    $ITERATIONS"
 echo " Eff. BS:       $((BATCH_SIZE * ACC_STEPS))"
 echo " Seed:          $SEED"
-echo " Checkpoint:    every $CKPT_FREQ steps -> $CKPT_DIR"
+echo " Checkpoint:    every $CKPT_FREQ steps -> $RESULTS_BASE/owt2/cotformer_full_depth/$EXP_NAME"
 echo " Data dir:      $DATA_DIR"
 echo " Started:       $(date)"
 echo "========================================="
@@ -276,7 +263,7 @@ echo "========================================="
 echo " Training finished: $(date)"
 echo " Exit code: $EXIT_CODE"
 echo ""
-echo " Checkpoints: $CKPT_DIR"
+echo " Checkpoints: $RESULTS_BASE/owt2/cotformer_full_depth/$EXP_NAME"
 echo ""
 echo " If training did not finish (24h limit), just resubmit:"
 echo "   cd ~/CoTFormer && bash iridis/base-train/job-template.sh"

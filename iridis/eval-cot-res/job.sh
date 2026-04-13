@@ -27,7 +27,7 @@
 
 # ========================= CONFIGURATION ====================================
 
-CKPT_DIR="/scratch/ab3u21/exps/owt2/cotformer_full_depth/cotformer_full_depth_lr0.001_bs8x16_seqlen256"
+CKPT_DIR="/scratch/ab3u21/exps/owt2/cotformer_full_depth/cotformer_full_depth_res_only_lr0.001_bs8x16_seqlen256"
 
 # Only 40k checkpoint — Table 2 scope
 CKPTS=("40000")
@@ -143,10 +143,11 @@ echo "========================================="
 echo " All evaluations complete: $(date)"
 echo " Results in: $RUN_DIR/"
 echo ""
-echo " Paper target (Table 2, row 2):"
-echo "   40k: PPL ~24.51 (CoTFormer + Reserved Layers)"
+echo " Outputs per checkpoint:"
+echo "   eval_<step>k.txt               -- stdout log (loss, PPL, accuracy)"
+echo "   eval_summary_ckpt_<step>.json  -- full stats incl. val_loss_std,"
+echo "                                     n_batches, val_perplexity_ci95"
+echo "                                     (SEM = val_loss_std / sqrt(n_batches))"
 echo ""
-echo " Compare against:"
-echo "   24.48 -- plain CoTFormer 24x5 (Table 2 row 1)"
-echo "   24.11 -- LN-CoTFormer (Table 2 row 3)"
+echo " Paper target (Table 2 row 2): PPL ~24.51 (CoTFormer + Reserved Layers)"
 echo "========================================="

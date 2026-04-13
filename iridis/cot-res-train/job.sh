@@ -84,12 +84,12 @@ fi
 source "$REPO_DIR/iridis/env.sh"
 
 # --- Scratch-based output dirs (off home quota) ---
-EXPS_DIR="/scratch/ab3u21/exps"
-EXP_NAME="cotformer_full_depth_res_only_lr0.001_bs${BATCH_SIZE}x${ACC_STEPS}_seqlen256"
-# Use cotformer_full_depth_res_only/ (owned by ab3u21) instead of cotformer_full_depth/
-# (owned by tak1e25, mode 755 = no group write):
-CKPT_PARENT="$EXPS_DIR/owt2/cotformer_full_depth_res_only/$EXP_NAME"
-mkdir -p "$CKPT_PARENT" "$DATA_DIR" "$HF_HOME" "$TIKTOKEN_CACHE_DIR" "$WANDB_DIR"
+# main.py constructs ckpt_path = EXPS_DIR / dataset / model / exp_name
+# and creates it via os.makedirs. Do NOT mirror that formula in bash —
+# see docs/reprod-notes.md §C4 for the 52 GB-of-silently-misplaced-
+# checkpoints case study.
+EXPS_DIR="/scratch/$USER/exps"
+mkdir -p "$EXPS_DIR" "$DATA_DIR" "$HF_HOME" "$TIKTOKEN_CACHE_DIR" "$WANDB_DIR"
 
 echo "========================================="
 echo " CoTFormer + Reserved Layers Training"
@@ -157,7 +157,7 @@ TRAIN_ARGS=(
     --n_layer_end "$N_LAYER_END"
     --save_checkpoint_freq "$CKPT_FREQ"
     --results_base_folder "$EXPS_DIR"
-    --exp_name "cotformer_full_depth_lr0.001_bs${BATCH_SIZE}x${ACC_STEPS}_seqlen256"
+    --exp_name "cotformer_full_depth_res_only_lr0.001_bs${BATCH_SIZE}x${ACC_STEPS}_seqlen256"
     --use_pretrained auto
     --wandb
     --wandb_project rcotformer
@@ -188,7 +188,7 @@ echo "========================================="
 echo " Training finished: $(date)"
 echo " Exit code: $EXIT_CODE"
 echo ""
-echo " Checkpoints: $EXPS_DIR/owt2/cotformer_full_depth_res_only/"
+echo " Checkpoints: $EXPS_DIR/owt2/cotformer_full_depth/cotformer_full_depth_res_only_lr0.001_bs${BATCH_SIZE}x${ACC_STEPS}_seqlen256/"
 echo ""
 echo " If training incomplete, resubmit:"
 echo "   bash iridis/cot-res-train/job.sh"

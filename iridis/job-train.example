@@ -11,35 +11,54 @@
 #SBATCH --mail-type=ALL
 #SBATCH --mail-user=your_email@example.com
 ################################################################################
-# Slurm Job Script Template for Iridis X
+# SLURM Job Script Template for Iridis X -- TRAINING
+#
+# This is the TRAINING template. Siblings:
+#   job-eval.example      -- Evaluation jobs (single GPU, reads existing ckpts)
+#   job-analysis.example  -- Mechanistic analysis jobs (single GPU, reads ckpts,
+#                            writes structured outputs to run_N/)
+#
+# For cluster access, env setup, GPU partitions, submission and monitoring,
+# see the QuickStart section of README.md. This template only covers the
+# training-job-specific fill-in-the-blanks.
 #
 # HOW TO USE:
 #   1. Copy this file into your package directory:
-#        cp iridis/job.example iridis/<your-package>/job.sh
-#   2. Replace every <PKG_NAME> with your package directory name
-#   3. Fill in the CONFIGURATION section (model, hyperparams, etc.)
+#        cp iridis/job-train.example iridis/<your-package>/job.sh
+#   2. Replace every <PKG_NAME> with your package directory name,
+#      <MODEL_NAME> with your model class from models/__init__.py
+#   3. Fill in the CONFIGURATION section (architecture, hyperparams)
 #   4. Adjust SBATCH resources (GPU count, memory, time) for your workload
 #   5. Run from the repo root:
 #        cd ~/CoTFormer && bash iridis/<your-package>/job.sh
 #
 # SELF-SUBMITTING: Running with `bash` (not `sbatch`) auto-creates a run_N
 # log directory and submits via sbatch. Resubmit to auto-resume from the
-# latest checkpoint.
+# latest checkpoint (requires --use_pretrained auto, set below).
 #
-# FINDING CLUSTER INFORMATION:
-#   sinfo                                 # List all partitions, nodes, and state
-#   sinfo -p <partition> --Node --long    # Detailed info for a specific partition
-#   sacctmgr show assoc user=$USER        # Your account name (--account below)
-#   scontrol show partition <partition>    # Partition limits (max time, etc.)
+# ==============================================================================
+# CHECKPOINT PATH CONVENTION (single source of truth)
+# ==============================================================================
+# main.py constructs the checkpoint path INTERNALLY from CLI flags:
 #
-# KEY GPU PARTITIONS (as of Feb 2026):
-#   ecsstudents_l4   -- L4 GPUs (24GB), 1-day max, ECS students (ecsai01-06)
-#   a100             -- A100 GPUs (80GB), 2d12h max (rose02-13)
-#   scavenger_l4     -- L4 scavenger (12h max, preemptible)
-#   scavenger_4a100  -- A100 scavenger (12h max, preemptible)
+#     ckpt_path = results_base_folder / dataset / model / exp_name
 #
-# GPU NOTE: Use --gres=gpu:N (without type). Specifying a type (e.g. gpu:l4:1)
-# may silently fail if the type name doesn't match Slurm's gres config.
+# and creates it via os.makedirs on rank 0. Job scripts pass EXPS_DIR (via
+# --results_base_folder), <MODEL_NAME> (via --model), and EXP_NAME (via
+# --exp_name) as flags. main.py handles directory creation itself.
+#
+# DO NOT mirror that formula in bash with a CKPT_DIR variable. bash/Python
+# path mirrors inevitably drift; when they do, bash creates a ghost directory
+# and Python writes to a different location. The lncot-train and adm-train
+# packages are the canonical pattern: no bash path-construction, just flags.
+# See docs/reprod-notes.md §C4 for the full case study.
+#
+# TEAMMATE COLLISIONS: if your --model value is shared with a teammate on
+# scratch (e.g. `cotformer_full_depth`), your EXP_NAME must be distinctive
+# enough to land in a leaf dir they haven't touched. If os.makedirs fails
+# with PermissionError, the fix is social (ask them to chmod g+w the parent)
+# or by renaming your EXP_NAME, NEVER by adding a bash CKPT_DIR workaround.
+# ==============================================================================
 ################################################################################
 
 # ========================= CONFIGURATION ======================================
@@ -102,14 +121,16 @@ fi
 source "$REPO_DIR/iridis/env.sh"
 
 # --- Scratch-based output dirs (off home quota) ---
-# main.py constructs checkpoint path: EXPS_DIR / dataset / model / EXP_NAME.
-# Pre-create the FULL path here to catch permission errors early (not at step 39999).
-# If the model dir (e.g. cotformer_full_depth/) is owned by another user with
-# mode 755, mkdir fails -- fix by asking them to chmod g+w, or use a fresh parent.
+# See the "CHECKPOINT PATH CONVENTION" block at the top of this file. main.py
+# constructs and creates the ckpt_path itself from --results_base_folder,
+# --model, --exp_name (and --dataset). We only create EXPS_DIR here (and
+# the data/cache/wandb siblings) — NOT the full ckpt path.
 EXPS_DIR="/scratch/$USER/exps"
+# EXP_NAME is the LEAF dir name (last segment of ckpt_path). Used only in
+# --exp_name below and in echoes. MUST be stable across resubmissions for
+# --use_pretrained auto to resume correctly.
 EXP_NAME="<MODEL_NAME>_lr0.001_bs${BATCH_SIZE}x${ACC_STEPS}_seqlen256_seed${SEED}"
-CKPT_DIR="$EXPS_DIR/owt2/<MODEL_NAME>/$EXP_NAME"
-mkdir -p "$CKPT_DIR" "$DATA_DIR" "$HF_HOME" "$TIKTOKEN_CACHE_DIR" "$WANDB_DIR"
+mkdir -p "$EXPS_DIR" "$DATA_DIR" "$HF_HOME" "$TIKTOKEN_CACHE_DIR" "$WANDB_DIR"
 
 echo "========================================="
 echo " <PKG_NAME> Training"
@@ -230,7 +251,7 @@ echo "========================================="
 echo " Training finished: $(date)"
 echo " Exit code: $EXIT_CODE"
 echo ""
-echo " Checkpoints: $EXPS_DIR/owt2/<MODEL_NAME>/"
+echo " Checkpoints: $EXPS_DIR/owt2/<MODEL_NAME>/$EXP_NAME"
 echo ""
 echo " If training incomplete, resubmit:"
 echo "   bash iridis/<PKG_NAME>/job.sh"

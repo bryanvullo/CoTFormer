@@ -1,0 +1,189 @@
+#!/bin/bash
+#SBATCH --job-name=<PKG_NAME>_eval
+#SBATCH --partition=ecsstudents_l4
+#SBATCH --account=ecsstudents
+#SBATCH --nodes=1
+#SBATCH --ntasks=1
+#SBATCH --cpus-per-task=8
+#SBATCH --gres=gpu:1
+#SBATCH --mem=64G
+#SBATCH --time=04:00:00
+#SBATCH --mail-type=ALL
+#SBATCH --mail-user=your_email@example.com
+################################################################################
+# SLURM Job Script Template for Iridis X -- EVALUATION
+#
+# This is the EVAL template. Siblings:
+#   job-train.example     -- Training jobs (torchrun DDP, creates new ckpts)
+#   job-analysis.example  -- Mechanistic analysis jobs (reads ckpts, writes
+#                            structured analyses to run_N/)
+#
+# For cluster access, env setup, GPU partitions, submission and monitoring,
+# see the QuickStart section of README.md. This template only covers the
+# eval-job-specific fill-in-the-blanks.
+#
+# HOW TO USE:
+#   1. Copy this file into your package directory:
+#        cp iridis/job-eval.example iridis/<your-package>/job.sh
+#   2. Set CKPT_DIR to an EXISTING training checkpoint directory (full path).
+#   3. List CKPTS as the step values you want to evaluate (space-separated
+#      strings in the bash array).
+#   4. Replace <PKG_NAME> with your package directory name.
+#   5. Adjust SBATCH resources. Eval is typically single-GPU and 1-4h.
+#   6. Run from the repo root:
+#        cd ~/CoTFormer && bash iridis/<your-package>/job.sh
+#
+# SELF-SUBMITTING: Running with `bash` (not `sbatch`) auto-creates a run_N
+# log directory, validates the target checkpoint exists, and submits via
+# sbatch. Pre-flight validation on the login node fails fast before queueing.
+#
+# ==============================================================================
+# EVAL-vs-TRAIN PATH DIFFERENCE
+# ==============================================================================
+# Training jobs WRITE to $EXPS_DIR/dataset/model/exp_name (main.py constructs
+# this path from --results_base_folder, --model, --exp_name). Eval jobs READ
+# from an existing training directory; CKPT_DIR is hardcoded here as the FULL
+# absolute path to that existing directory.
+#
+# Eval scripts DO NOT construct the path from flags — the path must be known
+# at eval time (it's the training artefact). Eval artefacts (logs, figures,
+# summaries) land in RUN_DIR/ (this package's run_N/ log dir), NOT in
+# CKPT_DIR. The ONLY exception is `get_router_weights.py` + `get_ppl_per_mac.py`
+# which write auxiliary .npy into CKPT_DIR as a workspace (see eval-adm/job.sh
+# for the copy-out pattern).
+#
+# See docs/reprod-notes.md §C4 for why training jobs must never mirror
+# main.py's path construction in bash.
+# ==============================================================================
+################################################################################
+
+# ========================= CONFIGURATION ======================================
+
+# Full absolute path to an existing training checkpoint directory.
+CKPT_DIR="/scratch/$USER/exps/owt2/<MODEL_NAME>/<EXP_NAME>"
+
+# Checkpoint steps to evaluate. Each entry X produces eval artefacts from
+# the file $CKPT_DIR/ckpt_X.pt, or $CKPT_DIR/ckpt.pt if X's file is missing.
+CKPTS=("40000")
+
+# ========================= END CONFIGURATION ==================================
+
+# --- Self-submitting wrapper (runs on login node) ---
+if [ -z "$SLURM_JOB_ID" ]; then
+    PACKAGE_DIR="$(cd "$(dirname "$0")" && pwd)"
+    REPO_DIR="$(cd "$PACKAGE_DIR/../.." && pwd)"
+    source "$REPO_DIR/iridis/env.sh"
+
+    # Pre-flight: verify checkpoint dir exists and contains at least one
+    # of the requested checkpoints (or the final ckpt.pt).
+    FOUND_CKPT=false
+    for step in "${CKPTS[@]}"; do
+        if [ -f "$CKPT_DIR/ckpt_${step}.pt" ]; then
+            FOUND_CKPT=true
+        fi
+    done
+    if [ -f "$CKPT_DIR/ckpt.pt" ]; then
+        FOUND_CKPT=true
+    fi
+    if [ "$FOUND_CKPT" = false ]; then
+        echo "ERROR: No checkpoint found in $CKPT_DIR"
+        echo "  Ran training yet? See iridis/<train-package>/job.sh"
+        exit 1
+    fi
+    if [ ! -f "$CKPT_DIR/summary.json" ]; then
+        echo "ERROR: summary.json not found in $CKPT_DIR"
+        echo "  Training may not have completed; re-run the train job first."
+        exit 1
+    fi
+
+    RUN_DIR=$(next_run_dir "$PACKAGE_DIR")
+    echo "=== <PKG_NAME> Evaluation ==="
+    echo "  Checkpoint source: $CKPT_DIR"
+    echo "  Steps:             ${CKPTS[*]}"
+    echo "  Logs:              $RUN_DIR/"
+    echo ""
+    exec sbatch \
+        --output="$RUN_DIR/slurm_%j.out" \
+        --error="$RUN_DIR/slurm_%j.err" \
+        --mail-type=BEGIN,END,FAIL \
+        --mail-user="$NOTIFY_EMAIL" \
+        --export=ALL,REPO_DIR="$REPO_DIR",RUN_DIR="$RUN_DIR" \
+        "$0" "$@"
+fi
+
+# --- Actual job (runs on compute node) ---
+set -eo pipefail
+export PYTHONUNBUFFERED=1
+
+if [ -z "$REPO_DIR" ]; then
+    REPO_DIR="$HOME/CoTFormer"
+    echo "WARNING: REPO_DIR not set -- falling back to $REPO_DIR"
+fi
+
+source "$REPO_DIR/iridis/env.sh"
+
+echo "========================================="
+echo " <PKG_NAME> Evaluation"
+echo " User:        $USER"
+echo " Node:        $(hostname)"
+echo " GPU:         1x L4"
+echo " Job ID:      $SLURM_JOB_ID"
+echo " Checkpoint:  $CKPT_DIR"
+echo " Steps:       ${CKPTS[*]}"
+echo " Started:     $(date)"
+echo "========================================="
+
+# --- Environment ---
+module load conda
+eval "$(conda shell.bash hook)"
+conda activate "$CONDA_ENV_PREFIX"
+
+cd "$REPO_DIR"
+
+echo ""
+echo "GPU Info:"
+nvidia-smi --query-gpu=index,name,memory.total,driver_version --format=csv,noheader
+echo ""
+
+# --- Evaluate each checkpoint ---
+# Pattern: try ckpt_<step>.pt first, fall back to ckpt.pt (the final
+# checkpoint). Output goes to $RUN_DIR/eval_<step>k.txt.
+#
+# CRITICAL eval.py flags:
+#  --distributed_backend None  REQUIRED for standalone eval; without it,
+#                              eval.py crashes because summary.json stored
+#                              'nccl' from training and there's no RANK env
+#                              var outside torchrun.
+#  --output_dir $RUN_DIR       directs eval artefacts into this run's log
+#                              dir (not the ckpt dir). Without this, eval.py
+#                              can silently overwrite a prior run's output.
+for step in "${CKPTS[@]}"; do
+    CKPT_FILE="$CKPT_DIR/ckpt_${step}.pt"
+    if [ ! -f "$CKPT_FILE" ]; then
+        CKPT_FILE="$CKPT_DIR/ckpt.pt"
+        echo "Note: ckpt_${step}.pt not found, using ckpt.pt"
+    fi
+    OUT_FILE="$RUN_DIR/eval_${step/000/k}.txt"
+
+    echo ""
+    echo "========================================="
+    echo " Evaluating: $(basename $CKPT_FILE)"
+    echo " Output:     $OUT_FILE"
+    echo "========================================="
+
+    python eval.py \
+        --checkpoint "$CKPT_FILE" \
+        --config_format base \
+        --distributed_backend None \
+        --output_dir "$RUN_DIR" \
+        2>&1 | tee "$OUT_FILE"
+
+    echo ""
+    echo "--- $(basename $CKPT_FILE) DONE ---"
+done
+
+echo ""
+echo "========================================="
+echo " All evaluations complete: $(date)"
+echo " Results in: $RUN_DIR/"
+echo "========================================="

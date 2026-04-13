@@ -10,6 +10,7 @@
   - [Uploading and Downloading](#uploading-and-downloading)
   - [GPU Partitions](#gpu-partitions)
   - [Submitting and Monitoring](#submitting-and-monitoring)
+  - [Job Templates](#job-templates)
 - [Dataset Setup](#dataset-setup)
 - [Training](#training)
   - [SLURM Job Configuration](#slurm-job-configuration)
@@ -168,6 +169,35 @@ seff <job_id>                       # View post-run efficiency
 SLURM `.out`/`.err` files land in `iridis/<package>/run_N/`, numbered incrementally per run. Non-SLURM outputs (checkpoints, metrics) go to `/scratch/ab3u21/job-outputs/<USER>-<JOB_ID>-<JOB_NAME>/`.
 
 **Email notifications:** SLURM jobs email `<username>@soton.ac.uk` on completion or failure. To override, set `NOTIFY_EMAIL` in `~/.bash_aliases` before sourcing `env.sh`.
+
+**Cluster inspection commands** (useful when tuning `#SBATCH` directives):
+
+```bash
+sinfo                                 # List all partitions, nodes, and state
+sinfo -p <partition> --Node --long    # Detailed info for a specific partition
+sacctmgr show assoc user=$USER        # Your account name (for --account)
+scontrol show partition <partition>   # Partition limits (max time, GRES, etc.)
+```
+
+**GPU `--gres` note:** use `--gres=gpu:N` without a type suffix. Specifying a type (e.g. `gpu:l4:1`) may silently fail if the type name doesn't match SLURM's gres config.
+
+### Job Templates
+
+New packages under `iridis/` start from one of three reusable templates. Each template handles only the job-specific fill-in-the-blanks; cluster access, environment setup, and submission workflow are covered by this QuickStart section.
+
+| Template | Purpose | Typical resources |
+|----------|---------|-------------------|
+| `iridis/job-train.example` | Training: torchrun DDP, creates new checkpoints under `/scratch/$USER/exps/`, auto-resume via `--use_pretrained auto` | 2 GPUs, 24h, 128 GB |
+| `iridis/job-eval.example` | Evaluation: single-GPU, reads an existing training checkpoint directory, writes logs/JSON to `run_N/` | 1 GPU, 1-4h, 64 GB |
+| `iridis/job-analysis.example` | Mechanistic analysis: single-GPU, reads ckpts, writes structured artefacts (figures + small scalars → `run_N/`, large workspace blobs → `/scratch/.../analysis_workspace/`) | 1 GPU, 2-8h, 64 GB |
+
+Copy the relevant template to a new package directory and edit the `CONFIGURATION` block:
+
+```bash
+cp iridis/job-train.example iridis/my-new-experiment/job.sh
+# Edit the CONFIGURATION block, then:
+bash iridis/my-new-experiment/job.sh
+```
 
 ## Dataset Setup
 

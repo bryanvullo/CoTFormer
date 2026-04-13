@@ -994,6 +994,115 @@ but should not be extrapolated to Section 4.2's 60k runs.
 
 ---
 
+## C4. Never Mirror `main.py`'s Checkpoint Path in Bash (Infrastructure Trap)
+
+**Impact:** Bash-side pre-creation of the checkpoint directory diverges from
+`main.py`'s Python-side path construction, producing ghost directories,
+silent wrong-location writes, and near-miss data loss. Affected our
+`cot-res-train` package over 3 iterations before the root cause was
+identified.
+
+**Status:** Resolved. The canonical pattern is `iridis/lncot-train/job.sh`
+and `iridis/adm-train/job.sh`: neither script constructs any bash-side path
+variable. All checkpoint directory creation is delegated to `main.py:122`'s
+`os.makedirs(ckpt_path)` on rank 0.
+
+### The trap
+
+`main.py:119` builds:
+
+```python
+ckpt_path = os.path.join(
+    args.results_base_folder, args.dataset, args.model, args.exp_name
+)
+```
+
+and creates it via `os.makedirs(ckpt_path)` at line 122. This is the single
+source of truth for where a training job writes checkpoints.
+
+The trap appears when a job script introduces a bash-side `CKPT_DIR` (or
+`CKPT_PARENT`) variable to "pre-create the path for early permission
+failure detection." The bash formula and the Python formula then become
+two independent path-construction sites that must be kept in sync
+by eye — and eventually diverge.
+
+### The case study: `cot-res-train` over 4 weeks, 3 occurrences
+
+Our `cot-res-train` package trains `cotformer_full_depth` with reserved
+layers (Table 2, row 2). The `cotformer_full_depth` model-class name is
+also used by another team member (`tak1e25`) for unrelated experiments,
+and their runs had created `/scratch/ab3u21/exps/owt2/cotformer_full_depth/`
+with group-write mode 755 (no write for others in group `fp`).
+
+| Occurrence | Bash-side "fix" | What happened |
+|------------|-----------------|---------------|
+| 1 | Added `mkdir -p "$EXPS_DIR/owt2/cotformer_full_depth/$EXP_NAME"` in bash before `torchrun`. | Bash `mkdir -p` cannot override parent directory permissions. The mkdir failed with EACCES on tak's 755 parent. Same as main.py would have failed — just at login-node stage instead of compute-node. |
+| 2 | Changed bash target parent to `cotformer_full_depth_res_only/` (owned by Abe). | Bash `mkdir -p` succeeded, creating a ghost directory in the new parent. BUT `--model cotformer_full_depth` and `--exp_name cotformer_full_depth_lr0.001_bs8x16_seqlen256` were left unchanged on the CLI, so `main.py:119` kept building the Python path at `/scratch/ab3u21/exps/owt2/cotformer_full_depth/cotformer_full_depth_lr.../` — still on tak's 755 parent. PermissionError at `os.makedirs`. |
+| 3 | Hoped tak would `chmod g+w` (which they eventually did, 2026-04-12). | `main.py:122`'s `os.makedirs` succeeded on the chmod'd parent and silently wrote 21 checkpoints (52 GB) into the tak-owned `cotformer_full_depth/cotformer_full_depth_lr0.001_bs8x16_seqlen256/` directory — NOT the `cotformer_full_depth_res_only/` parent that bash had been mkdir'ing into. The bash ghost directories stayed empty. The operator concluded the checkpoints had been deleted by a teammate. Forensic `ls` revealed the real location 4 weeks after the job started writing there. |
+
+### Why `lncot-train` and `adm-train` never hit this
+
+Neither script defines any bash-side `CKPT_DIR`/`CKPT_PARENT`/`EXP_NAME`
+variable for path construction. Both pass `--model`, `--exp_name`, and
+`--results_base_folder` as CLI flags and let `main.py:122`'s
+`os.makedirs` create the full path. Because their `--model` values
+(`cotformer_full_depth_lnmid_depthemb`, `adaptive_cotformer_mod_efficient_sigmoid_crw_lnmid_de_random_factor_single_final`)
+are unique to the operator's own experiments, the parent directory was
+created by the operator's first run ever with the operator's own umask
+— no collision possible, no permission trap.
+
+### Canonical pattern
+
+```bash
+# Training job script — NO bash-side CKPT_DIR, NO parallel path formula.
+EXPS_DIR="/scratch/$USER/exps"
+mkdir -p "$EXPS_DIR" "$DATA_DIR" "$HF_HOME" "$TIKTOKEN_CACHE_DIR" "$WANDB_DIR"
+
+TRAIN_ARGS=(
+    # ...
+    --model <model_class>
+    --results_base_folder "$EXPS_DIR"
+    --exp_name "<unique_leaf_dir_name>"
+    # ...
+)
+
+torchrun --nproc_per_node="$N_GPUS" main.py "${TRAIN_ARGS[@]}"
+```
+
+If `os.makedirs` raises `PermissionError` because the intermediate
+`<model_class>/` directory is owned by a teammate with mode 755, the
+correct resolutions are:
+
+1. **Social:** ask the teammate to `chmod g+w <model_class>/` (the
+   preferred fix — it takes one chmod and unblocks the shared parent
+   for everyone in the group).
+2. **Structural (rename):** choose an `--exp_name` that lands in a leaf
+   directory name the teammate has not touched. The CoTFormer model
+   registry is keyed on `args.model` strings, so you cannot change the
+   Python class, but the LEAF directory name (`args.exp_name`) is fully
+   under your control. Example: change
+   `cotformer_full_depth_lr0.001_bs8x16_seqlen256` to
+   `cotformer_full_depth_res_only_lr0.001_bs8x16_seqlen256` so the leaf
+   directory is distinctive.
+
+**Never** "solve" this by adding a bash `CKPT_DIR`/`CKPT_PARENT` that
+constructs a different parent from what `main.py:119` will use. The bash
+and Python formulas MUST point at the same directory or the bash
+formula must not exist.
+
+### Cross-references
+
+- `iridis/lncot-train/job.sh`, `iridis/adm-train/job.sh` — canonical
+  training-script pattern (no bash `CKPT_DIR`, just CLI flags).
+- `iridis/job-train.example` — reusable template carrying this convention.
+- `iridis/job-eval.example`, `iridis/job-analysis.example` — sibling
+  templates for eval/analysis packages (which DO hardcode `CKPT_DIR` as
+  the full path to an existing training dir, because they only READ).
+- README.md QuickStart "Submitting and Monitoring" — cluster access,
+  partitions, and general submission workflow.
+
+---
+
 ## References
 
 [cotformer-paper]: https://openreview.net/forum?id=7igPXQFupX
