@@ -260,6 +260,14 @@ class GPTBase(nn.Module):
         self.tokenizer = tiktoken.get_encoding("gpt2")
         self.n_repeat = config.n_repeat
 
+        if config.depth_embedding == "linear_learned":
+            self.depth_emb = LinearLearnedDepthPositionalEncoder(config)
+        elif config.depth_embedding == "learned":
+            self.depth_emb = LearnedDepthPositionalEncoder(config)
+        elif config.depth_embedding is None:
+            self.depth_emb = None
+        else:
+            raise NotImplementedError(config.depth_embedding)
         self.lm_cache = caches.get_cache(config.lm_cache)(config)
         self.transformer = nn.ModuleDict(dict(
             wte = nn.Embedding(config.vocab_size, config.n_embd),
@@ -358,9 +366,13 @@ class GPTBase(nn.Module):
             block.attn.init_cache(total_expected_length)
         if not self.training:
             x_into_mid = x.clone().detach() # We log the x going into mid blocks
-            diag_metrics['logit_lens'] = {}
-            lens_x_begin = self.transformer.ln_f(x_into_mid)
-            diag_metrics['logit_lens']['h_begin'] = self.lm_head(lens_x_begin).cpu()
+            # diag_metrics['logit_lens'] = {}
+            # lens_x_begin = self.transformer.ln_f(x_into_mid)
+            # diag_metrics['logit_lens']['h_begin'] = self.lm_head(lens_x_begin).cpu()
+            # Inside forward(), before the repeat loop:
+            saved_hidden_states = {}
+            num_mid_blocks = len(self.transformer.h_mid)
+            halfway_idx = num_mid_blocks // 2
         sum_active = 0
         # for rep_idx in range(1, self.n_repeat+1):
             
@@ -374,8 +386,15 @@ class GPTBase(nn.Module):
             if self.depth_emb is not None:
                 x = self.depth_emb(x, indices=x.new_full((B, T), self.n_repeat - rep_idx, dtype=torch.long))
 
-            for block in self.transformer.h_mid:
+            for block_idx, block in enumerate(self.transformer.h_mid):
                 x = block(x, pos_emb_closure, cache_context, start_index=index_shift)        # for logit lens or something similar take the current hidden state x, pass it through the final layer norm (i assume self.transformer.ln_f(x)) and shove that through the lm head prematurely (we do this to empirically measure representations getting more mature or ritcher or whatever you wanna call it)
+                if log_metrics and not self.training:
+                    # Capture halfway through the repeat (e.g., 1.5)
+                    if block_idx == halfway_idx - 1:
+                        saved_hidden_states[f'rep_{rep_idx}.5'] = x.clone().detach()
+                    # Capture at the end of the repeat (e.g., 1.0)
+                    elif block_idx == num_mid_blocks - 1:
+                        saved_hidden_states[f'rep_{rep_idx}.0'] = x.clone().detach()
             if log_metrics or not self.training:
                 x_outof_mid = x.clone().detach()
                 curr_x_last = x[:, -1, :].clone().detach() # we take the last token in the sequence 
@@ -390,10 +409,10 @@ class GPTBase(nn.Module):
 
 
                 prev_x_last = curr_x_last
-                if not self.training:
-                    # We need the whole sequence [B, T, D] for the heatmaps, so we don't slice [:, -1, :]
-                    lens_x_rep = self.transformer.ln_f(x.clone().detach())
-                    diag_metrics['logit_lens'][f'rep_{rep_idx}'] = self.lm_head(lens_x_rep).cpu()
+                # if not self.training:
+                #     # We need the whole sequence [B, T, D] for the heatmaps, so we don't slice [:, -1, :]
+                #     lens_x_rep = self.transformer.ln_f(x.clone().detach())
+                #     diag_metrics['logit_lens'][f'rep_{rep_idx}'] = self.lm_head(lens_x_rep).cpu()
 
             if self.training and x.requires_grad and log_metrics:
                 def make_hook(current_rep):
@@ -485,12 +504,15 @@ class GPTBase(nn.Module):
 
         for block in self.transformer.h_end:
             x = block(x, pos_emb_closure, cache_context, start_index=index_shift)
+            
+
+        if not self.training:
+                saved_hidden_states[f'final'] = x.clone().detach()
+
+            
+            
         
         x = self.transformer.ln_f(x)
-      
-        if not self.training:
-            diag_metrics['logit_lens']['h_end'] = self.lm_head(x).cpu()
-        
 
         if use_cache:
             x = self.lm_cache.get_final_logits(x)
@@ -505,6 +527,30 @@ class GPTBase(nn.Module):
             loss = None
             cross_entropy_loss = None
         logits = logits if get_logits else None
+        if log_metrics and not self.training and logits is not None:
+            # 1. Get Final Distribution
+            final_probs = F.softmax(logits, dim=-1) 
+            
+            # 2. Iterate through saved intermediate states
+            for step_name, saved_x in saved_hidden_states.items():
+                # Memory Optimization: Match the temporal slicing of the final logits
+                if targets is None:
+                    saved_x = saved_x[:, [-1], :] # Only compute JSD on the last token!
+                
+                # Project to vocabulary using ln_f
+                step_logits = self.lm_head(self.transformer.ln_f(saved_x))
+                step_probs = F.softmax(step_logits, dim=-1)
+                
+                # Calculate JSD (Symmetric, bounded) against final_probs
+                m = 0.5 * (step_probs + final_probs)
+                jsd = 0.5 * F.kl_div(m.log(), step_probs, reduction='batchmean') + \
+                        0.5 * F.kl_div(m.log(), final_probs, reduction='batchmean')
+                        
+                diag_metrics[f'jsd_to_final_{step_name}'] = jsd.item()
+                
+                # Explicitly free up the heavy VRAM tensors
+                del step_logits, step_probs, m
+
         return {'logits': logits, 
                 'loss': loss, 
                 'cross_entropy_loss': cross_entropy_loss,
