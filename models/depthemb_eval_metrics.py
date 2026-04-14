@@ -325,8 +325,10 @@ class GPTBase(nn.Module):
         b, t = idx.size()
         diag_metrics = {} # We will pack everything into a dict to keep it clean
         assert t <= self.config.sequence_length, f"Cannot forward sequence of length {t}, block size is only {self.config.sequence_length}"
-        if log_metrics:
+        if log_metrics and self.training:
             self.backward_metrics = {}
+            self.forward_metrics = {}
+        elif log_metrics and not self.training:
             self.forward_metrics = {}
 
         prev_x_last = None
@@ -384,6 +386,10 @@ class GPTBase(nn.Module):
 
 
                 prev_x_last = curr_x_last
+                if not self.training:
+                    # We need the whole sequence [B, T, D] for the heatmaps, so we don't slice [:, -1, :]
+                    lens_x_rep = self.transformer.ln_f(x.clone().detach())
+                    diag_metrics['logit_lens'][f'rep_{rep_idx}'] = self.lm_head(lens_x_rep).cpu()
 
             if self.training and x.requires_grad and log_metrics:
                 def make_hook(current_rep):

@@ -363,6 +363,7 @@ class GPTBase(nn.Module):
 
                 prev_x_last = curr_x_last
 
+
             if self.training and x.requires_grad and log_metrics:
                 def make_hook(current_rep):
                     def hook(grad):
