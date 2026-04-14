@@ -128,7 +128,6 @@ def evaluate(model, data, iterations, acc_steps, batch_size, sequence_length, di
             with type_ctx:
                 outputs = model(x, targets=y, get_logits=True, log_metrics=True)
             
-            b_sim_list.append(outputs.get('sim_of_xs', 0.0) or 0.0)
             
 
             raw_model = distributed_backend.get_raw_model(model)
@@ -174,12 +173,19 @@ def evaluate(model, data, iterations, acc_steps, batch_size, sequence_length, di
     stats['eval_per_batch_time'] = eval_per_batch_time
     if avg_depth_list:
         stats['average_depth'] = torch.as_tensor(avg_depth_list).float().mean().item()
-
+    if stepwise_cos_dist:
+        for key, val in stepwise_cos_dist.items():
+            stats[f'diag/{key}'] = np.mean(val)
+    if stepwise_var:
+        for key, val in stepwise_var.items():
+            stats[f'diag/{key}'] = np.mean(val)
+    
     # --- NEW: Average the diagnostic metrics into stats ---
     stats['diag/b_sim'] = np.mean(b_sim_list) if b_sim_list else 0.0
     stats['diag/v_in'] = np.mean(v_in_list) if v_in_list else 0.0
     stats['diag/v_out'] = np.mean(v_out_list) if v_out_list else 0.0
     stats['diag/macro_rep_entropy'] = np.mean(macro_rep_entropy_list) if macro_rep_entropy_list else 0.0
+
     
     if macro_budget_list: stats['diag/macro_budget'] = np.mean(macro_budget_list, axis=0)
     if macro_in_entropy_list: stats['diag/macro_in_entropy'] = np.mean(macro_in_entropy_list, axis=0)
@@ -278,7 +284,19 @@ def main(args):
                   extra_args=args)
 
     print(stats)
-    
+    print("\n--- Evaluation Complete ---")
+    for k, v in stats.items():
+        if isinstance(v, float):
+            print(f"{k}: {v:.4f}")
+        else:
+            print(f"{k}: {v}")
+
+    if distributed_backend.is_master_process():
+        raw_model = distributed_backend.get_raw_model(model) 
+        # Using "." saves it directly to your SLURM RUN_DIR
+        run_qualitative_sweep(raw_model, args.device, type_ctx, save_dir=".")
+
+
     distributed_backend.finalize()
     return stats
 

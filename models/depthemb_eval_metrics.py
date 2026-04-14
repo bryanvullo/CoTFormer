@@ -275,6 +275,7 @@ class GPTBase(nn.Module):
             h_end = nn.ModuleList( 
                 [Block(config, self.lm_cache) 
                 for _ in range(config.n_layer - config.n_layer_end, config.n_layer)]),
+            ln_mid = nn.Identity() if config.disable_ln_mid else LayerNorm(config.n_embd, bias=config.bias),
             ln_f = LayerNorm(config.n_embd, bias=config.bias),
         ))
 
