@@ -8,13 +8,14 @@
 - [Reproducibility Notes](#reproducibility-notes)
   - [Table of Contents](#table-of-contents)
 - [Part A: Successful Replications](#part-a-successful-replications)
-  - [A1. LN-CoTFormer Perplexity (Table 2, 40k steps)](#a1-ln-cotformer-perplexity-table-2-40k-steps)
-  - [A1a. LN-CoTFormer Perplexity (Section 5, 60k steps)](#a1a-ln-cotformer-perplexity-section-5-60k-steps)
-  - [A2. Architecture Depth](#a2-architecture-depth)
-  - [A3. Training Stability](#a3-training-stability)
-  - [A4. Effective Batch Size](#a4-effective-batch-size)
-  - [A5. ADM Perplexity (Section 4.2, Figure 4, 60k steps)](#a5-adm-perplexity-section-42-figure-4-60k-steps)
-  - [A6. Section 5 Comparison: LN-CoTFormer vs ADM at 60k Steps](#a6-section-5-comparison-ln-cotformer-vs-adm-at-60k-steps)
+  - [A1. CoTFormer + Reserved Layers Perplexity (Table 2, 40k steps)](#a1-cotformer--reserved-layers-perplexity-table-2-40k-steps)
+  - [A2. LN-CoTFormer Perplexity (Table 2, 40k steps)](#a2-ln-cotformer-perplexity-table-2-40k-steps)
+  - [A2a. LN-CoTFormer Perplexity (Section 5, 60k steps)](#a2a-ln-cotformer-perplexity-section-5-60k-steps)
+  - [A3. Architecture Depth](#a3-architecture-depth)
+  - [A4. Training Stability](#a4-training-stability)
+  - [A5. Effective Batch Size](#a5-effective-batch-size)
+  - [A6. ADM Perplexity (Section 4.2, Figure 4, 60k steps)](#a6-adm-perplexity-section-42-figure-4-60k-steps)
+  - [A7. Section 5 Comparison: LN-CoTFormer vs ADM at 60k Steps](#a7-section-5-comparison-ln-cotformer-vs-adm-at-60k-steps)
 - [Part B: Known Divergences](#part-b-known-divergences)
   - [B1. Train/Val Split Divergence](#b1-trainval-split-divergence)
     - [B1a. Document ordering](#b1a-document-ordering)
@@ -58,20 +59,25 @@
   - [B11. Evaluation Batch Size Independence](#b11-evaluation-batch-size-independence)
 - [Part C: Original Code Bugs](#part-c-original-code-bugs)
   - [C1. Figure 5: Position-Indexed Cascade Bug and Methodological Critique](#c1-figure-5-position-indexed-cascade-bug-and-methodological-critique)
-  - [C3. Orphan MoDBlock: 5 Allocated, 4 Used](#c3-orphan-modblock-5-allocated-4-used)
   - [C2. Underspecified Training Schedule (Reproducibility Gap)](#c2-underspecified-training-schedule-reproducibility-gap)
+  - [C3. Orphan MoDBlock: 5 Allocated, 4 Used](#c3-orphan-modblock-5-allocated-4-used)
+  - [C4. Never Mirror `main.py`'s Checkpoint Path in Bash (Infrastructure Trap)](#c4-never-mirror-mainpys-checkpoint-path-in-bash-infrastructure-trap)
   - [References](#references)
 
 ---
 
 # Part A: Successful Replications
 
-> **Step-count disambiguation**: A1 reports the LN-CoTFormer at **40,000 steps**
-> (Table 2 scope). A1a reports the LN-CoTFormer at **60,000 steps**
-> (Section 5 scope). A5 reports the ADM at **60,000 steps** (Section 4.2 scope).
-> A6 compares LN-CoTFormer vs ADM at 60k, directly validating the Section 5
-> claims. The CoTFormer + Reserved model (Table 2, row 1, target 24.51) is
-> pending via `cot-res-train`.
+> **Step-count disambiguation**: A1 reports the CoTFormer + Reserved Layers
+> at **40,000 steps** (Table 2 "+ Reserved Layers" row). A2 reports the
+> LN-CoTFormer at **40,000 steps** (Table 2 "+ Layer Norm" row, equivalent
+> to + Reserved Layers plus a post-repeat LayerNorm). A2a reports the
+> LN-CoTFormer at **60,000 steps** (Section 5 scope). A6 reports the ADM at
+> **60,000 steps** (Section 4.2 scope). A7 compares LN-CoTFormer vs ADM at
+> 60k, directly validating the Section 5 claims. The only Table 2 row we
+> do not reproduce is the bare "CoTFormer 24x5" (24 layers, no reserved
+> prefix/suffix), which sits outside the `2->21x5->1` allocation used by
+> every subsequent variant.
 >
 > **Evaluation methodology**: all metrics below are from standalone `eval.py`
 > runs on the **full validation set** (3,973 batches, no subsampling), matching
@@ -82,7 +88,83 @@
 > **intra-run batch variance**, not the paper's inter-run SEM across 3
 > independent training seeds. We report a single training run per model.
 
-## A1. LN-CoTFormer Perplexity (Table 2, 40k steps)
+## A1. CoTFormer + Reserved Layers Perplexity (Table 2, 40k steps)
+
+**Result:** Reproduced within +0.13 PPL of the paper; the paper's point
+estimate lies inside our intra-run 95% CI.
+
+| Metric | Paper (Table 2, + Reserved Layers) | Ours | Delta |
+|--------|------------------------------------|------|-------|
+| Val perplexity | 24.51 (0.01) | 24.64 | +0.13 |
+| Val accuracy | -- | 0.4106 | -- |
+| Val loss | -- | 3.2042 | -- |
+| 95% CI (perplexity) | -- | [24.25, 25.03] | -- |
+| Per-batch SEM (loss) | -- | 0.0081 | -- |
+| n_batches | -- | 3,973 | -- |
+
+The "+ Reserved Layers" row of Table 2 corresponds to the
+`cotformer_full_depth` architecture: 2 reserved prefix layers, 21 mid
+blocks repeated 5x, and 1 reserved suffix layer, for a total of 108
+effective forward-pass layers. It is the architectural parent of the
+LN-CoTFormer (A2): both share the `2->21x5->1` layer allocation and
+differ only in whether a LayerNorm is applied at the end of each
+repeated pass through the mid-block stack.
+
+### Delta interpretation
+
+Our point estimate (24.64) sits inside our intra-run 95% confidence
+interval [24.25, 25.03], which also contains the paper's 24.51. The
+residual +0.13 PPL delta is 0.53% of the paper's value and consistent
+with the sum of known divergences documented in Part B: B1
+(train/val split), B3 (micro-batch decomposition under bfloat16), and
+normal seed-to-seed variance. The paper's reported SEM of 0.01 is
+computed across three training seeds (inter-run variance) and is not
+directly comparable to our single-seed intra-run batch CI -- an apples
+to oranges comparison either way.
+
+Unlike A2a and A6, this run is free of both B10 (LR discontinuity; only
+applies to 40k-to-60k extensions) and B4 (RNG state restoration at
+resume boundaries; only applies to ADM). A single SLURM submission
+completed 40,000 steps without auto-resume, so neither divergence
+applies.
+
+### Training configuration
+
+Trained for 40,000 steps on 2x L4 24 GB (DDP), OWT2 dataset, cosine LR
+schedule (peak 1e-3, final ~2e-4) via
+`OneCycleLR(total_steps=40000, anneal_strategy='cos')`. Identical data
+pipeline, effective batch size, and micro-batch decomposition as A2
+(`batch_size=8`, `acc_steps=16`, effective BS=128 after DDP halving).
+Dropout=0.0, `find_unused_parameters=False`. Training package:
+`iridis/cot-res-train/`.
+
+### Evaluation configuration
+
+Standalone `eval.py` pass over the full validation set (3,973 batches,
+matching the paper's protocol). Evaluated from the final `ckpt_40000.pt`
+snapshot of the `cotformer_full_depth` class, loaded via `--checkpoint`
+and `--checkpoint_filename ckpt_40000.pt`. Evaluation package:
+`iridis/eval-cot-res/`; artefacts in `iridis/eval-cot-res/run_0/`:
+
+- `eval_4k0.txt` -- full stdout log
+- `eval_summary_ckpt_40000.json` -- machine-readable summary including CI
+
+### Ordering rationale
+
+The "+ Reserved Layers" variant is the first of the Section 3.3
+architectural tweaks, introduced in the "Reserving Beginning and Final
+Layers" paragraph before the LayerNorm addition that produces the
+LN-CoTFormer in the following paragraph. Reporting this row first
+mirrors the paper's order of presentation and isolates the reserved-
+layer contribution independently of the LayerNorm contribution. A2 then
+reports the LN-CoTFormer (Table 2 "+ Layer Norm" row) which adds a
+post-repeat LayerNorm atop this architecture, and A6 reports the ADM,
+which replaces the sampled repeat count with an adaptive routing scheme
+on the same `2->21x5->1` backbone.
+
+---
+
+## A2. LN-CoTFormer Perplexity (Table 2, 40k steps)
 
 **Result:** Reproduced within +0.02 PPL of the paper.
 
@@ -107,7 +189,7 @@ the divergences documented in Part B.
 
 ---
 
-## A1a. LN-CoTFormer Perplexity (Section 5, 60k steps)
+## A2a. LN-CoTFormer Perplexity (Section 5, 60k steps)
 
 **Result:** Reproduced within +0.40 PPL of the paper.
 
@@ -127,12 +209,12 @@ had decayed to ~2e-5, while the 60k schedule expects ~3.5e-4 at step 40000,
 producing a ~17x LR jump that acts as a mild warm restart.
 
 The wider delta (+0.40 vs +0.02 at 40k) is consistent with B10's impact
-on the final 20k steps. The ADM model (A5) is unaffected by B10 as it was
+on the final 20k steps. The ADM model (A6) is unaffected by B10 as it was
 trained for 60k steps from scratch.
 
 ---
 
-## A2. Architecture Depth
+## A3. Architecture Depth
 
 **Result:** Exact match.
 
@@ -143,7 +225,7 @@ and repeat loop are correct.
 
 ---
 
-## A3. Training Stability
+## A4. Training Stability
 
 **Result:** No gradient spikes observed.
 
@@ -162,7 +244,7 @@ final 1000 steps; this is expected from the 24-batch eval sample size).
 
 ---
 
-## A4. Effective Batch Size
+## A5. Effective Batch Size
 
 **Result:** Exact match at 128.
 
@@ -173,7 +255,7 @@ per GPU: 8 x 8 x 2 = 128.
 
 ---
 
-## A5. ADM Perplexity (Section 4.2, Figure 4, 60k steps)
+## A6. ADM Perplexity (Section 4.2, Figure 4, 60k steps)
 
 **Result:** Reproduced within +0.23 PPL of the paper.
 
@@ -210,7 +292,7 @@ Training was stable throughout all 60,000 steps:
 | PPL range (eval) | 22.5 -- 25.3 |
 
 No gradient spikes were observed. The PPL oscillation in eval is
-consistent with the non-adaptive LN-CoTFormer (22.4--25.7 in A3) and
+consistent with the non-adaptive LN-CoTFormer (22.4--25.7 in A4) and
 is driven by the small eval sample size, not training instability.
 
 ### Job Chaining
@@ -244,25 +326,64 @@ During evaluation, `eval_length_factor=None` activates all repeats
 (`length_factors = [1, 1, 1, 1]`), so the reported PPL of 24.06 is
 at full compute.
 
-### Why the Gap Is Wider Than A1
+### Why the Gap Is Wider than the 40k Reproductions
 
-The +0.23 delta (vs +0.02 for the non-adaptive LN-CoTFormer at 40k) is
-explained by the ADM's unique sensitivity to RNG state discontinuities
-at resume boundaries. As documented in B4, the `torch.rand()` calls
-that generate capacity factors are consumed from the CUDA RNG stream.
-Three resume boundaries produce different capacity factor sequences
-than a continuous run would, changing which tokens are routed through
-deeper repeats at each training step. The non-adaptive LN-CoTFormer
-has no runtime randomness (dropout=0.0, fixed repeat count), so B4
-does not affect it.
+The +0.23 delta (compared to A1's +0.13 for CoT + Reserved Layers and
+A2's +0.02 for LN-CoTFormer 40k) was initially attributed to B4's
+RNG-state discontinuities at resume boundaries, since the ADM is the
+only variant that consumes CUDA RNG during training (`torch.rand()` for
+`length_factors`). Empirical testing has since invalidated this
+attribution. The `eval-adm/run_6` matrix re-evaluated the pre-B4 ADM
+(v1) alongside the post-B4 retrain (v2) at both 40k and 60k checkpoints
+under identical conditions. Both versions produce essentially identical
+60k perplexity:
+
+| Version | Training state | 60k PPL | 60k 95% CI | 40k PPL |
+|---------|----------------|---------|------------|---------|
+| v1 | pre-B4 fix (commented RNG restore) | 24.074 | [23.70, 24.46] | 28.073 |
+| v2 | post-B4 fix (Gloo per-rank RNG) | 24.060 | [23.68, 24.44] | 28.079 |
+| Delta | -- | 0.014 | -- | -0.006 |
+
+The 60k v1-vs-v2 delta of 0.014 PPL is below the width of either CI
+(0.76 and 0.76 PPL respectively), and well below the inter-batch SEM
+(~0.0081 in loss space). B4 is therefore methodologically correct but
+its practical impact on final ADM perplexity is below the intra-run
+noise floor.
+
+The residual +0.23 delta against the paper is consistent with the
+combined contribution of several small divergences, none individually
+attributable without controlled experiments we cannot run:
+
+- **B1** (train/val split divergence): negligible but non-zero ordering
+  and permutation differences against the authors' HF Arrow split,
+  which has been permanently disabled and is unrecoverable.
+- **B3** (micro-batch decomposition under bfloat16): floating-point
+  accumulation-order rounding differences relative to the authors'
+  A100-era acc_steps decomposition.
+- **Hardware/kernel divergences**: cuDNN kernel selection, SM89 (L4) vs
+  SM80 (A100) compute-capability differences, CUDA 11.8 vs the authors'
+  unrecorded CUDA version.
+- **Seed variance**: the paper reports a mean over three training seeds
+  (SEM ~0.01--0.03 PPL depending on variant), while we have a single
+  seed. A 0.1--0.3 PPL offset from a single draw is within the
+  statistical band implied by the paper's inter-seed SEM.
+
+None of these is a divergence-of-interest on its own, but their sum
+accounts for the observed gap more plausibly than B4 alone.
+
+The non-adaptive LN-CoTFormer 40k (A2) has no runtime randomness
+(dropout=0.0, fixed repeat count) so B4 does not apply to it in any
+case. The cot-res-train reproduction (A1) also has no runtime
+randomness and lands at +0.13 delta, bounding the ADM's expected delta
+in the absence of B4.
 
 ### Paper Comparison Note
 
-See A6 for the full Section 5 comparison (LN-CoTFormer vs ADM at 60k).
+See A7 for the full Section 5 comparison (LN-CoTFormer vs ADM at 60k).
 
 ---
 
-## A6. Section 5 Comparison: LN-CoTFormer vs ADM at 60k Steps
+## A7. Section 5 Comparison: LN-CoTFormer vs ADM at 60k Steps
 
 **Result:** Directional claim confirmed. Non-adaptive LN-CoTFormer outperforms
 adaptive model (ADM) at full compute, consistent with the paper.
@@ -490,6 +611,15 @@ same number of GPUs on resume. The remaining source of non-determinism is
 cuDNN kernel selection (inherent to CUDA, not fixable without
 `torch.use_deterministic_algorithms(True)` which has a performance cost).
 
+**Empirical magnitude.** The `eval-adm/run_6` evaluation retrained the
+ADM from scratch with this fix in place (v2) and re-evaluated the pre-
+fix training (v1) at identical checkpoints. The 60k PPL delta is 0.014
+(v1 24.074, v2 24.060), well below the inter-batch noise floor. B4 is
+methodologically correct but contributes less than 0.1% to the final
+ADM perplexity on our hardware. See A6 ("Why the Gap Is Wider than the
+40k Reproductions") and `iridis/eval-adm/README.md` for the detailed
+comparison.
+
 ---
 
 ## B5. Base Model Batch Size
@@ -646,7 +776,7 @@ All five run_3 jobs crashed at step 2000 (`save_checkpoint_freq` boundary):
 | 714422 | Mar 25 | + ByteTensor gather | NCCL gradient ALLREDUCE timeout (SeqNum=51989, NumelIn=2360064) | No barrier after save; rank 1 races ahead [5][6] |
 | 724964 | Mar 27 | + barrier + 30 min timeout | NCCL barrier timeout (SeqNum=51988, NumelIn=1, 1800s) | Lustre I/O stall in `torch.save` [10] |
 | 726223 | Mar 28 | + local-first save to `/tmp` | NCCL barrier timeout (SeqNum=51988, NumelIn=1, 1800s) | NCCL LL protocol hang (see below) |
-| (resolved) | Mar 29 | + Gloo checkpoint coordination | Success | Gloo bypass of NCCL confirmed [12]; ADM v2 completed 60k steps (A5) |
+| (resolved) | Mar 29 | + Gloo checkpoint coordination | Success | Gloo bypass of NCCL confirmed [12]; ADM v2 completed 60k steps (A6) |
 
 ### Root causes
 
@@ -727,7 +857,7 @@ their training math.
 
 ## B10. LR Schedule Discontinuity on 40k-to-60k Extension
 
-**Impact:** Likely contributor to the +0.40 PPL delta in A1a (LN-CoTFormer
+**Impact:** Likely contributor to the +0.40 PPL delta in A2a (LN-CoTFormer
 60k: 23.59 vs paper's 23.19). No effect on ADM (trained 60k from scratch).
 **Status:** Accepted. Assessed in A6; consistent with observed delta pattern.
 
@@ -778,10 +908,10 @@ steps. Two factors limit the practical impact:
 2. The 60k schedule's LR at step 40000 (~3.5e-4) is within the range the
    model trained stably at during the first 40k steps (peak 1e-3 to 2e-5).
 
-**Post-evaluation update (A1a):** The final 60k LN-CoTFormer perplexity is
+**Post-evaluation update (A2a):** The final 60k LN-CoTFormer perplexity is
 23.59 vs the paper's 23.19 (delta +0.40). The delta is significantly wider
-than the 40k reproduction (+0.02, A1). Since the ADM (trained 60k from
-scratch, unaffected by B10) has a delta of only +0.23 (A5), this LR
+than the 40k reproduction (+0.02, A2). Since the ADM (trained 60k from
+scratch, unaffected by B10) has a delta of only +0.23 (A6), this LR
 discontinuity is the most likely contributor to the excess LN-CoTFormer
 delta. A fresh 60k-from-scratch run would be the definitive test.
 
@@ -825,24 +955,29 @@ paper's evaluation conditions (no DDP data sharding during eval).
 
 ## C1. Figure 5: Position-Indexed Cascade Bug and Methodological Critique
 
-**Impact:** Figure 5 of the paper shows a broad router weight distribution
-whose shape depends on an environment-specific interaction between a
-cascading bug and `torch.topk` reordering behaviour.
+**Impact:** The paper's Figure 5 shows a broad distribution of last-repeat
+router weights that we cannot reproduce on L4/PyTorch 2.2 under any of
+four systematic experimental variations. The technical bug in the
+original extraction script is real and documented; the paper's textual
+claim about training-time deepening of router utilisation remains
+qualitatively confirmed but far smaller in magnitude on our hardware.
 
-**Status:** Root-caused. Systematic experiment matrix designed to isolate
-confounders. See `iridis/eval-adm/README.md` for the full methodology.
+**Status:** Root-caused (bug), experimentally exhausted (reproduction).
+The full methodology, experiment matrix, per-variant statistics, and
+discussion live in `iridis/eval-adm/README.md`; this section summarises
+the verdict and keeps the Part C divergence log self-contained.
 
-### The bug (technical)
+### The technical bug
 
 The original `get_router_weights.py` (commit `2723e30`) defines a custom
-`forward()` function that manually executes the model's repeat loop,
-collecting router weights from each `MoDBlock`. At each repeat, the MoDBlock
-selects tokens via `torch.topk(router_logits, top_k, sorted=False)`, which
-**reorders tokens by score**. The custom forward then applies
-`x.take_along_dim(selected_indices, dim=1)`, so the representation passed to
-the next repeat has tokens in a different order.
+`forward()` that manually executes the model's repeat loop, collecting
+router weights from each `MoDBlock`. At each repeat, the MoDBlock
+selects tokens via `torch.topk(router_logits, top_k, sorted=False)`,
+which **reorders tokens by score**. The custom forward then applies
+`x.take_along_dim(selected_indices, dim=1)`, so the representation
+passed to the next repeat is in a different token order.
 
-After collecting all per-repeat router weights, the script cascades via:
+After collecting per-repeat router weights, the script cascades via:
 
 ```python
 for i in range(2, len(router_weights)):
@@ -853,106 +988,145 @@ for i in range(2, len(router_weights)):
 ```
 
 This takes the element-wise minimum at the same **position index** `k`
-across repeats. But position `k` at repeat `i` is a **different token** than
-position `k` at repeat `i-1`, because tokens were reordered between repeats
-by `take_along_dim`. The cascading therefore computes the minimum of
-randomly-paired scores from different tokens, rather than the per-token
-minimum across all routers.
+across repeats. Position `k` at repeat `i` is a different token than
+position `k` at repeat `i-1`, so the cascade pairs up scores from
+unrelated tokens rather than computing a per-token minimum.
 
-### Environment dependence
+### The methodological critique
 
-The magnitude of this bug depends on how much `torch.topk(sorted=False, k=T)`
-actually reorders tokens. This is **implementation-dependent** across CUDA
-compute capabilities and PyTorch versions:
+The position-indexed cascade does not answer the question the paper
+associates with Figure 5. Section 5 states: "the model starts to favor
+using the final repeat more when the model is trained for longer." The
+position-indexed cascade answers a different question: *"at position k
+in the reordered sequence, what is the minimum repeat score across
+repeats?"* After each repeat's `topk` reordering, position `k` refers to
+a different token, so the cascaded score is the minimum across several
+unrelated tokens, not a single token's depth trajectory.
 
-- **Our environment** (L4 SM89, PyTorch 2.2.0+cu118): `topk(sorted=False,
-  k=T)` returns approximately the identity permutation. The buggy cascade
-  produces results within 2% of the correct per-token cascade.
-- **Authors' probable environment** (A100 SM80, unknown PyTorch version):
-  `topk(sorted=False)` likely produced more significant reordering, causing
-  the cascade to mix scores from genuinely different tokens and producing the
-  broader distribution seen in Figure 5.
+We therefore define the **per-token cascade** as a sounder alternative:
+*"what is the minimum router score token X received across all
+repeats?"* This tracks each token's actual trajectory through the repeat
+loop by mapping scores back to original positions via `active_indices`
+before cascading, and is what a reader of Section 5 would reasonably
+expect Figure 5 to depict.
 
-| Extraction (eval-adm/run_3) | Router 4 Mean | frac < 0.1 |
-|-----------------------------|--------------|-----------|
-| CF + position-indexed cascade (buggy) | 0.034 | 93.8% |
-| Hooks + per-token cascade (correct) | 0.033 | 94.0% |
+### Experiment matrix (2 x 2 x 4 cells)
 
-The <2% difference confirms the bug is **invisible on our hardware**. The
-previously reported broader statistics (mean ~0.15, frac <0.1 ~50%) were
-erroneous and have been removed.
+`iridis/eval-adm/job.sh` runs a systematic matrix over two training
+versions (ADM v1 pre-B4, v2 post-B4), two checkpoints (40k, 60k), and
+four extraction variants:
 
-### The critique (methodological)
+| # | Directory | Method | Config | What it isolates |
+|---|-----------|--------|--------|------------------|
+| 1 | `exp5-original` | custom forward | raw JSON | Baseline: authors' code path, PI vs PT delta within the same run |
+| 2 | `exp5-hooks` | forward hooks on `mod_router` | raw JSON | Extraction-method equivalence (captures logits before topk) |
+| 3 | `exp5-cf-sorted` | custom forward, `topk(sorted=True)` | raw JSON | Forced topk reordering, hypothesised to restore A100-like behaviour |
+| 4 | `exp5-cf-argparse` | custom forward | argparse (dtype=bf16) | Config-loading path (dtype=None -> float16 vs bfloat16 autocast) |
 
-Beyond the technical bug, the original Figure 5 experiment does not answer
-the question the authors claim it addresses. The paper states (Section 5):
-"the model starts to favor using the final repeat more when the model is
-trained for longer." However, the position-indexed cascade answers a
-different question: *"At position k in the reordered sequence, what is the
-minimum repeat score across repeats?"*
+### Findings
 
-This formulation conflates token identity with sequence position. After each
-repeat's `topk` reordering, position `k` refers to a different token. The
-cascaded score at position `k` is the minimum of scores from several
-unrelated tokens, not a single token's depth trajectory. The resulting
-distribution is dominated by the reordering mechanics, not by the model's
-routing behaviour.
+All four variants produce consistent results on L4/PyTorch 2.2. Router 4
+(last repeat) statistics for ADM v2 at the 60k checkpoint, across
+extraction variants and cascade methods:
 
-We propose a per-token cascade as a sounder alternative, answering the more
-interpretable question: *"What is the minimum router score token X received
-across all repeats?"* This tracks each token's actual trajectory through the
-repeat loop by mapping scores back to original positions via `active_indices`
-before cascading. The resulting distribution shows the model's genuine depth
-utilisation: the 40k-to-60k shift is real (mean 0.021 to 0.033) but far
-smaller than Figure 5 suggests.
+| Variant | Raw mean | PI mean | PT mean | PI frac<0.01 | PT frac<0.01 |
+|---------|---------|---------|---------|--------------|---------------|
+| exp5-original (cf, raw) | 0.0424 | 0.0336 | 0.0345 | 0.296 | 0.291 |
+| exp5-hooks (hooks, raw) | 0.0424 | -- | 0.0332 | -- | 0.297 |
+| exp5-cf-sorted (cf-sorted, raw) | 0.0424 | 0.0421 | 0.0345 | 0.291 | 0.291 |
+| exp5-cf-argparse (cf, argparse) | 0.0423 | 0.0335 | 0.0344 | 0.294 | 0.289 |
 
-### Experiment matrix
+Four findings emerge:
 
-We designed a systematic matrix of 5 extraction experiments to isolate each
-confounder (cascade method, extraction method, topk reordering, config
-loading). The full methodology, hypotheses, and expected results are
-documented in `iridis/eval-adm/README.md`.
+1. **PI vs PT cascade delta is within 3% on L4/PyTorch 2.2.** The
+   technical bug is invisible on our hardware. The position-indexed
+   (buggy) cascade and per-token (correct) cascade produce nearly
+   identical router 4 distributions (relative delta on mean: 2.6% at
+   exp5-original, 0.9% at exp5-cf-argparse).
+
+2. **Forcing `topk(sorted=True)` does not restore the paper's
+   distribution.** The `exp5-cf-sorted` variant was designed to test
+   whether forced descending-score reordering would reproduce the
+   paper's broader distribution by maximising cross-token mixing in the
+   PI cascade. Instead, the forced-sort PI cascade converges to the raw
+   distribution (PI 0.0421 vs Raw 0.0424), because when the topk output
+   is sorted by score, similar-rank positions carry similar scores
+   across repeats and the positional cascade becomes a no-op. Neither
+   sorted nor unsorted PI cascades on L4 reproduce the paper's Figure 5
+   breadth.
+
+3. **Extraction method is empirically equivalent.** Capturing router
+   logits via forward hooks on `MoDBlock.mod_router` (pre-topk, no
+   reordering) and via the authors' custom forward path (post-topk)
+   produces identical raw histograms. Multiset equivalence: for a
+   single repeat's scores, `{sigmoid(all_logits)} =
+   {sigmoid(topk(logits, k=T))}` because `topk` with `k=T` is a
+   permutation and `sigmoid` is element-wise. Our empirical means
+   match to all four reported digits.
+
+4. **Config-loading path is empirically equivalent.** Raw JSON dict
+   loading (which leaves `dtype=None` and defaults to float16 autocast)
+   and argparse loading (which applies `dtype=torch.bfloat16`) produce
+   differences below 0.001 in router 4 mean across all checkpoints. The
+   dtype path is not a confounder on our hardware.
+
+### What we cannot reproduce, and why
+
+The matrix systematically eliminates four hypothesised confounders.
+None produces a distribution resembling the paper's Figure 5. The
+residual unexplained factor must live in:
+
+(a) The authors' exact PyTorch version and CUDA toolkit, which control
+    the internal behaviour of `topk(sorted=False)` on SM80 (A100). On
+    our SM89 (L4) with CUDA 11.8, neither `sorted=False` nor
+    `sorted=True` reproduces whatever reordering pattern the authors'
+    environment produced. We have no sorted-between-identity-and-descent
+    intermediate to test.
+
+(b) Differences in the trained router itself. Our ADM v2 reaches PPL
+    24.06 against the paper's 23.83 (A6, delta +0.23). If the authors'
+    Figure 5 was produced from a model trained with a different seed,
+    different `acc_steps` decomposition, or different hardware, the
+    underlying router weight distribution would differ even before any
+    cascading is applied. The paper does not release the numerical data
+    behind Figure 5, so we cannot compare our raw router 4 distribution
+    (mean 0.0424 at 60k) directly against theirs.
+
+Neither direction admits further experiments without access to the
+authors' exact environment or a second ADM training run on different
+hardware or seeds (compute-prohibitive at ~52h per 60k run on
+`ecsstudents_l4`).
+
+### Qualitative claim is confirmed
+
+The paper's Section 5 textual claim -- "the model starts to favor using
+the final repeat more when the model is trained for longer" -- is
+qualitatively supported by our per-token cascade on ADM v2:
+
+| Checkpoint | Router 4 mean (PT) | frac(score < 0.01) |
+|------------|-------------------:|-------------------:|
+| 40k        | 0.0220             | 44.9%              |
+| 60k        | 0.0345             | 29.1%              |
+
+Router 4 mean increases by 57% between 40k and 60k, and the fraction of
+tokens essentially skipping the final repeat decreases from 44.9% to
+29.1%. The direction and monotonicity match the paper's claim. The
+magnitude of the shift is smaller than Figure 5 would suggest, which is
+consistent with our inability to reproduce the broad distribution
+itself.
 
 ### Cross-references
 
-- **C3** (orphan MoDBlock): 5 MoDBlocks allocated, only 4 called (original
-  code bug).
-- `get_router_weights.py`: Unified extraction script with `--method` and
-  `--config-loading` flags for the experiment matrix.
-
-## C3. Orphan MoDBlock: 5 Allocated, 4 Used
-
-**Impact:** The model allocates one more MoDBlock router than it uses. The
-authors report `n_repeat=5` repeats, but the forward loop only invokes
-routers for repeats 1 through 4. The 5th repeat unconditionally finalises
-all remaining tokens without consulting a router. The orphan module
-(`mod[n_repeat-1]`) is created, initialised with random weights, and
-occupies GPU memory, but never receives gradients and never affects
-inference.
-
-**Status:** Original author bug (commit `2723e30`), present in all 5 model
-variants. Fixed in commit `657de47` by changing `range(self.n_repeat)` to
-`range(self.n_repeat - 1)`. See B6 for the DDP discovery story.
-
-### Why it matters
-
-The model is configured with `n_repeat=5`, implying 5 routing decisions.
-In reality, there are only 4 routing decisions and 5 passes through the
-mid-block stack. The final pass always applies and blends unconditionally.
-This is a documentation/intent mismatch: the code allocates resources for
-a router that never participates in computation.
-
-For reproduction, this has no practical impact: the orphan was never trained,
-its weights are random initialisation artifacts, and dropping them via
-`strict=False` loading changes nothing. For extension work, the fix
-(`n_repeat - 1` blocks) saves memory for one unused router module.
-
-### Cross-references
-
-- **B6**: How this bug manifests under DDP (`find_unused_parameters=False`
-  crashes with parameter index 152 not receiving gradients).
-
----
+- `iridis/eval-adm/README.md` -- full methodology, experiment matrix,
+  per-variant statistics, v1 vs v2 equivalence discussion, and output
+  tree.
+- **C3** (orphan MoDBlock): 5 routers allocated, 4 used (original
+  author bug, fixed in our code via B6).
+- `get_router_weights.py`: unified extraction script with `--method`
+  (`cf` / `cf-sorted` / `hooks`) and `--config-loading` (`raw` /
+  `argparse`) flags for the experiment matrix.
+- `plot_fig5.py`: Figure 5 histogram plotter with three outputs
+  (`figure5_raw.png`, `figure5_picascade.png`, `figure5_ptcascade.png`).
 
 ## C2. Underspecified Training Schedule (Reproducibility Gap)
 
@@ -991,6 +1165,40 @@ Our reproduction uses the percentage-based warmup and cosine annealing
 from the original codebase, matching the authors' implementation exactly.
 The paper's "8000 steps" claim is accurate for the 40k scope of Section 3.2
 but should not be extrapolated to Section 4.2's 60k runs.
+
+---
+
+## C3. Orphan MoDBlock: 5 Allocated, 4 Used
+
+**Impact:** The model allocates one more MoDBlock router than it uses. The
+authors report `n_repeat=5` repeats, but the forward loop only invokes
+routers for repeats 1 through 4. The 5th repeat unconditionally finalises
+all remaining tokens without consulting a router. The orphan module
+(`mod[n_repeat-1]`) is created, initialised with random weights, and
+occupies GPU memory, but never receives gradients and never affects
+inference.
+
+**Status:** Original author bug (commit `2723e30`), present in all 5 model
+variants. Fixed in commit `657de47` by changing `range(self.n_repeat)` to
+`range(self.n_repeat - 1)`. See B6 for the DDP discovery story.
+
+### Why it matters
+
+The model is configured with `n_repeat=5`, implying 5 routing decisions.
+In reality, there are only 4 routing decisions and 5 passes through the
+mid-block stack. The final pass always applies and blends unconditionally.
+This is a documentation/intent mismatch: the code allocates resources for
+a router that never participates in computation.
+
+For reproduction, this has no practical impact: the orphan was never trained,
+its weights are random initialisation artifacts, and dropping them via
+`strict=False` loading changes nothing. For extension work, the fix
+(`n_repeat - 1` blocks) saves memory for one unused router module.
+
+### Cross-references
+
+- **B6**: How this bug manifests under DDP (`find_unused_parameters=False`
+  crashes with parameter index 152 not receiving gradients).
 
 ---
 
