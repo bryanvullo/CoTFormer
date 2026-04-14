@@ -357,6 +357,9 @@ class GPTBase(nn.Module):
             block.attn.init_cache(total_expected_length)
         if not self.training:
             x_into_mid = x.clone().detach() # We log the x going into mid blocks
+            diag_metrics['logit_lens'] = {}
+            lens_x_begin = self.transformer.ln_f(x_into_mid)
+            diag_metrics['logit_lens']['h_begin'] = self.lm_head(lens_x_begin).cpu()
         sum_active = 0
         # for rep_idx in range(1, self.n_repeat+1):
             
@@ -483,6 +486,10 @@ class GPTBase(nn.Module):
             x = block(x, pos_emb_closure, cache_context, start_index=index_shift)
         
         x = self.transformer.ln_f(x)
+      
+        if not self.training:
+            diag_metrics['logit_lens']['h_end'] = self.lm_head(x).cpu()
+        
 
         if use_cache:
             x = self.lm_cache.get_final_logits(x)
