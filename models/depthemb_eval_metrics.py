@@ -370,7 +370,9 @@ class GPTBase(nn.Module):
             # lens_x_begin = self.transformer.ln_f(x_into_mid)
             # diag_metrics['logit_lens']['h_begin'] = self.lm_head(lens_x_begin).cpu()
             # Inside forward(), before the repeat loop:
+
             saved_hidden_states = {}
+            saved_hidden_states['h_begin'] = x_into_mid
             num_mid_blocks = len(self.transformer.h_mid)
             halfway_idx = num_mid_blocks // 2
         sum_active = 0
