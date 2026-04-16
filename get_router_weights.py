@@ -19,6 +19,21 @@ Cascade outputs (always saved for cf/cf-sorted; PT only for hooks):
   *_picascade.npy  Position-indexed cascade (C1 bug)
   *_ptcascade.npy  Per-token cascade via active_indices scatter
 
+Sidecar metadata (always written):
+  router_weights_meta.json  n_repeat, n_routers, last-repeat slot, extraction
+                            parameters. Downstream plotters read this to
+                            locate the Figure 5 quantity without hardcoded
+                            slot assumptions.
+
+Slot semantics (shared by all outputs, all methods):
+  weights_array has length n_repeat. Slot 0 is always None (no router
+  decision precedes the first pass). Slot k in [1..n_repeat-1] holds the
+  sigmoid scores from mod[k-1], the router deciding entry into pass k+1.
+  The paper's Figure 5 "last repeat" quantity is weights_array[n_repeat-1],
+  i.e., the router that gates the final pass. Both `n_repeat` and the
+  "last repeat slot" are derived from the loaded model's `n_repeat`
+  attribute -- no hardcoded assumption of n_repeat=5.
+
 See iridis/eval-adm/README.md for the experiment matrix and methodology.
 """
 import argparse
@@ -217,7 +232,7 @@ def run_cf_extraction(model, data_iter, total_batches, type_ctx, n_repeat, metho
 # Extraction method: hooks (captures pre-topk logits from mod_router)
 # ---------------------------------------------------------------------------
 
-def run_hooks_extraction(model, data_iter, total_batches, type_ctx, n_routers):
+def run_hooks_extraction(model, data_iter, total_batches, type_ctx, n_repeat):
     """Hook-based extraction: captures raw logits before topk selection.
 
     Hooks fire on each MoDBlock.mod_router (nn.Linear), capturing the output
@@ -225,8 +240,17 @@ def run_hooks_extraction(model, data_iter, total_batches, type_ctx, n_routers):
     per-token cascade is natural (position = original token). Position-indexed
     cascade on hook data is identical to per-token cascade (no reordering).
 
-    Returns raw_accum and pt_accum (both as lists of flat score lists).
+    Only the first `n_repeat - 1` mod entries are hooked -- these are the
+    routers actually called in the forward pass. A hypothetical model with
+    an orphan trailing MoDBlock (e.g., pre-B6 original-author code path)
+    would be handled correctly: the orphan is never called, so hooking it
+    would produce an empty capture list. We avoid that by deriving the
+    router count from `model.n_repeat`, which is the authoritative source.
+
+    Returns raw_accum and pt_accum (both as lists of flat score lists,
+    length = n_repeat with slot 0 = empty).
     """
+    n_routers = n_repeat - 1
     router_logits_per_repeat = {i: [] for i in range(n_routers)}
 
     def make_hook(router_idx):
@@ -236,8 +260,8 @@ def run_hooks_extraction(model, data_iter, total_batches, type_ctx, n_routers):
         return hook_fn
 
     hooks = []
-    for i, mod_block in enumerate(model.transformer.mod):
-        h = mod_block.mod_router.register_forward_hook(make_hook(i))
+    for i in range(n_routers):
+        h = model.transformer.mod[i].mod_router.register_forward_hook(make_hook(i))
         hooks.append(h)
 
     print(f"Running hooks forward pass ({total_batches} batches)...")
@@ -259,8 +283,8 @@ def run_hooks_extraction(model, data_iter, total_batches, type_ctx, n_routers):
         all_logits = torch.cat(router_logits_per_repeat[i], dim=0)
         raw_scores[i] = torch.sigmoid(all_logits).reshape(-1).float().numpy()
 
-    # Build accumulators in the same format as CF extraction
-    n_repeat = n_routers + 1
+    # Build accumulators in the same format as CF extraction (length n_repeat,
+    # slot 0 empty, slot k >= 1 holds mod[k-1]'s sigmoid scores).
     raw_accum = [[] for _ in range(n_repeat)]
     pt_accum = [[] for _ in range(n_repeat)]
 
@@ -353,24 +377,55 @@ def accum_to_npy(accum):
     ], dtype=object)
 
 
-def print_stats(label, weights_array):
-    """Print summary statistics for a router weight array."""
-    print(f"\n  [{label}]")
-    n_repeat = len(weights_array)
-    for i in range(1, n_repeat):
-        scores = weights_array[i]
-        if scores is not None and len(scores) > 0:
-            print(f"    Router {i} (repeat {i}->{i+1}): "
-                  f"n={len(scores)}, mean={scores.mean():.4f}, "
-                  f"median={np.median(scores):.4f}, "
-                  f"frac<0.1={np.mean(scores < 0.1):.3f}, "
-                  f"frac>0.9={np.mean(scores > 0.9):.3f}")
+def detect_last_router_slot(weights_array):
+    """Return the index of the last non-empty slot in a weights_array.
 
-    last = weights_array[-1]
-    if last is not None and len(last) > 0:
-        print(f"    Figure 5 (last repeat, n={len(last)}): "
-              f"frac<0.01={np.mean(last < 0.01):.3f}, "
-              f"frac>0.5={np.mean(last > 0.5):.3f}")
+    Standard shape is [None, s_1, s_2, ..., s_N] where s_N is the router
+    gating the final pass (paper Figure 5 quantity). Detection is done by
+    scanning from the tail for the last entry that is non-None AND non-empty;
+    this is robust to trailing None-padding and to per-method variations
+    (hooks emits None for cascade arrays at unused slots).
+
+    Returns -1 if no non-empty slot exists.
+    """
+    for slot in range(len(weights_array) - 1, -1, -1):
+        entry = weights_array[slot]
+        if entry is not None and len(entry) > 0:
+            return slot
+    return -1
+
+
+def print_stats(label, weights_array, n_repeat):
+    """Print summary statistics for a router weight array.
+
+    Slot semantics: weights_array has length n_repeat. Slot 0 is None
+    (no router decision before pass 1). Slot k in [1..n_repeat-1] holds
+    mod[k-1]'s sigmoid scores (the router deciding entry into pass k+1).
+    The Figure 5 "last repeat" quantity is the slot at index n_repeat - 1,
+    which is also the last non-empty slot for well-formed extractions.
+    """
+    last_slot = detect_last_router_slot(weights_array)
+    expected_last = n_repeat - 1
+    header = f"\n  [{label}] (n_repeat={n_repeat}, last-repeat slot={last_slot})"
+    if last_slot != expected_last:
+        header += f"  WARNING: expected last slot {expected_last}"
+    print(header)
+
+    for slot in range(1, n_repeat):
+        scores = weights_array[slot]
+        if scores is None or len(scores) == 0:
+            continue
+        is_fig5 = (slot == last_slot)
+        marker = "  <-- Figure 5 (last repeat)" if is_fig5 else ""
+        line = (f"    slot {slot} (mod[{slot-1}], gates pass {slot+1}): "
+                f"n={len(scores)}, mean={scores.mean():.4f}, "
+                f"median={np.median(scores):.4f}, "
+                f"frac<0.1={np.mean(scores < 0.1):.3f}, "
+                f"frac>0.9={np.mean(scores > 0.9):.3f}")
+        if is_fig5:
+            line += (f", frac<0.01={np.mean(scores < 0.01):.3f}, "
+                     f"frac>0.5={np.mean(scores > 0.5):.3f}")
+        print(line + marker)
 
 
 # ---------------------------------------------------------------------------
@@ -489,13 +544,19 @@ def main():
         np.save(os.path.join(args.output_dir, "router_weights_picascade.npy"), pi_npy)
         np.save(os.path.join(args.output_dir, "router_weights_ptcascade.npy"), pt_npy)
 
-        print_stats("raw (no cascade)", raw_npy)
-        print_stats("PI cascade (C1 bug)", pi_npy)
-        print_stats("PT cascade (correct)", pt_npy)
+        print_stats("raw (no cascade)", raw_npy, n_repeat)
+        print_stats("PI cascade (C1 bug)", pi_npy, n_repeat)
+        print_stats("PT cascade (correct)", pt_npy, n_repeat)
+
+        written_outputs = [
+            "router_weights_raw.npy",
+            "router_weights_picascade.npy",
+            "router_weights_ptcascade.npy",
+        ]
 
     elif args.method == 'hooks':
         raw, pt = run_hooks_extraction(
-            model, data_iter, total_batches, type_ctx, n_routers)
+            model, data_iter, total_batches, type_ctx, n_repeat)
 
         raw_npy = accum_to_npy(raw)
         pt_npy = accum_to_npy(pt)
@@ -503,10 +564,36 @@ def main():
         np.save(os.path.join(args.output_dir, "router_weights_raw.npy"), raw_npy)
         np.save(os.path.join(args.output_dir, "router_weights_ptcascade.npy"), pt_npy)
 
-        print_stats("raw (no cascade)", raw_npy)
-        print_stats("PT cascade (per-token)", pt_npy)
+        print_stats("raw (no cascade)", raw_npy, n_repeat)
+        print_stats("PT cascade (per-token)", pt_npy, n_repeat)
 
-    print(f"\nOutputs saved to: {args.output_dir}/")
+        written_outputs = [
+            "router_weights_raw.npy",
+            "router_weights_ptcascade.npy",
+        ]
+
+    # --- Metadata sidecar ---
+    # Downstream plotters (plot_fig5.py, future ad-hoc analyses) read this
+    # file to locate the Figure 5 slot instead of hardcoding [-1]. This makes
+    # the extraction pipeline trivially robust to any n_repeat value.
+    metadata = {
+        "n_repeat": int(n_repeat),
+        "n_routers": int(n_routers),
+        "last_router_slot": int(n_repeat - 1),
+        "method": args.method,
+        "config_loading": args.config_loading,
+        "split": args.split,
+        "checkpoint_dir": os.path.abspath(checkpoint_dir),
+        "checkpoint_filename": checkpoint_filename,
+        "seq_length": int(seq_length),
+        "batch_size": int(config.batch_size),
+        "outputs": written_outputs,
+    }
+    meta_path = os.path.join(args.output_dir, "router_weights_meta.json")
+    with open(meta_path, "w") as f:
+        json.dump(metadata, f, indent=2)
+    print(f"\nMetadata sidecar: {meta_path}")
+    print(f"Outputs saved to: {args.output_dir}/")
 
 
 if __name__ == "__main__":

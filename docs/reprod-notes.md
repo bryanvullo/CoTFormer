@@ -7,15 +7,33 @@
 
 - [Reproducibility Notes](#reproducibility-notes)
   - [Table of Contents](#table-of-contents)
+- [Methodology](#methodology)
+  - [M1. Reproduction scope](#m1-reproduction-scope)
+  - [M2. Evaluation protocol](#m2-evaluation-protocol)
+  - [M3. Confidence intervals and the paper's SEM](#m3-confidence-intervals-and-the-papers-sem)
+  - [M4. Training configuration shared across variants](#m4-training-configuration-shared-across-variants)
+  - [M5. What "delta" means in this document](#m5-what-delta-means-in-this-document)
 - [Part A: Successful Replications](#part-a-successful-replications)
   - [A1. CoTFormer + Reserved Layers Perplexity (Table 2, 40k steps)](#a1-cotformer--reserved-layers-perplexity-table-2-40k-steps)
+    - [Delta interpretation](#delta-interpretation)
+    - [Training configuration](#training-configuration)
+    - [Evaluation configuration](#evaluation-configuration)
+    - [Ordering rationale](#ordering-rationale)
   - [A2. LN-CoTFormer Perplexity (Table 2, 40k steps)](#a2-ln-cotformer-perplexity-table-2-40k-steps)
   - [A2a. LN-CoTFormer Perplexity (Section 5, 60k steps)](#a2a-ln-cotformer-perplexity-section-5-60k-steps)
   - [A3. Architecture Depth](#a3-architecture-depth)
   - [A4. Training Stability](#a4-training-stability)
   - [A5. Effective Batch Size](#a5-effective-batch-size)
   - [A6. ADM Perplexity (Section 4.2, Figure 4, 60k steps)](#a6-adm-perplexity-section-42-figure-4-60k-steps)
+    - [Architecture](#architecture)
+    - [Training Stability](#training-stability)
+    - [Job Chaining](#job-chaining)
+    - [Capacity Factor Sampling](#capacity-factor-sampling)
+    - [Why the Gap Is Wider than the 40k Reproductions](#why-the-gap-is-wider-than-the-40k-reproductions)
+    - [Paper Comparison Note](#paper-comparison-note)
   - [A7. Section 5 Comparison: LN-CoTFormer vs ADM at 60k Steps](#a7-section-5-comparison-ln-cotformer-vs-adm-at-60k-steps)
+    - [Absolute deltas](#absolute-deltas)
+    - [Why the adaptive gap is smaller](#why-the-adaptive-gap-is-smaller)
 - [Part B: Known Divergences](#part-b-known-divergences)
   - [B1. Train/Val Split Divergence](#b1-trainval-split-divergence)
     - [B1a. Document ordering](#b1a-document-ordering)
@@ -53,40 +71,228 @@
     - [Background](#background-4)
     - [Failure timeline](#failure-timeline)
     - [Root causes](#root-causes)
-    - [Affected files](#affected-files-cumulative-across-all-four-fix-iterations)
+    - [Affected files (cumulative across all four fix iterations)](#affected-files-cumulative-across-all-four-fix-iterations)
     - [Checkpoint format compatibility](#checkpoint-format-compatibility)
   - [B10. LR Schedule Discontinuity on 40k-to-60k Extension](#b10-lr-schedule-discontinuity-on-40k-to-60k-extension)
+    - [Background](#background-5)
+    - [What happened](#what-happened)
+    - [The discontinuity](#the-discontinuity)
+    - [Impact assessment](#impact-assessment-2)
   - [B11. Evaluation Batch Size Independence](#b11-evaluation-batch-size-independence)
-- [Part C: Original Code Bugs](#part-c-original-code-bugs)
-  - [C1. Figure 5: Position-Indexed Cascade Bug and Methodological Critique](#c1-figure-5-position-indexed-cascade-bug-and-methodological-critique)
-  - [C2. Underspecified Training Schedule (Reproducibility Gap)](#c2-underspecified-training-schedule-reproducibility-gap)
-  - [C3. Orphan MoDBlock: 5 Allocated, 4 Used](#c3-orphan-modblock-5-allocated-4-used)
-  - [C4. Never Mirror `main.py`'s Checkpoint Path in Bash (Infrastructure Trap)](#c4-never-mirror-mainpys-checkpoint-path-in-bash-infrastructure-trap)
+- [Part C: Original Bugs and Mistakes](#part-c-original-bugs-and-mistakes)
+  - [C1. Orphan MoDBlock: 5 Allocated, 4 Used](#c1-orphan-modblock-5-allocated-4-used)
+    - [What the code does](#what-the-code-does)
+    - [Functional equivalence: a dead-weight removal](#functional-equivalence-a-dead-weight-removal)
+    - [Init-order RNG offset: the only real delta](#init-order-rng-offset-the-only-real-delta)
+    - [Empirical bound](#empirical-bound)
+    - [Reframing earlier attributions](#reframing-earlier-attributions)
+  - [C2. Figure 5: Position-Indexed Cascade Bug and Methodological Critique](#c2-figure-5-position-indexed-cascade-bug-and-methodological-critique)
+    - [The technical bug](#the-technical-bug)
+    - [The methodological critique](#the-methodological-critique)
+    - [Experiment matrix (2 x 2 x 4 cells)](#experiment-matrix-2-x-2-x-4-cells)
+    - [Findings](#findings)
+    - [What we cannot reproduce, and why](#what-we-cannot-reproduce-and-why)
+    - [Qualitative claim is confirmed](#qualitative-claim-is-confirmed)
+    - [Cross-references](#cross-references)
+  - [C3. Underspecified Training Schedule (Reproducibility Gap)](#c3-underspecified-training-schedule-reproducibility-gap)
+    - [Warmup steps for 60k models](#warmup-steps-for-60k-models)
+    - [LR schedule type](#lr-schedule-type)
+    - [Resolution](#resolution)
   - [References](#references)
+
+---
+
+# Methodology
+
+Reproduction methodology shared across all
+[Part A](#part-a-successful-replications) results. Individual
+A-subsections cite back to this section for scope, evaluation
+protocol, and uncertainty interpretation rather than restating it.
+
+## M1. Reproduction scope
+
+We reproduce the chain of variants that drives the paper's Section 5
+comparison (LN-CoTFormer vs ADM at full compute, 60k steps) plus the
+intermediate 40k results from Table 2 that establish the non-adaptive
+baseline. Concretely:
+
+| Subsection | Variant | Paper row | Steps |
+|---|---|---|---|
+| [§A1](#a1-cotformer--reserved-layers-perplexity-table-2-40k-steps) | CoTFormer + Reserved Layers | Table 2 "+ Reserved Layers" | 40k |
+| [§A2](#a2-ln-cotformer-perplexity-table-2-40k-steps) | LN-CoTFormer | Table 2 "+ Layer Norm" | 40k |
+| [§A2a](#a2a-ln-cotformer-perplexity-section-5-60k-steps) | LN-CoTFormer | Section 5 | 60k |
+| [§A6](#a6-adm-perplexity-section-42-figure-4-60k-steps) | Adaptive LN-CoTFormer (ADM) | Section 4.2, Figure 4 | 60k |
+| [§A7](#a7-section-5-comparison-ln-cotformer-vs-adm-at-60k-steps) | LN-CoTFormer vs ADM | Section 5 claim | 60k |
+
+The only Table 2 row we deliberately skip is the bare "CoTFormer 24×5"
+(24 layers, no reserved prefix/suffix). That variant sits outside the
+`2→21×5→1` layer allocation that every subsequent Section 3/4/5 variant
+uses, so reproducing it would not advance the Section 5 comparison chain
+that [§A1](#a1-cotformer--reserved-layers-perplexity-table-2-40k-steps)
+"Ordering rationale" prioritises.
+
+## M2. Evaluation protocol
+
+All metrics reported in [Part A](#part-a-successful-replications) come
+from standalone `eval.py` runs launched with `--distributed_backend
+None` on a single L4 GPU, reading the trained-model checkpoint
+directory and the OWT2 `val.bin` memmap used during training. Each run iterates the full validation set exactly
+once: 3,973 contiguous windows of length `sequence_length=256` at the
+training-time `batch_size=8`, no subsampling. See `eval.py:77-167` for
+the sweep implementation (batch construction at `eval.py:57-72`, loss
+and CI computation at `eval.py:135-165`).
+
+The original authors' evaluation path (`eval.py` from commit `2723e30`)
+uses `data['val']` exclusively with the same contiguous-window
+construction, so our protocol matches theirs modulo batch size — the
+batch-size mismatch has no measurable effect on the reported perplexity
+and is analysed in [§B11](#b11-evaluation-batch-size-independence).
+
+The `--distributed_backend None` override is mandatory because
+`summary.json` serialises the training `distributed_backend` (`nccl`);
+without the override, the evaluator would try to initialise NCCL and
+fail on single-GPU evaluation resources. The point estimate, 95%
+perplexity CI, and raw per-batch losses for each run are persisted to
+`eval_summary_ckpt_<step>.json` for downstream consumption.
+
+## M3. Confidence intervals and the paper's SEM
+
+[Part A](#part-a-successful-replications)'s result tables report two
+distinct uncertainty quantities — our 95% confidence interval and the
+paper's parenthetical SEM — that answer different statistical questions. Both are labelled "SEM" in various
+dictionaries but sample from different populations, and this document
+never treats them as interchangeable. This subsection defines each
+quantity and states how the rest of the document uses them.
+
+**What our 95% CI measures (intra-run cross-batch variance).** For a
+single evaluation run of one trained model, `eval.py` collects the 3,973
+per-batch cross-entropy losses, takes their mean and sample standard
+deviation, and constructs `mean ± 1.96 × (std / √n)` in loss space. The
+endpoints are then exponentiated into perplexity space for the CI row in
+each A-section table. The construction is visible at `eval.py:148-157`.
+This samples from the distribution of per-batch losses on the validation
+set for ONE fixed trained model, and answers: *given the spread of losses
+across validation batches, how confident are we that the reported point
+estimate is close to the true intra-run mean?* In
+[§A1](#a1-cotformer--reserved-layers-perplexity-table-2-40k-steps), for
+example, our point estimate is 24.64 with 95% CI [24.25, 25.03], and the
+paper's 24.51 falls inside this interval.
+
+**What the paper's parenthetical SEM measures (inter-run cross-seed
+variance).** Paper table entries such as "24.11(0.03)" in Table 2 report
+`std(PPL_seed_1, PPL_seed_2, PPL_seed_3) / √3` — the standard error of
+the mean across three independently trained seeds. This samples from the
+distribution of trained models for ONE fixed architecture and training
+recipe, and answers: *how sensitive is the learned model to training
+randomness?* It does not measure how confident any single evaluation is
+in its own point estimate.
+
+**Why the two sample different populations.** Intra-run cross-batch
+variance fixes the model and varies the data subset; inter-run cross-seed
+variance fixes the data and varies the model. An architecture can carry a
+tight inter-seed SEM and a wide intra-run CI at the same time, or vice
+versa, because the two quantities answer different questions.
+Collapsing them is a category error. We run a single training seed per
+variant (hardware budget), so we cannot construct our own inter-seed
+SEM; the paper does not release per-batch losses for any variant, so we
+cannot construct their intra-run CI. The two quantities are therefore
+not directly comparable.
+
+**How this document uses both quantities.** When the paper's point
+estimate falls inside our intra-run 95% CI, we describe the result as
+*"reproduced within intra-run noise"*. We do not claim statistical
+equivalence in the paper's inter-seed sense unless explicitly flagged in
+the relevant A-subsection. When the paper's estimate falls outside our
+CI, we name the absolute gap as a delta and attribute it via
+[Part B](#part-b-known-divergences) divergences rather than to any
+single divergence — see
+[§A6](#a6-adm-perplexity-section-42-figure-4-60k-steps) for an example
+where the ADM +0.23 PPL gap is attributed to the combined effect of
+[§B1](#b1-trainval-split-divergence),
+[§B3](#b3-micro-batch-size-hardware-constrained), hardware/kernel
+differences, and seed variance.
+
+**Per-batch loss-level SEM.** Several A-section tables also report
+`Per-batch SEM (loss) = 0.0081`. This is the standard error of the mean
+of the 3,973 per-batch losses in loss space, `std_loss / √n`, and is
+computed alongside the CI by `eval.py:152`. Propagated into perplexity
+space via the delta method, it bounds the intra-run noise on the point
+estimate at approximately 0.25 PPL. It is labelled **intra-run** here
+and in the A-section tables to make explicit that it is NOT comparable
+to the paper's inter-seed SEM.
+
+## M4. Training configuration shared across variants
+
+Every [Part A](#part-a-successful-replications) training run uses
+2× NVIDIA L4 24 GB GPUs via DDP on OpenWebText2 with the same
+optimiser and schedule: fused AdamW, cosine
+LR via `OneCycleLR` (peak 1e-3, `warmup_percent=0.2`,
+`final_div_factor=0.05`), effective batch size 128
+(`batch_size=8 × acc_steps=16` before DDP halves `acc_steps`),
+`dropout=0.0`, `find_unused_parameters=False`. The authoritative
+configuration is in `iridis/adm-train/job.sh` (ADM 60k) and the sibling
+`iridis/lncot-train/job.sh` and `iridis/cot-res-train/job.sh`
+(non-adaptive 40k); shared environment variables live in
+`iridis/env.sh`.
+
+The micro-batch decomposition is dictated by the 2× L4 24 GB memory
+budget rather than by choice —
+[§B3](#b3-micro-batch-size-hardware-constrained) documents the specific
+constraint and its expected floating-point accumulation effect. DDP
+infrastructure diverges from the authors' single-A100 setup in two ways
+that only affect ADM training: RNG state restoration across resume
+boundaries
+([§B4](#b4-rng-state-restoration-on-ddp-resume-adm--resolved)) and
+checkpoint save coordination that replaces NCCL with a secondary Gloo
+process group ([§B9](#b9-ddp-checkpoint-save-failures--nccl--lustre-adm--resolved)).
+Non-adaptive variants ([§A1](#a1-cotformer--reserved-layers-perplexity-table-2-40k-steps),
+[§A2](#a2-ln-cotformer-perplexity-table-2-40k-steps),
+[§A2a](#a2a-ln-cotformer-perplexity-section-5-60k-steps)) consume no
+CUDA RNG during training and are unaffected by
+[§B4](#b4-rng-state-restoration-on-ddp-resume-adm--resolved); they share
+the same DDP infrastructure otherwise.
+
+## M5. What "delta" means in this document
+
+Each A-section reports a "delta" row: our point estimate minus the
+paper's. When the delta is positive our perplexity is higher (worse);
+when negative, lower (better). The delta is then compared against two
+noise bounds from M3: the intra-run 95% CI width (computed per-variant,
+typically ~0.76 PPL on our hardware) and the 0.25 PPL per-batch loss
+SEM propagated through the delta method from the 0.0081 loss-space SEM.
+
+Two interpretations of a positive delta follow. When the delta falls
+inside our 95% CI, the paper's point estimate is statistically
+compatible with our intra-run evaluation and we describe the result as
+*"reproduced within intra-run noise"*. We do not claim statistical
+equivalence in the paper's inter-seed sense — we cannot measure that —
+but we can assert the point estimates are mutually compatible given the
+spread of per-batch losses on our trained model. When the delta falls
+outside our 95% CI, the paper's estimate lies beyond our intra-run
+uncertainty; we name the gap explicitly and attribute it to a
+combination of [Part B](#part-b-known-divergences) divergences
+(train/val split, micro-batch decomposition, kernel/hardware
+differences, single-seed variance). We
+do not run controlled isolation experiments of each divergence because
+the compute budget to do so (one extra training run per divergence,
+~52 h per ADM 60k run on `ecsstudents_l4`) exceeds our allocation.
+
+We train a single seed per variant. We therefore have no inter-seed
+variance estimate of our own, and when the paper's inter-seed SEM is
+mentioned in an A-subsection it is cited as paper context rather than
+as a quantity we can check.
 
 ---
 
 # Part A: Successful Replications
 
-> **Step-count disambiguation**: A1 reports the CoTFormer + Reserved Layers
-> at **40,000 steps** (Table 2 "+ Reserved Layers" row). A2 reports the
-> LN-CoTFormer at **40,000 steps** (Table 2 "+ Layer Norm" row, equivalent
-> to + Reserved Layers plus a post-repeat LayerNorm). A2a reports the
-> LN-CoTFormer at **60,000 steps** (Section 5 scope). A6 reports the ADM at
-> **60,000 steps** (Section 4.2 scope). A7 compares LN-CoTFormer vs ADM at
-> 60k, directly validating the Section 5 claims. The only Table 2 row we
-> do not reproduce is the bare "CoTFormer 24x5" (24 layers, no reserved
-> prefix/suffix), which sits outside the `2->21x5->1` allocation used by
-> every subsequent variant.
->
-> **Evaluation methodology**: all metrics below are from standalone `eval.py`
-> runs on the **full validation set** (3,973 batches, no subsampling), matching
-> the original authors' evaluation protocol (confirmed by inspection of the
-> original `eval.py` from commit `2723e30`, which uses `data['val']`
-> exclusively). Confidence intervals are 95% CIs computed across per-batch
-> losses, then exponentiated into perplexity space. These reflect
-> **intra-run batch variance**, not the paper's inter-run SEM across 3
-> independent training seeds. We report a single training run per model.
+See [Methodology](#methodology) for the reproduction scope
+([§M1](#m1-reproduction-scope)), evaluation protocol
+([§M2](#m2-evaluation-protocol)), uncertainty interpretation
+([§M3](#m3-confidence-intervals-and-the-papers-sem)), shared training
+configuration ([§M4](#m4-training-configuration-shared-across-variants)),
+and delta vocabulary ([§M5](#m5-what-delta-means-in-this-document)) that
+every subsection below inherits.
 
 ## A1. CoTFormer + Reserved Layers Perplexity (Table 2, 40k steps)
 
@@ -104,50 +310,49 @@ estimate lies inside our intra-run 95% CI.
 
 The "+ Reserved Layers" row of Table 2 corresponds to the
 `cotformer_full_depth` architecture: 2 reserved prefix layers, 21 mid
-blocks repeated 5x, and 1 reserved suffix layer, for a total of 108
+blocks repeated 5×, and 1 reserved suffix layer, for a total of 108
 effective forward-pass layers. It is the architectural parent of the
-LN-CoTFormer (A2): both share the `2->21x5->1` layer allocation and
-differ only in whether a LayerNorm is applied at the end of each
-repeated pass through the mid-block stack.
+LN-CoTFormer ([§A2](#a2-ln-cotformer-perplexity-table-2-40k-steps)):
+both share the `2→21×5→1` layer allocation and differ only in whether
+a LayerNorm is applied at the end of each repeated pass through the
+mid-block stack.
 
 ### Delta interpretation
 
-Our point estimate (24.64) sits inside our intra-run 95% confidence
-interval [24.25, 25.03], which also contains the paper's 24.51. The
-residual +0.13 PPL delta is 0.53% of the paper's value and consistent
-with the sum of known divergences documented in Part B: B1
-(train/val split), B3 (micro-batch decomposition under bfloat16), and
-normal seed-to-seed variance. The paper's reported SEM of 0.01 is
-computed across three training seeds (inter-run variance) and is not
-directly comparable to our single-seed intra-run batch CI -- an apples
-to oranges comparison either way.
+Our point estimate (24.64) sits inside our intra-run 95% CI
+[24.25, 25.03], which also contains the paper's 24.51. The residual
++0.13 PPL delta is 0.53% of the paper's value and consistent with the
+combined effect of [§B1](#b1-trainval-split-divergence) (train/val
+split), [§B3](#b3-micro-batch-size-hardware-constrained) (micro-batch
+decomposition under bfloat16), and single-seed variance; the paper's
+0.01 parenthetical is an inter-seed SEM and is not directly comparable
+— see [§M3](#m3-confidence-intervals-and-the-papers-sem) for the
+uncertainty-quantity distinction.
 
-Unlike A2a and A6, this run is free of both B10 (LR discontinuity; only
-applies to 40k-to-60k extensions) and B4 (RNG state restoration at
-resume boundaries; only applies to ADM). A single SLURM submission
-completed 40,000 steps without auto-resume, so neither divergence
-applies.
+Unlike [§A2a](#a2a-ln-cotformer-perplexity-section-5-60k-steps) and
+[§A6](#a6-adm-perplexity-section-42-figure-4-60k-steps), this run is
+free of both [§B10](#b10-lr-schedule-discontinuity-on-40k-to-60k-extension)
+(LR discontinuity; only applies to 40k-to-60k extensions) and
+[§B4](#b4-rng-state-restoration-on-ddp-resume-adm--resolved) (RNG state
+restoration at resume boundaries; only applies to ADM). A single SLURM
+submission completed 40,000 steps without auto-resume, so neither
+divergence applies.
 
 ### Training configuration
 
-Trained for 40,000 steps on 2x L4 24 GB (DDP), OWT2 dataset, cosine LR
-schedule (peak 1e-3, final ~2e-4) via
-`OneCycleLR(total_steps=40000, anneal_strategy='cos')`. Identical data
-pipeline, effective batch size, and micro-batch decomposition as A2
-(`batch_size=8`, `acc_steps=16`, effective BS=128 after DDP halving).
-Dropout=0.0, `find_unused_parameters=False`. Training package:
+Trained for 40,000 steps using the shared setup of
+[§M4](#m4-training-configuration-shared-across-variants) with
+`OneCycleLR(total_steps=40000, anneal_strategy='cos')`. Training package:
 `iridis/cot-res-train/`.
 
 ### Evaluation configuration
 
-Standalone `eval.py` pass over the full validation set (3,973 batches,
-matching the paper's protocol). Evaluated from the final `ckpt_40000.pt`
-snapshot of the `cotformer_full_depth` class, loaded via `--checkpoint`
-and `--checkpoint_filename ckpt_40000.pt`. Evaluation package:
-`iridis/eval-cot-res/`; artefacts in `iridis/eval-cot-res/run_0/`:
-
-- `eval_4k0.txt` -- full stdout log
-- `eval_summary_ckpt_40000.json` -- machine-readable summary including CI
+Standalone `eval.py` per [§M2](#m2-evaluation-protocol). Evaluated from
+the final `ckpt_40000.pt` snapshot of the `cotformer_full_depth` class
+via `--checkpoint`/`--checkpoint_filename ckpt_40000.pt`. Evaluation
+package: `iridis/eval-cot-res/`; artefacts in
+`iridis/eval-cot-res/run_0/` (`eval_4k0.txt` stdout log,
+`eval_summary_ckpt_40000.json` machine-readable summary including CI).
 
 ### Ordering rationale
 
@@ -155,12 +360,14 @@ The "+ Reserved Layers" variant is the first of the Section 3.3
 architectural tweaks, introduced in the "Reserving Beginning and Final
 Layers" paragraph before the LayerNorm addition that produces the
 LN-CoTFormer in the following paragraph. Reporting this row first
-mirrors the paper's order of presentation and isolates the reserved-
-layer contribution independently of the LayerNorm contribution. A2 then
-reports the LN-CoTFormer (Table 2 "+ Layer Norm" row) which adds a
-post-repeat LayerNorm atop this architecture, and A6 reports the ADM,
-which replaces the sampled repeat count with an adaptive routing scheme
-on the same `2->21x5->1` backbone.
+mirrors the paper's order of presentation and isolates the
+reserved-layer contribution independently of the LayerNorm
+contribution. [§A2](#a2-ln-cotformer-perplexity-table-2-40k-steps)
+then reports the LN-CoTFormer (Table 2 "+ Layer Norm" row) which adds
+a post-repeat LayerNorm atop this architecture, and
+[§A6](#a6-adm-perplexity-section-42-figure-4-60k-steps) reports the
+ADM, which replaces the sampled repeat count with an adaptive routing
+scheme on the same `2→21×5→1` backbone.
 
 ---
 
@@ -177,15 +384,21 @@ on the same `2->21x5->1` backbone.
 | Per-batch SEM (loss) | -- | 0.0081 | -- |
 | n_batches | -- | 3,973 | -- |
 
-Our point estimate (24.13) falls within 0.67 standard deviations of the
-paper's 24.11 +/- 0.03 (inter-run SEM across 3 seeds). Trained for 40,000
-steps on 2x L4 24 GB (DDP), OWT2 dataset, cosine LR schedule (peak 1e-3,
-final ~2e-4). Wall time: 23h 26m across 2 SLURM submissions with
-auto-resume from checkpoint.
+Our point estimate (24.13) sits inside our intra-run 95% CI
+[23.75, 24.51] which also contains the paper's 24.11; the result is
+therefore reproduced within intra-run noise
+(see [§M3](#m3-confidence-intervals-and-the-papers-sem) and
+[§M5](#m5-what-delta-means-in-this-document)). The paper's 0.03
+parenthetical is an inter-seed SEM across three seeds and is not
+directly comparable to our single-seed intra-run CI. Trained for
+40,000 steps using the shared configuration of
+[§M4](#m4-training-configuration-shared-across-variants); wall time
+23h 26m across 2 SLURM submissions with auto-resume.
 
 This confirms that our data pipeline, architecture, and training loop
-faithfully reproduce the paper's non-adaptive LN-CoTFormer result, despite
-the divergences documented in Part B.
+faithfully reproduce the paper's non-adaptive LN-CoTFormer result,
+despite the divergences documented in
+[Part B](#part-b-known-divergences).
 
 ---
 
@@ -204,13 +417,20 @@ the divergences documented in Part B.
 
 The 40k-to-60k extension used auto-resume from the 40k checkpoint with a
 rebuilt `OneCycleLR(total_steps=60000)` scheduler. This introduces a
-learning rate discontinuity at the resume boundary (B10): the 40k schedule
-had decayed to ~2e-5, while the 60k schedule expects ~3.5e-4 at step 40000,
-producing a ~17x LR jump that acts as a mild warm restart.
+learning rate discontinuity at the resume boundary
+([§B10](#b10-lr-schedule-discontinuity-on-40k-to-60k-extension)): the
+40k schedule had decayed to ~2e-5 while the 60k schedule expects
+~3.5e-4 at step 40000, a ~17× LR jump that acts as a mild warm restart.
 
-The wider delta (+0.40 vs +0.02 at 40k) is consistent with B10's impact
-on the final 20k steps. The ADM model (A6) is unaffected by B10 as it was
-trained for 60k steps from scratch.
+The wider delta (+0.40 vs +0.02 at 40k) is consistent with
+[§B10](#b10-lr-schedule-discontinuity-on-40k-to-60k-extension)'s impact
+on the final 20k steps. The ADM model
+([§A6](#a6-adm-perplexity-section-42-figure-4-60k-steps)) is unaffected
+by [§B10](#b10-lr-schedule-discontinuity-on-40k-to-60k-extension) as it
+was trained for 60k steps from scratch. See
+[§M5](#m5-what-delta-means-in-this-document) for how this +0.40 PPL
+delta is compared against the 95% CI in
+[§M3](#m3-confidence-intervals-and-the-papers-sem).
 
 ---
 
@@ -268,9 +488,10 @@ per GPU: 8 x 8 x 2 = 128.
 | Per-batch SEM (loss) | -- | 0.0081 | -- |
 | n_batches | -- | 3,973 | -- |
 
-Trained for 60,000 steps on 2x L4 24 GB (DDP), OWT2 dataset, cosine LR
-schedule (peak 1e-3, final ~2e-4). Wall time: ~52h across 3 SLURM
-submissions with auto-resume from checkpoint.
+Trained for 60,000 steps from scratch using the shared configuration of
+[§M4](#m4-training-configuration-shared-across-variants). Wall time
+~52h across 3 SLURM submissions with auto-resume (see Job Chaining
+table below).
 
 ### Architecture
 
@@ -292,8 +513,9 @@ Training was stable throughout all 60,000 steps:
 | PPL range (eval) | 22.5 -- 25.3 |
 
 No gradient spikes were observed. The PPL oscillation in eval is
-consistent with the non-adaptive LN-CoTFormer (22.4--25.7 in A4) and
-is driven by the small eval sample size, not training instability.
+consistent with the non-adaptive LN-CoTFormer (22.4--25.7 in
+[§A4](#a4-training-stability)) and is driven by the small eval sample
+size, not training instability.
 
 ### Job Chaining
 
@@ -328,58 +550,66 @@ at full compute.
 
 ### Why the Gap Is Wider than the 40k Reproductions
 
-The +0.23 delta (compared to A1's +0.13 for CoT + Reserved Layers and
-A2's +0.02 for LN-CoTFormer 40k) was initially attributed to B4's
+The +0.23 delta falls outside our intra-run 95% CI
+([§M5](#m5-what-delta-means-in-this-document)), so we name it and
+attribute it. An earlier revision attributed it to
+[§B4](#b4-rng-state-restoration-on-ddp-resume-adm--resolved)'s
 RNG-state discontinuities at resume boundaries, since the ADM is the
-only variant that consumes CUDA RNG during training (`torch.rand()` for
-`length_factors`). Empirical testing has since invalidated this
-attribution. The `eval-adm/run_6` matrix re-evaluated the pre-B4 ADM
-(v1) alongside the post-B4 retrain (v2) at both 40k and 60k checkpoints
-under identical conditions. Both versions produce essentially identical
-60k perplexity:
+only variant that consumes CUDA RNG during training (`torch.rand()`
+for `length_factors`). The `eval-adm/run_6` matrix falsifies that
+attribution by re-evaluating the pre-fix ADM (v1, trained before the
+[§B4](#b4-rng-state-restoration-on-ddp-resume-adm--resolved) and
+[§B6](#b6-orphan-modblock-in-adaptivemod-models--resolved) fixes)
+alongside the post-fix retrain (v2) at both 40k and 60k checkpoints
+under identical conditions:
 
 | Version | Training state | 60k PPL | 60k 95% CI | 40k PPL |
 |---------|----------------|---------|------------|---------|
-| v1 | pre-B4 fix (commented RNG restore) | 24.074 | [23.70, 24.46] | 28.073 |
-| v2 | post-B4 fix (Gloo per-rank RNG) | 24.060 | [23.68, 24.44] | 28.079 |
+| v1 | pre-fix (RNG restore commented out, orphan MoDBlock present) | 24.074 | [23.70, 24.46] | 28.073 |
+| v2 | post-fix (Gloo per-rank RNG, orphan removed) | 24.060 | [23.68, 24.44] | 28.079 |
 | Delta | -- | 0.014 | -- | -0.006 |
 
-The 60k v1-vs-v2 delta of 0.014 PPL is below the width of either CI
-(0.76 and 0.76 PPL respectively), and well below the inter-batch SEM
-(~0.0081 in loss space). B4 is therefore methodologically correct but
-its practical impact on final ADM perplexity is below the intra-run
-noise floor.
+The 60k v1-vs-v2 delta of 0.014 PPL is well below either 95% CI width
+(~0.76 PPL) and well below the per-batch loss-level intra-run SEM of
+0.0081 in loss space (~0.25 PPL in perplexity space; see
+[§M3](#m3-confidence-intervals-and-the-papers-sem)).
+[§B4](#b4-rng-state-restoration-on-ddp-resume-adm--resolved) is
+therefore methodologically correct but its practical impact on the
+final ADM perplexity is below the intra-run noise floor on our
+hardware. See [§C1](#c1-orphan-modblock-5-allocated-4-used) for the
+mechanism that links the pre- and post-fix init paths through an
+init-order RNG cascade, and `iridis/eval-adm/README.md` § *ADM v1 vs
+v2: B4 empirical magnitude* for the per-variant statistics.
 
 The residual +0.23 delta against the paper is consistent with the
 combined contribution of several small divergences, none individually
 attributable without controlled experiments we cannot run:
+[§B1](#b1-trainval-split-divergence) (train/val split divergence
+against the authors' HF Arrow split, which has been permanently
+disabled and is unrecoverable),
+[§B3](#b3-micro-batch-size-hardware-constrained) (micro-batch
+decomposition under bfloat16, rounding differences relative to the
+authors' A100-era accumulation), hardware/kernel divergences (cuDNN
+kernel selection, SM89 vs SM80, CUDA 11.8 vs unrecorded), and
+single-seed variance against the paper's three-seed mean. None is a
+divergence-of-interest on its own, but their sum accounts for the
+observed gap more plausibly than
+[§B4](#b4-rng-state-restoration-on-ddp-resume-adm--resolved) alone.
 
-- **B1** (train/val split divergence): negligible but non-zero ordering
-  and permutation differences against the authors' HF Arrow split,
-  which has been permanently disabled and is unrecoverable.
-- **B3** (micro-batch decomposition under bfloat16): floating-point
-  accumulation-order rounding differences relative to the authors'
-  A100-era acc_steps decomposition.
-- **Hardware/kernel divergences**: cuDNN kernel selection, SM89 (L4) vs
-  SM80 (A100) compute-capability differences, CUDA 11.8 vs the authors'
-  unrecorded CUDA version.
-- **Seed variance**: the paper reports a mean over three training seeds
-  (SEM ~0.01--0.03 PPL depending on variant), while we have a single
-  seed. A 0.1--0.3 PPL offset from a single draw is within the
-  statistical band implied by the paper's inter-seed SEM.
-
-None of these is a divergence-of-interest on its own, but their sum
-accounts for the observed gap more plausibly than B4 alone.
-
-The non-adaptive LN-CoTFormer 40k (A2) has no runtime randomness
-(dropout=0.0, fixed repeat count) so B4 does not apply to it in any
-case. The cot-res-train reproduction (A1) also has no runtime
-randomness and lands at +0.13 delta, bounding the ADM's expected delta
-in the absence of B4.
+The non-adaptive LN-CoTFormer 40k
+([§A2](#a2-ln-cotformer-perplexity-table-2-40k-steps)) has no runtime
+randomness (`dropout=0.0`, fixed repeat count) so
+[§B4](#b4-rng-state-restoration-on-ddp-resume-adm--resolved) does not
+apply to it in any case. The cot-res-train reproduction
+([§A1](#a1-cotformer--reserved-layers-perplexity-table-2-40k-steps))
+also has no runtime randomness and lands at +0.13 delta, bounding the
+ADM's expected delta in the absence of
+[§B4](#b4-rng-state-restoration-on-ddp-resume-adm--resolved).
 
 ### Paper Comparison Note
 
-See A7 for the full Section 5 comparison (LN-CoTFormer vs ADM at 60k).
+See [§A7](#a7-section-5-comparison-ln-cotformer-vs-adm-at-60k-steps)
+for the full Section 5 comparison (LN-CoTFormer vs ADM at 60k).
 
 ---
 
@@ -405,20 +635,24 @@ Both models run slightly above the paper's reported values:
 
 | Model | Paper | Ours | Delta | Likely contributors |
 |-------|-------|------|-------|-------------------|
-| LN-CoTFormer 60k | 23.19 | 23.59 | +0.40 | B10 (LR discontinuity from 40k-to-60k extension) |
-| ADM 60k | 23.83 | 24.06 | +0.23 | B4 (RNG state at resume boundaries) |
+| LN-CoTFormer 60k | 23.19 | 23.59 | +0.40 | [§B10](#b10-lr-schedule-discontinuity-on-40k-to-60k-extension) (LR discontinuity from 40k-to-60k extension) |
+| ADM 60k | 23.83 | 24.06 | +0.23 | Combined [§B1](#b1-trainval-split-divergence) + [§B3](#b3-micro-batch-size-hardware-constrained) + hardware + single-seed variance; see [§A6](#a6-adm-perplexity-section-42-figure-4-60k-steps) "Why the Gap Is Wider than the 40k Reproductions" |
 
-The gap in deltas (+0.40 vs +0.23) is consistent with B10 being unique
-to the LN-CoTFormer (trained 40k then extended) while the ADM was trained
-60k from scratch (unaffected by B10, but exposed to B4's RNG-dependent
-capacity routing).
+The gap in deltas (+0.40 vs +0.23) is consistent with
+[§B10](#b10-lr-schedule-discontinuity-on-40k-to-60k-extension) being
+unique to the LN-CoTFormer (trained 40k then extended), while the ADM
+was trained 60k from scratch and its delta aggregates the same
+hardware/seed contributors the 40k CoT + Reserved variant already sees
+in [§A1](#a1-cotformer--reserved-layers-perplexity-table-2-40k-steps).
 
 ### Why the adaptive gap is smaller
 
-The paper's 0.64 gap vs our 0.47 gap is explained by the larger LN-CoTFormer
-delta (+0.40) relative to the ADM delta (+0.23). Since B10 inflates only the
-LN-CoTFormer's perplexity, the gap narrows. A fresh 60k LN-CoTFormer run
-without B10 would likely produce a wider gap closer to the paper's 0.64.
+The paper's 0.64 gap vs our 0.47 gap is explained by the larger
+LN-CoTFormer delta (+0.40) relative to the ADM delta (+0.23). Since
+[§B10](#b10-lr-schedule-discontinuity-on-40k-to-60k-extension) inflates
+only the LN-CoTFormer's perplexity, the gap narrows. A fresh
+60k-from-scratch LN-CoTFormer run would likely produce a wider gap
+closer to the paper's 0.64.
 
 ---
 
@@ -493,18 +727,20 @@ offsets into the memmap file, making physical token ordering irrelevant.
 
 ## B3. Micro-Batch Size (Hardware-Constrained)
 
-**Impact:** Negligible (statistically equivalent gradients)
+**Impact:** Negligible (statistically equivalent gradients).
 
-The original codebase was developed on A100 80 GB GPUs. Our training runs on
-2x NVIDIA L4 (24 GB each) via DDP, which constrains the per-GPU micro-batch
-size.
+The per-GPU micro-batch size is constrained by our hardware budget
+(see [§M4](#m4-training-configuration-shared-across-variants) for the
+shared training configuration). The authors' A100 80 GB setup allowed
+larger micro-batches than our 24 GB L4s; this subsection documents
+the specific numerical consequence.
 
 ### What changed
 
-The effective batch size is preserved at 128 tokens/step, but the micro-batch
-/ accumulation split differs:
+The effective batch size is preserved at 128 tokens/step, but the
+micro-batch/accumulation split differs:
 
-| Setting | Paper (assumed A100) | Ours (2x L4 24 GB) |
+| Setting | Paper (assumed A100) | Ours (2× L4 24 GB) |
 |---------|---------------------|---------------------|
 | `batch_size` (per GPU) | Unspecified (likely 32+) | 8 |
 | `acc_steps` (per GPU) | Unspecified | 8 (16 before DDP halving) |
@@ -513,112 +749,131 @@ The effective batch size is preserved at 128 tokens/step, but the micro-batch
 ### Why it diverges numerically
 
 With loss normalisation `loss = outputs['loss'] / acc_steps`, gradient
-accumulation is mathematically equivalent regardless of micro-batch size.
-However, floating-point addition is non-associative: accumulating 8
-micro-batches of 8 samples produces different rounding than 4 micro-batches
-of 16 samples (or any other decomposition). Under bfloat16 autocast, these
-rounding differences are amplified compared to float32.
+accumulation is mathematically equivalent regardless of micro-batch
+size. However, floating-point addition is non-associative: accumulating
+8 micro-batches of 8 samples produces different rounding than 4
+micro-batches of 16 samples (or any other decomposition). Under
+bfloat16 autocast these rounding differences are amplified compared
+to float32.
 
 ### Impact assessment
 
-The expected gradient is identical. Only the accumulation noise floor changes,
-and it is dwarfed by stochastic minibatch sampling noise. No measurable effect
-on final perplexity.
+The expected gradient is identical. Only the accumulation noise floor
+changes, and it is dwarfed by stochastic minibatch sampling noise. No
+measurable effect on final perplexity.
 
 ### Additional hardware-driven settings
+
+These settings are specific to the 2× L4 memory-constrained decomposition
+and sit alongside the shared training configuration in
+[§M4](#m4-training-configuration-shared-across-variants):
 
 | Setting | Value | Reason |
 |---------|-------|--------|
 | `PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True` | Enabled | Reduces VRAM fragmentation on 24 GB GPUs |
-| `find_unused_parameters` (DDP) | `False` | No unused params after B6 fix; avoids extra autograd traversal |
+| `find_unused_parameters` (DDP) | `False` | No unused params after the [§B6](#b6-orphan-modblock-in-adaptivemod-models--resolved) fix; avoids extra autograd traversal |
 | `--mem` (SLURM) | 128 GB | `--data_in_ram` with 2 DDP workers needs >96 GB system RAM |
 
 ---
 
 ## B4. RNG State Restoration on DDP Resume (ADM) — Resolved
 
-**Impact:** None for LN-CoTFormer; previously caused minor divergence for
-ADM training at resume boundaries
-**Status:** Resolved. Per-rank GPU RNG gathering + full restore on resume.
+**Impact:** None for LN-CoTFormer; previously caused a minor divergence
+for ADM training at resume boundaries.
+**Status:** Resolved. Per-rank GPU RNG gathering + full restore on
+resume (`optim/base.py:64-79,218-280`).
 
 ### Background
 
 The original codebase saves four RNG states in intermediary checkpoints
-(`cpu_rng_state`, `gpu_rng_state`, `numpy_rng_state`, `py_rng_state`) but
-**never restores them** — the restore calls in `optim/base.py` were
+(`cpu_rng_state`, `gpu_rng_state`, `numpy_rng_state`, `py_rng_state`)
+but never restores them — the restore calls in `optim/base.py` were
 commented out. Additionally, the final `ckpt.pt` omitted RNG states
-entirely, and `main.py` would `KeyError` if resuming from such a
+entirely, and `main.py` would raise `KeyError` if resuming from such a
 checkpoint.
 
 ### Why it doesn't affect LN-CoTFormer
 
-The LN-CoTFormer (`cotformer_full_depth_lnmid_depthemb`) has no runtime
-randomness: `dropout=0.0` (all `nn.Dropout` are no-ops) and a fixed
-repeat loop (`range(1, n_repeat+1)`). Training is fully deterministic modulo
-cuDNN kernel selection.
+The LN-CoTFormer (`cotformer_full_depth_lnmid_depthemb`) has no
+runtime randomness — a fixed repeat loop and, per the shared
+configuration of
+[§M4](#m4-training-configuration-shared-across-variants),
+`dropout=0.0`. Training is therefore fully deterministic modulo
+cuDNN kernel selection, and saving or restoring RNG state has no
+effect on its trajectory.
 
 ### Why it affects ADM training
 
-The ADM model (`adaptive_cotformer_..._single_final`) generates random
-`length_factors` via `torch.rand()` at every training step (forward pass,
-lines 400-431 of the model file). These factors control per-repeat capacity
-and are consumed by the router to determine token routing. Although
-`dropout=0.0` in our config, the `torch.rand()` calls consume CUDA RNG state,
-so a resume without RNG restoration produces different capacity factor
-sequences than a continuous run.
+The ADM model calls `torch.rand()` at every training step to sample the
+`length_factors` that control per-repeat capacity — see
+`models/adaptive_cotformer_mod_efficient_sigmoid_crw_lnmid_de_random_factor_single_final.py:400-431`
+for the branches of `depth_random_method`. These `torch.rand()` calls
+consume CUDA RNG state, so a resume without RNG restoration produces a
+different capacity-factor sequence than a continuous run.
 
-Note: the original reprod-notes incorrectly referenced `_predict_depth` and
-`torch.randint` — our specific model variant uses `torch.rand()` for
-`length_factors`, not `torch.randint` for depth prediction.
+An earlier revision of these notes incorrectly referenced `_predict_depth`
+and `torch.randint` from another adaptive variant; our specific model
+variant uses `torch.rand()`.
 
 ### DDP complication (original code)
 
-Simply uncommenting the original restore lines was **incorrect** under DDP.
-The checkpoint was saved only by rank 0
-(`if distributed_backend.is_master_process()`), so the stored
-`gpu_rng_state` belonged to GPU 0. On resume, all ranks load the same
-file — rank 1 would receive rank 0's CUDA state, giving both GPUs
-identical random sequences and breaking statistical independence.
+Uncommenting the original restore lines was incorrect under DDP. The
+checkpoint is saved only by rank 0 (the
+`distributed_backend.is_master_process()` guard at `optim/base.py:230`),
+so the stored `gpu_rng_state` belonged to GPU 0. On resume, all ranks
+load the same file — rank 1 would receive rank 0's CUDA state, giving
+both GPUs identical random sequences and breaking statistical
+independence.
 
 ### Fix
 
-Three changes resolve the issue completely:
+Three changes resolve the issue completely; all code references below
+are to files in the current repo, not to fragments reproduced in this
+section.
 
-1. **Per-rank GPU RNG gathering** (`optim/base.py`): before each checkpoint
-   save, all ranks' `torch.cuda.get_rng_state()` are collected into a list
-   via a Gloo (CPU) `all_gather`. Rank 0 saves this list as `gpu_rng_states`
-   (plural). Single-GPU runs wrap the local state in a one-element list for
-   format consistency. (The transport evolved through several iterations:
-   `all_gather_object` -> NCCL `all_gather` -> Gloo `all_gather` -- see B9
-   for the full history.)
+1. **Per-rank GPU RNG gathering** (`optim/base.py:218-229,250-257`):
+   before each checkpoint save, every rank's `torch.cuda.get_rng_state()`
+   is collected into a list via a Gloo `all_gather` on the secondary
+   process group (`distributed/ddp.py:26`). Rank 0 saves the list as
+   `gpu_rng_states` (plural). Single-GPU runs wrap the local state in a
+   one-element list for format consistency. The transport evolved through
+   several iterations — `all_gather_object` → NCCL `all_gather` → Gloo
+   `all_gather` — documented in full at
+   [§B9](#b9-ddp-checkpoint-save-failures--nccl--lustre-adm--resolved).
 
-2. **Full restore on resume** (`optim/base.py`): all four RNG states are
-   now restored. CPU, numpy, and Python RNG are restored directly (shared
-   across ranks). GPU RNG is restored per-rank: each rank indexes into the
-   `gpu_rng_states` list by its rank ID. Legacy checkpoints with the old
+2. **Full restore on resume** (`optim/base.py:64-79`): all four RNG
+   states are restored. CPU, numpy, and Python RNG are restored directly
+   (shared across ranks). GPU RNG is restored per-rank by indexing
+   `gpu_rng_states` with the rank ID. Legacy checkpoints carrying the
    singular `gpu_rng_state` key are handled by restoring only on rank 0.
 
-3. **Tolerant checkpoint loading** (`main.py`): the RNG key extraction
-   uses `if k in checkpoint`, so old checkpoints missing RNG keys (e.g.,
-   final `ckpt.pt` from before this fix) load without error. Both
-   `gpu_rng_state` (legacy) and `gpu_rng_states` (new) are accepted.
+3. **Tolerant checkpoint loading** (`main.py:167-184`): the RNG key
+   extraction is guarded by `if k in checkpoint`, so old checkpoints
+   missing RNG keys (e.g. the final `ckpt.pt` from before this fix)
+   load without error. Both `gpu_rng_state` (legacy) and
+   `gpu_rng_states` (new) are accepted and coerced to `ByteTensor`
+   before use.
 
 ### Practical impact (post-fix)
 
 ADM multi-job training across SLURM submissions now produces the same
-`length_factors` sequences as a hypothetical continuous run, assuming the
-same number of GPUs on resume. The remaining source of non-determinism is
-cuDNN kernel selection (inherent to CUDA, not fixable without
-`torch.use_deterministic_algorithms(True)` which has a performance cost).
+`length_factors` sequences as a hypothetical continuous run, assuming
+the same number of GPUs on resume. The remaining source of
+non-determinism is cuDNN kernel selection (inherent to CUDA, not fixable
+without `torch.use_deterministic_algorithms(True)`, which has a
+performance cost).
 
 **Empirical magnitude.** The `eval-adm/run_6` evaluation retrained the
-ADM from scratch with this fix in place (v2) and re-evaluated the pre-
-fix training (v1) at identical checkpoints. The 60k PPL delta is 0.014
-(v1 24.074, v2 24.060), well below the inter-batch noise floor. B4 is
-methodologically correct but contributes less than 0.1% to the final
-ADM perplexity on our hardware. See A6 ("Why the Gap Is Wider than the
-40k Reproductions") and `iridis/eval-adm/README.md` for the detailed
-comparison.
+ADM from scratch with this fix in place (v2) and re-evaluated the
+pre-fix training (v1) at identical checkpoints. The 60k PPL delta is
+0.014 (v1 24.074, v2 24.060), well below the intra-run noise floor —
+see
+[§A6](#a6-adm-perplexity-section-42-figure-4-60k-steps) "Why the Gap
+Is Wider than the 40k Reproductions" for the attribution analysis,
+[§C1](#c1-orphan-modblock-5-allocated-4-used) "Init-order RNG offset"
+for the mechanism that makes v1 and v2 trained models differ at all,
+and `iridis/eval-adm/README.md` § *ADM v1 vs v2: B4 empirical
+magnitude* for the full per-variant statistics.
 
 ---
 
@@ -634,36 +889,35 @@ use a size of 64 due to GPU memory constraints.
 
 ## B6. Orphan MoDBlock in Adaptive/MoD Models — Resolved
 
-**Impact:** Fatal crash under DDP; no impact on single-GPU training
+**Impact:** Fatal crash under DDP; no impact on single-GPU training.
 **Status:** Resolved and verified under 2-GPU DDP.
 
 ### Background
 
-All model variants using `MoDBlock` (the Mixture-of-Repeats router) create
-`n_repeat` router modules in `__init__`:
-
-```python
-mod = nn.ModuleList([MoDBlock(config) for _ in range(self.n_repeat)])
-```
-
-However, the forward loop only routes tokens for repeats 1 through
-`n_repeat - 1`. The final repeat has no routing decision — all remaining
-tokens are unconditionally "final". As a result, `mod[n_repeat - 1]` is
-never called and its `mod_router.weight` parameter (768 floats) never
-participates in the autograd graph.
+All MoD-router model variants created `n_repeat` `MoDBlock` instances
+in `__init__` (pre-fix), but the forward loop only invokes routers 0
+through `n_repeat - 2`. The final pass unconditionally finalises all
+remaining tokens without consulting a router. `mod[n_repeat - 1]` is
+therefore an orphan — its `mod_router.weight` parameter (768 floats)
+never participates in the autograd graph.
+[§C1](#c1-orphan-modblock-5-allocated-4-used) contains the
+init/forward-loop walkthrough with exact line ranges; this section
+records the DDP symptom and the specific fix.
 
 ### Why the original codebase doesn't crash
 
-The paper's experiments were run on single NVIDIA A100 80 GB GPUs (no DDP).
-PyTorch only enforces gradient reduction checks in
-`DistributedDataParallel`. On single-GPU, unused parameters are silently
-ignored.
+The authors ran on a single-GPU setup (see
+[§M4](#m4-training-configuration-shared-across-variants)). PyTorch
+only enforces gradient-reduction checks inside `DistributedDataParallel`;
+on single-GPU, unused parameters are silently ignored.
 
 ### How it manifests under DDP
 
-With `find_unused_parameters=False` (set in `distributed/ddp.py`), DDP
-detects on iteration 2 that parameter index 152 did not receive a gradient
-in the prior iteration and raises:
+Our `find_unused_parameters=False` setting on the DDP constructor
+(see [§M4](#m4-training-configuration-shared-across-variants) and
+`distributed/ddp.py:50-51`) causes DDP to detect on iteration 2 that
+parameter index 152 did not receive a gradient in the prior
+iteration and raise:
 
 ```
 RuntimeError: Expected to have finished reduction in the prior iteration
@@ -672,78 +926,77 @@ grad for rank 0: 152
 ```
 
 Index 152 corresponds to `transformer.mod[4].mod_router.weight` for the
-24-layer adaptive model with `n_repeat=5`.
+24-layer `n_repeat=5` ADM.
 
 ### Fix
 
-Changed `range(self.n_repeat)` to `range(self.n_repeat - 1)` in all 5
-affected model files. This removes the orphan router module without
-changing model behaviour — the removed module was never executed.
+Changed `range(self.n_repeat)` to `range(self.n_repeat - 1)` at the
+init site of every affected model file. This removes the orphan router
+module without changing model behaviour. DDP training with
+`find_unused_parameters=False` now completes without the
+parameter-index-152 error. The `length_factors` generation already used
+`n_repeat - 1` elements so it is unaffected.
 
-DDP training with `find_unused_parameters=False` now completes without
-the parameter index 152 error. The `length_factors` generation (which
-already used `n_repeat - 1` elements) is unaffected by the change.
+Why this is a semantically neutral dead-weight removal, and why the
+pre-fix and post-fix code paths nevertheless produce two minutely
+different trained models (via an init-order RNG offset, empirically
+bounded at 0.014 PPL below the intra-run noise floor), is walked in
+[§C1](#c1-orphan-modblock-5-allocated-4-used).
 
 ### Affected files (all from original commit `2723e30`)
 
-1. `models/adaptive_cotformer_mod_efficient_sigmoid_crw_lnmid_de_random_factor_single_final.py`
-2. `models/but_mod_efficient_sigmoid_lnmid_depthemb_random_factor.py`
-3. `models/but_mod_efficient_sigmoid_lnmid_depthemb_random_factor_for_mac_compute.py`
-4. `models/models/adaptive_cotformer_mod_efficient_sigmoid_crw_lnmid_de_random_factor_single_final.py`
-5. `models/models/but_mod_efficient_sigmoid_lnmid_depthemb_random_factor_for_mac_compute.py`
+1. `models/adaptive_cotformer_mod_efficient_sigmoid_crw_lnmid_de_random_factor_single_final.py:322` (ADM, primary model)
+2. `models/but_mod_efficient_sigmoid_lnmid_depthemb_random_factor.py` (BUT with MoD router)
+3. `models/but_mod_efficient_sigmoid_lnmid_depthemb_random_factor_for_mac_compute.py` (MAC-compute ADM used by `get_ppl_per_mac.py`)
 
 ---
 
 ## B7. Training Summary Metrics Never Recorded (Original Code Bug) — Resolved
 
-**Impact:** Training curve data lost in `summary.json`; no effect on model
-quality or training correctness
+**Impact:** Training curve data lost in `summary.json`; no effect on
+model quality or training correctness.
 **Status:** Resolved.
 
 ### Background
 
-The `stats` dictionary in `optim/base.py` was initialised (line 44) with
-empty lists for `train_loss`, `val_loss`, `val_pp`, and `val_acc`, and
-returned to `main.py` for serialisation to `summary.json`. However, the
-corresponding `stats[...].append(...)` calls were never present in the
-original codebase — the lists were always empty. As a result, every
-`summary.json` written by the original code (and our initial runs)
-contained empty metric arrays, making post-hoc training curve
-reconstruction from the summary file impossible.
-
-Training correctness was unaffected: the metrics were computed, logged to
-stdout and wandb, and used for checkpoint decisions — they simply were
-never persisted to the JSON summary.
+`optim/base.py:45` initialises the `stats` dict with empty lists for
+`train_loss`, `val_loss`, `val_pp`, and `val_acc`, and returns it to
+`main.py` for serialisation into `summary.json`. The corresponding
+`stats[...].append(...)` calls were never present in the authors'
+code, so every `summary.json` the original codebase produced carried
+empty metric arrays, making post-hoc training-curve reconstruction
+from the summary file impossible. Training correctness was unaffected:
+the metrics were still computed, logged to stdout and wandb, and used
+for checkpoint decisions.
 
 ### Fix
 
-Added `stats["train_loss"].append(train_loss)` (and corresponding
-`val_loss`, `val_pp`, `val_acc` appends) inside the master-process
-evaluation block (`optim/base.py:155-158`). The stats dict is only
-populated and written by rank 0, which is correct — `main.py:186-188`
-guards the `json.dump(stats, ...)` call with
-`distributed_backend.is_master_process()`.
+Added the four append calls inside the master-process evaluation
+block at `optim/base.py:167-170`. The `json.dump` that writes
+`summary.json` is master-only (`main.py:217-219`), so the writes and
+the appends are both rank-0 operations.
 
 ---
 
 ## B8. Missing `nullcontext` Import in `eval.py` (Original Code Bug) — Resolved
 
-**Impact:** `NameError` crash on CPU-only evaluation; no impact on GPU runs
+**Impact:** `NameError` crash on CPU-only evaluation; no impact on GPU
+runs.
 **Status:** Resolved.
 
 ### Background
 
-`eval.py` uses `nullcontext()` (line 76) as the no-op alternative to
-`torch.amp.autocast` when running without a CUDA device. However, the
-`from contextlib import nullcontext` import was missing from the original
-codebase. On GPU runs (all Iridis jobs), the `torch.amp.autocast` branch
-is taken and `nullcontext` is never evaluated, so the bug was latent.
-A CPU evaluation run (e.g., local testing without GPU) would crash with
-`NameError: name 'nullcontext' is not defined`.
+`eval.py:79` uses `nullcontext()` as the no-op alternative to
+`torch.amp.autocast` when running on a CPU device, but the
+`from contextlib import nullcontext` import was missing from the
+authors' `eval.py`. On GPU runs (all Iridis jobs), the
+`torch.amp.autocast` branch is taken and `nullcontext` is never
+evaluated, so the bug was latent. A CPU evaluation run would crash
+with `NameError: name 'nullcontext' is not defined`.
 
 ### Fix
 
-Added `from contextlib import nullcontext` to the imports in `eval.py`.
+Added the import (now at `eval.py:14`).
 
 ---
 
@@ -754,17 +1007,22 @@ Added `from contextlib import nullcontext` to the imports in `eval.py`.
 
 ### Background
 
-The B4 fix introduced per-rank GPU RNG gathering via
-`torch.distributed.all_gather_object` so that checkpoint saves preserve each
-rank's CUDA RNG state. This was the first code path to inject NCCL collective
-operations into the checkpoint save sequence. On our 2x L4 24 GB DDP setup
-(PyTorch 2.2.0+cu118, Lustre `/scratch/`), a cascade of four distinct
-failures prevented checkpoint saves from ever succeeding.
+The [§B4](#b4-rng-state-restoration-on-ddp-resume-adm--resolved) fix
+introduced per-rank GPU RNG gathering via
+`torch.distributed.all_gather_object` so that checkpoint saves
+preserve each rank's CUDA RNG state. This was the first code path to
+inject NCCL collective operations into the checkpoint save sequence.
+On our setup (see
+[§M4](#m4-training-configuration-shared-across-variants) for the
+DDP/hardware context; specifically PyTorch 2.2.0+cu118 with a Lustre
+`/scratch/` filesystem), a cascade of four distinct failures
+prevented checkpoint saves from ever succeeding.
 
-The original codebase (single A100, no DDP) saved only rank 0's RNG state
-and never restored it (restore calls were commented out in `optim/base.py`).
-v1 training (runs 0-2) used pre-B4 code without any distributed RNG
-gathering and completed 60k steps without checkpoint issues.
+The authors' single-GPU setup saved only rank 0's RNG state and
+never restored it (restore calls commented out in `optim/base.py`).
+v1 training (runs 0-2) used the pre-[§B4](#b4-rng-state-restoration-on-ddp-resume-adm--resolved)
+code without any distributed RNG gathering and completed 60k steps
+without checkpoint issues.
 
 ### Failure timeline
 
@@ -772,11 +1030,11 @@ All five run_3 jobs crashed at step 2000 (`save_checkpoint_freq` boundary):
 
 | Job | Date | Fix state | Error | Root cause |
 |-----|------|-----------|-------|------------|
-| 707599 | Mar 23 | B4 only | `OutOfMemoryError: >1EB` in `all_gather_object` | NCCL size-negotiation corruption [2][3][4] |
+| 707599 | Mar 23 | [§B4](#b4-rng-state-restoration-on-ddp-resume-adm--resolved) only | `OutOfMemoryError: >1EB` in `all_gather_object` | NCCL size-negotiation corruption [2][3][4] |
 | 714422 | Mar 25 | + ByteTensor gather | NCCL gradient ALLREDUCE timeout (SeqNum=51989, NumelIn=2360064) | No barrier after save; rank 1 races ahead [5][6] |
 | 724964 | Mar 27 | + barrier + 30 min timeout | NCCL barrier timeout (SeqNum=51988, NumelIn=1, 1800s) | Lustre I/O stall in `torch.save` [10] |
 | 726223 | Mar 28 | + local-first save to `/tmp` | NCCL barrier timeout (SeqNum=51988, NumelIn=1, 1800s) | NCCL LL protocol hang (see below) |
-| (resolved) | Mar 29 | + Gloo checkpoint coordination | Success | Gloo bypass of NCCL confirmed [12]; ADM v2 completed 60k steps (A6) |
+| (resolved) | Mar 29 | + Gloo checkpoint coordination | Success | Gloo bypass of NCCL confirmed [12]; ADM v2 completed 60k steps ([§A6](#a6-adm-perplexity-section-42-figure-4-60k-steps)) |
 
 ### Root causes
 
@@ -784,7 +1042,7 @@ All five run_3 jobs crashed at step 2000 (`save_checkpoint_freq` boundary):
 Python objects and exchanges sizes via CUDA all-gather. A corrupted value in
 NCCL's size-negotiation step [2] caused a >1 EB allocation request.
 `torch.cuda.get_rng_state()` returns a fixed-size CPU ByteTensor, so pickle
-serialization was unnecessary. **Fix:** replaced with `torch.distributed.all_gather`
+serialisation was unnecessary. **Fix:** replaced with `torch.distributed.all_gather`
 on fixed-size ByteTensors (commit `ef3bff5`). A defensive ByteTensor conversion
 was added in `main.py` for backward-compatible checkpoint loading.
 
@@ -822,16 +1080,19 @@ RNG gathering. Meta's torchtitan [12], Megatron-LM [8], HuggingFace
 Accelerate, and DeepSpeed all use either Gloo (CPU) process groups or
 per-rank files for checkpoint metadata exchange --- never NCCL.
 
-**Fix:** replaced all NCCL operations in the checkpoint path with a secondary
-Gloo (CPU/TCP) process group (`distributed/ddp.py`):
-
-- `dist.new_group(backend="gloo")` created at init, used for RNG `all_gather`
-  (CPU ByteTensors, no GPU round-trip) and post-save `barrier`.
-- `broadcast_buffers=False` added to DDP constructor (all registered buffers
-  are deterministic from config; eliminates unnecessary NCCL broadcasts).
-- `NCCL_PROTO=Simple` set in `iridis/adm-train/job.sh` as belt-and-suspenders
-  (forces Simple protocol for all remaining NCCL ops; negligible throughput
-  impact on PCIe: ~0.04%).
+**Fix:** replaced all NCCL operations in the checkpoint path with a
+secondary Gloo (CPU/TCP) process group. The group is created in
+`distributed/ddp.py:26` via `dist.new_group(backend="gloo")` and used
+for the per-rank RNG `all_gather` (`optim/base.py:223-226, 253-255`;
+CPU ByteTensors, no GPU round-trip) and the post-save `barrier`
+(`distributed/ddp.py:71-72`, called from `optim/base.py:247-248`).
+`broadcast_buffers=False` was added to the DDP constructor at
+`distributed/ddp.py:50-51` (all registered buffers are deterministic
+from config, so broadcasting them every forward is wasted NCCL
+traffic). `NCCL_PROTO=Simple` is set in
+`iridis/adm-train/job.sh:115` as belt-and-suspenders (forces Simple
+protocol for the remaining NCCL ops; negligible throughput impact on
+PCIe: ~0.04%).
 
 ### Affected files (cumulative across all four fix iterations)
 
@@ -846,20 +1107,28 @@ Gloo (CPU/TCP) process group (`distributed/ddp.py`):
 ### Checkpoint format compatibility
 
 The checkpoint format is unchanged: `gpu_rng_states` is a list of CPU
-ByteTensors regardless of whether Gloo or NCCL was used for gathering.
-Old checkpoints with the legacy singular `gpu_rng_state` key are handled
-by the fallback path in `optim/base.py`. Non-ADM models (base,
-cotformer_full_depth, cotformer_full_depth_lnmid_depthemb) have
-`dropout=0.0` and no `torch.rand` calls, so RNG state is irrelevant to
-their training math.
+ByteTensors regardless of whether Gloo or NCCL was used for
+gathering. Old checkpoints with the legacy singular `gpu_rng_state`
+key are handled by the fallback path in `optim/base.py`. Non-ADM
+models (`base`, `cotformer_full_depth`, `cotformer_full_depth_lnmid_depthemb`)
+have no runtime randomness (see
+[§M4](#m4-training-configuration-shared-across-variants) for the
+shared `dropout=0.0` config, and
+[§B4](#b4-rng-state-restoration-on-ddp-resume-adm--resolved) "Why it
+doesn't affect LN-CoTFormer" for the fixed-repeat-loop argument), so
+RNG state is irrelevant to their training math.
 
 ---
 
 ## B10. LR Schedule Discontinuity on 40k-to-60k Extension
 
-**Impact:** Likely contributor to the +0.40 PPL delta in A2a (LN-CoTFormer
-60k: 23.59 vs paper's 23.19). No effect on ADM (trained 60k from scratch).
-**Status:** Accepted. Assessed in A6; consistent with observed delta pattern.
+**Impact:** Likely contributor to the +0.40 PPL delta in
+[§A2a](#a2a-ln-cotformer-perplexity-section-5-60k-steps) (LN-CoTFormer
+60k: 23.59 vs paper's 23.19). No effect on ADM (trained 60k from
+scratch).
+**Status:** Accepted. Assessed in
+[§A6](#a6-adm-perplexity-section-42-figure-4-60k-steps); consistent
+with the observed delta pattern.
 
 ### Background
 
@@ -875,15 +1144,17 @@ The 40k training used `OneCycleLR(total_steps=40000)`:
 - Cosine decay: peak to final LR over steps 8000--40000
 - At step 40000: LR at its minimum (~2e-5, i.e. `1e-3 * final_div_factor`)
 
-On resume with `--iterations 60000`, the original `summary.json` triggered
-an early exit in `main.py` ("Already found experiment... Skipping"). After
-fixing that (iteration-aware skip check), the restored `OneCycleLR` state
-dict had `total_steps=40000`, causing a `ValueError` at step 40001.
+On resume with `--iterations 60000`, the original `summary.json`
+triggered an early exit in `main.py` ("Already found experiment…
+Skipping"). After fixing that with an iteration-aware skip check
+(`main.py:123-131`), the restored `OneCycleLR` state dict had
+`total_steps=40000`, causing a `ValueError` at step 40001.
 
-The fix rebuilds the scheduler with `total_steps=60000` and fast-forwards
-it to step 40000. This means steps 40001--60000 follow the latter portion
-of a 60k cosine schedule, where the LR is still in mid-decay (~3.5e-4 at
-step 40000 under a 60k schedule).
+The fix rebuilds the scheduler with `total_steps=60000` and
+fast-forwards it to the resume iteration (`main.py:189-200` — see the
+`if extending` branch). Steps 40001--60000 then follow the latter
+portion of a 60k cosine schedule, where the LR is still in mid-decay
+(~3.5e-4 at step 40000 under a 60k schedule).
 
 ### The discontinuity
 
@@ -903,57 +1174,301 @@ through this region.
 The LR jump at the boundary acts as a mild "warm restart" for the final 20k
 steps. Two factors limit the practical impact:
 
-1. The model weights and optimizer states are correct (restored from
+1. The model weights and optimiser states are correct (restored from
    checkpoint). Only the LR trajectory diverges.
 2. The 60k schedule's LR at step 40000 (~3.5e-4) is within the range the
    model trained stably at during the first 40k steps (peak 1e-3 to 2e-5).
 
-**Post-evaluation update (A2a):** The final 60k LN-CoTFormer perplexity is
-23.59 vs the paper's 23.19 (delta +0.40). The delta is significantly wider
-than the 40k reproduction (+0.02, A2). Since the ADM (trained 60k from
-scratch, unaffected by B10) has a delta of only +0.23 (A6), this LR
+**Post-evaluation update
+([§A2a](#a2a-ln-cotformer-perplexity-section-5-60k-steps)):** The
+final 60k LN-CoTFormer perplexity is 23.59 vs the paper's 23.19
+(delta +0.40). The delta is significantly wider than the 40k
+reproduction (+0.02,
+[§A2](#a2-ln-cotformer-perplexity-table-2-40k-steps)). Since the ADM
+(trained 60k from scratch, unaffected by this schedule mismatch) has a
+delta of only +0.23
+([§A6](#a6-adm-perplexity-section-42-figure-4-60k-steps)), this LR
 discontinuity is the most likely contributor to the excess LN-CoTFormer
-delta. A fresh 60k-from-scratch run would be the definitive test.
+delta. A fresh 60k-from-scratch LN-CoTFormer run would be the
+definitive test.
 
 ---
 
 ## B11. Evaluation Batch Size Independence
 
-**Impact:** Negligible (<0.001 PPL)
+**Impact:** Negligible (< 0.001 PPL).
 
-Our standalone evaluation (`eval.py`) uses batch_size=8 (from `summary.json`,
-matching training). The paper's evaluation was likely performed with a larger
-batch size on A100 80 GB GPUs.
+Our standalone evaluation (`eval.py`) uses `batch_size=8` (loaded from
+`summary.json`, matching training). The paper's evaluation was likely
+performed with a larger batch size on A100 80 GB GPUs.
 
-Per-sample cross-entropy loss is mathematically invariant to batch size: each
-sequence in a batch is processed independently, and `F.cross_entropy` computes
-per-token loss before averaging. The only micro-effect is the final partial
-batch: `eval.py`'s `get_as_batch` generator (line 62) yields batches of
-`batch_size` samples. If the total number of validation sequences is not
-evenly divisible by batch_size, the last batch has fewer samples but receives
-equal weight in the mean (one `loss_list_val.append()` per batch). At
-~16,400 sequences / batch_size=8 = ~2,050 batches, the partial-batch weight
-contribution is at most 1/2050th of the total, producing <0.001 PPL divergence.
+Per-sample cross-entropy loss is mathematically invariant to batch
+size: each sequence in a batch is processed independently and
+`F.cross_entropy` computes per-token loss before averaging. The only
+micro-effect is the final partial batch: `eval.py:57-72` yields
+batches of `batch_size` samples from the validation memmap. If the
+number of validation sequences is not evenly divisible by
+`batch_size`, the last batch has fewer samples but receives equal
+weight in the mean (one `loss_list_val.append()` per batch, see
+`eval.py:126`). At ~16,400 sequences / `batch_size=8` = ~2,050
+batches, the partial-batch weight contribution is at most 1/2,050 of
+the total, producing < 0.001 PPL divergence.
 
-We deliberately use the training batch_size (from `summary.json`) rather than
-overriding to a larger value, to eliminate this micro-divergence entirely.
-Single-GPU evaluation with `--distributed_backend None` also matches the
-paper's evaluation conditions (no DDP data sharding during eval).
+We deliberately use the training `batch_size` from `summary.json`
+rather than overriding it, to eliminate this micro-divergence entirely.
+Single-GPU evaluation with `--distributed_backend None` (see
+[§M2](#m2-evaluation-protocol)) also matches the paper's evaluation
+conditions (no DDP data sharding during eval).
 
 ---
 
-# Part C: Original Code Bugs
+# Part C: Original Bugs and Mistakes
 
-> Bugs present in the original codebase (`commit 2723e30`, "Add everything")
-> that affect the authors' own reported results. These are distinct from
-> Part B divergences, which arise from our hardware or setup constraints.
->
-> Note: B6 (orphan MoDBlock), B7 (empty training summary), and B8 (missing
-> nullcontext import) are also original code bugs but are documented in Part B
-> because they were discovered during our reproduction process and primarily
-> affected our DDP setup. They are cross-referenced here for completeness.
+Bugs and methodological mistakes present in the original codebase
+(`commit 2723e30`, "Add everything") that affect the authors' own
+reported results or interpretation. These are distinct from
+[Part B](#part-b-known-divergences) divergences, which arise from our
+hardware or setup constraints. Subsections are ordered chronologically
+in the life of our reproduction:
+[§C1](#c1-orphan-modblock-5-allocated-4-used) was encountered during
+reproduction setup before any training started,
+[§C2](#c2-figure-5-position-indexed-cascade-bug-and-methodological-critique)
+during the Figure 5 analysis after the ADM run completed, and
+[§C3](#c3-underspecified-training-schedule-reproducibility-gap) from
+paper-vs-code inspection when extending runs from 40k to 60k.
+Original-code bugs discovered via their DDP symptoms
+([§B6](#b6-orphan-modblock-in-adaptivemod-models--resolved) is one)
+remain in [Part B](#part-b-known-divergences) because it records the
+full DDP-side fix history, while Part C focuses on the semantic
+impact on the authors' reported numbers.
 
-## C1. Figure 5: Position-Indexed Cascade Bug and Methodological Critique
+## C1. Orphan MoDBlock: 5 Allocated, 4 Used
+
+**Impact:** The model allocates one more MoDBlock router than it uses.
+The authors' model file creates `n_repeat` routers in `__init__` but
+the forward loop only invokes routers 0 through `n_repeat - 2` — the
+final pass unconditionally finalises all remaining tokens without
+consulting a router. `mod[n_repeat - 1]` is a dead weight: created,
+initialised, and serialised, but never forward-passed, never gradient
+-receiving, never optimised. Our fix removes it; the removal is a
+dead-weight deletion with zero semantic change to forward, backward,
+or inference.
+
+**Status:** Original author bug (commit `2723e30`), present in all five
+MoD-router model variants. Fixed in commit `657de47` by changing
+`range(self.n_repeat)` to `range(self.n_repeat - 1)` at the init site.
+See [§B6](#b6-orphan-modblock-in-adaptivemod-models--resolved) for the
+DDP discovery story and the specific fix, and this section for the
+downstream semantics.
+
+### What the code does
+
+Our post-fix initialisation is a single line in
+`models/adaptive_cotformer_mod_efficient_sigmoid_crw_lnmid_de_random_factor_single_final.py:322`:
+
+```python
+mod = nn.ModuleList([MoDBlock(config) for _ in range(self.n_repeat - 1)])
+```
+
+The authors' pre-fix version allocated `self.n_repeat` MoDBlocks; the
+fix is `self.n_repeat - 1`. The forward loop was NOT modified — the
+loop bound and the routing guard that skips `mod[n_repeat - 1]` were
+already present in the authors' code, which is why the last router
+becomes an orphan in the first place. The loop lives in
+`models/adaptive_cotformer_mod_efficient_sigmoid_crw_lnmid_de_random_factor_single_final.py:458-479`
+and is structured as:
+
+```python
+for rep_idx in range(1, self.n_repeat + 1):
+    ...
+    if rep_idx < self.n_repeat:
+        is_final, selected_indices, router_weights = \
+            self.transformer.mod[rep_idx - 1](x, capacity_factor=...)
+    else:
+        is_final = x.new_ones((B, x.shape[1])) == 1.
+        selected_indices = x.new_ones((B, 0, 1)).long()
+        router_weights = None  # Not gonna be used anymore
+```
+
+For `n_repeat=5` the loop runs five passes. The guard `rep_idx <
+self.n_repeat` calls `mod[0]`, `mod[1]`, `mod[2]`, `mod[3]` at
+iterations 1 through 4 respectively, gating entry into passes 2 to 5.
+Iteration 5 falls through to the else branch, which synthesises a
+fully-final mask and an empty selection without consulting any router.
+Under the authors' pre-fix allocation `mod[4]` exists in the
+`ModuleList` with an `nn.Linear(768, 1, bias=False)` weight (768
+parameters), but that weight is never reached.
+
+### Functional equivalence: a dead-weight removal
+
+The orphan has three possible effects on training, and all three are
+zero:
+
+1. **Forward pass.** Never called by the `if rep_idx < self.n_repeat`
+   guard. Contributes nothing to logits or to the loss.
+2. **Backward pass.** Never touched by autograd; `.grad` stays `None`
+   throughout the run.
+3. **Optimiser step.** Fused AdamW and the standard
+   `torch.optim.AdamW` skip parameters whose gradient is `None` before
+   applying updates — including the decoupled weight-decay term that
+   otherwise multiplies every parameter. The orphan keeps its
+   random-initialisation value for the entire 60,000-step run.
+
+On the authors' single-GPU setup the orphan also has no runtime
+effect — single-GPU PyTorch does not enforce gradient-reduction
+checks, so the unused parameter is silently ignored. Under our DDP
+setup the orphan is detected as a parameter without a gradient on
+the second training iteration and DDP aborts with `RuntimeError:
+Expected to have finished reduction in the prior iteration [...]
+Parameter indices which did not receive grad for rank 0: 152` —
+index 152 being `transformer.mod[4].mod_router.weight` for our
+24-layer `n_repeat=5` model. This is the symptom documented in
+[§B6](#b6-orphan-modblock-in-adaptivemod-models--resolved); see
+[§M4](#m4-training-configuration-shared-across-variants) for the
+shared hardware and DDP configuration, and `distributed/ddp.py:50-51`
+for the `find_unused_parameters=False` constructor flag that makes
+the detection fatal rather than silent. The fix is necessary for DDP
+to run at all, not to change the trained-model semantics.
+
+A pre-fix model trained on single-GPU and a post-fix model trained
+on the same hardware would produce identical logits, identical
+losses, identical gradients, and identical optimiser trajectories
+for every parameter in the intersection of the two model
+definitions. The only difference between them is whether `mod[4]`
+exists in the state dict.
+
+### Init-order RNG offset: the only real delta
+
+There is one subtle difference between the pre-fix and post-fix code
+paths that survives the dead-weight reasoning. `GPTBase.__init__` calls
+`self.apply(self._init_weights)` which walks the module tree in
+post-order and redraws every `nn.Linear.weight` and
+`nn.Embedding.weight` from a Normal(mean=0, std=0.02) distribution
+(`models/adaptive_cotformer_mod_efficient_sigmoid_crw_lnmid_de_random_factor_single_final.py:333,359-365`).
+The traversal visits, in order, `transformer.wte`, `transformer.wpe`,
+the `h_begin`/`h_mid`/`h_end` Blocks, `transformer.ln_f` and
+`transformer.ln_mid` (LayerNorms are skipped by the init), the
+`transformer.mod[...]` ModuleList, and finally `lm_head`.
+
+Because `self.apply` walks `mod[0..N-1]` **before** `lm_head`, the
+number of MoDBlocks controls the RNG stream offset at which
+`lm_head.weight` is drawn. Pre-fix: `5 × 768 = 3840` samples consumed
+by the `mod` segment. Post-fix: `4 × 768 = 3072` samples. This is a
+**768-sample offset** in the CUDA RNG stream at the moment `lm_head`
+is drawn. `lm_head.weight` is tied to `transformer.wte.weight` via
+`self.transformer.wte.weight = self.lm_head.weight`
+(`models/adaptive_cotformer_mod_efficient_sigmoid_crw_lnmid_de_random_factor_single_final.py:330`),
+so the re-draw at `lm_head` init time also overwrites the initial
+`wte` values; both share the same 38.6 M-element tensor drawn from the
+offset RNG position.
+
+After `self.apply` returns, `__init__` runs a second re-init loop
+(`models/adaptive_cotformer_mod_efficient_sigmoid_crw_lnmid_de_random_factor_single_final.py:335-337`)
+that rescales every `c_proj.weight` in the residual projections:
+
+```python
+for pn, p in self.named_parameters():
+    if pn.endswith('c_proj.weight'):
+        torch.nn.init.normal_(p, mean=0.0, std=0.02/math.sqrt(2 * config.n_layer))
+```
+
+This loop runs at an RNG position that inherits the 768-sample offset
+from the earlier `mod[4]` draw, so every `c_proj.weight` in
+`h_begin`, `h_mid`, and `h_end` is redrawn from a different RNG state
+between pre-fix and post-fix code.
+
+| Tensor | Shape | Role | Pre-fix init state | Post-fix init state |
+|---|---|---|---|---|
+| `mod[4].mod_router.weight` | (1, 768) | orphan router (pre-fix only) | exists with random values, never trained | not allocated |
+| `lm_head.weight` / `transformer.wte.weight` (tied) | (50257, 768) | output projection + token embedding | drawn at RNG offset +768 | baseline |
+| `c_proj.weight` across 24 blocks × 2 per block (attention output + MLP output) | (768, 768) each | residual projections rescaled by the `c_proj` re-init loop | drawn at RNG offset +768 | baseline |
+
+Parameter count at a different RNG position: approximately 38.6 M
+(`lm_head`/`wte`, tied) + 28.3 M (`c_proj` weights across 24 blocks ×
+2 per block × 768 × 768) ≈ **66 M parameters out of the model's
+208.55 M total, ≈ 32 %**. Every other weight is identical between
+pre-fix and post-fix initialisation, because the common RNG prefix
+through the `h_begin`/`h_mid`/`h_end` first-pass init has already been
+consumed by the time `self.apply` reaches the `mod` ModuleList.
+
+Statistically, this is a seed change. Two 60,000-step training runs
+from the pre-fix and post-fix init states produce different gradient
+trajectories that converge to equivalent distributions of final
+weights. The paper's reported inter-seed SEM for LN-CoTFormer 40k is
+0.03 PPL across three seeds (Table 2 parentheticals), which is a
+reasonable prior for the order of magnitude of inter-seed variance on
+the ADM as well.
+
+### Empirical bound
+
+The ADM v1 vs v2 retraining in `eval-adm/run_6` is a controlled
+experiment for exactly this effect. v1 was trained with the pre-fix
+init path (before the orphan removal and the subsequent RNG stream
+changes). v2 was trained from scratch with the post-fix path at
+`iridis/adm-train/job.sh:167` (`--exp_name adm_v2_...`). All other
+training inputs — the shared configuration of
+[§M4](#m4-training-configuration-shared-across-variants), the data
+pipeline, hyperparameters, and hardware — were held constant.
+
+| Checkpoint | v1 PPL | v2 PPL | Delta | Sign |
+|---:|---:|---:|---:|:---:|
+| 40,000 | 28.073 | 28.079 | +0.006 | v2 worse |
+| 60,000 | 24.074 | 24.060 | -0.014 | v2 better |
+
+At 60k the delta is 0.014 PPL — well below either 95 % CI width
+(~0.76 PPL each), well below the per-batch loss-level intra-run SEM of
+0.0081 in loss space (~0.25 PPL in perplexity space; see
+[§M3](#m3-confidence-intervals-and-the-papers-sem)), and well below
+the paper's inter-seed SEM of 0.03 for LN-CoTFormer 40k. The 40k delta
+(+0.006, sign reversed) is consistent with intermediate-checkpoint
+noise from the mid-cosine-decay training state and does not contradict
+the 60k result.
+
+**The init-order RNG offset contributes below the noise floor on our
+hardware.** See
+[§B4](#b4-rng-state-restoration-on-ddp-resume-adm--resolved)
+"Empirical magnitude" and `iridis/eval-adm/README.md` § *ADM v1 vs v2:
+B4 empirical magnitude* for the full per-checkpoint statistics; this
+section does not duplicate them.
+
+### Reframing earlier attributions
+
+Earlier revisions of this document framed the fix as a correctness
+change that allowed the model to "learn to use repeat 5". The
+forward-loop evidence contradicts this: both pre-fix and post-fix
+versions execute five forward passes and call the same four routers
+(`mod[0..3]`) to gate entry into passes 2 to 5. The fifth iteration
+runs unconditionally in both versions; the `if rep_idx <
+self.n_repeat` guard prevents calling a hypothetical fifth router that
+would not route anywhere anyway.
+
+The fix is therefore best described as:
+
+- **A DDP-compatibility dead-weight removal** — no semantic change to
+  forward, backward, or inference in any trained-model sense.
+- **With a subtle init-order side-effect** — equivalent to a seed
+  change, affecting approximately 32 % of parameters via the 768-sample
+  RNG stream offset cascaded through `lm_head/wte` and every
+  `c_proj.weight`.
+- **Empirically bounded below the noise floor** by the v1↔v2
+  0.014 PPL delta at 60k.
+
+Reproduction fidelity against the authors' Section 4.2/Section 5
+numbers is preserved. An earlier attribution of the
+[§A6](#a6-adm-perplexity-section-42-figure-4-60k-steps) +0.23 PPL ADM
+gap to
+[§B4](#b4-rng-state-restoration-on-ddp-resume-adm--resolved) alone is
+invalidated by the same v1 vs v2 experiment: the combined
+[§B1](#b1-trainval-split-divergence) +
+[§B3](#b3-micro-batch-size-hardware-constrained) + hardware +
+single-seed contribution explains the gap more plausibly than any
+single divergence, as discussed in
+[§A6](#a6-adm-perplexity-section-42-figure-4-60k-steps) "Why the Gap
+Is Wider than the 40k Reproductions".
+
+---
+
+## C2. Figure 5: Position-Indexed Cascade Bug and Methodological Critique
 
 **Impact:** The paper's Figure 5 shows a broad distribution of last-repeat
 router weights that we cannot reproduce on L4/PyTorch 2.2 under any of
@@ -965,7 +1480,9 @@ qualitatively confirmed but far smaller in magnitude on our hardware.
 **Status:** Root-caused (bug), experimentally exhausted (reproduction).
 The full methodology, experiment matrix, per-variant statistics, and
 discussion live in `iridis/eval-adm/README.md`; this section summarises
-the verdict and keeps the Part C divergence log self-contained.
+the verdict and keeps the
+[Part C](#part-c-original-bugs-and-mistakes) divergence log
+self-contained.
 
 ### The technical bug
 
@@ -1013,15 +1530,20 @@ expect Figure 5 to depict.
 ### Experiment matrix (2 x 2 x 4 cells)
 
 `iridis/eval-adm/job.sh` runs a systematic matrix over two training
-versions (ADM v1 pre-B4, v2 post-B4), two checkpoints (40k, 60k), and
-four extraction variants:
+versions (ADM v1 pre-fix,
+[§B4](#b4-rng-state-restoration-on-ddp-resume-adm--resolved) and
+[§B6](#b6-orphan-modblock-in-adaptivemod-models--resolved) both
+applied in v2), two checkpoints (40k, 60k), and four extraction
+variants. The full per-variant table and confounder-isolation matrix
+live in `iridis/eval-adm/README.md` § *Experiment matrix design*;
+the verdict is:
 
 | # | Directory | Method | Config | What it isolates |
 |---|-----------|--------|--------|------------------|
 | 1 | `exp5-original` | custom forward | raw JSON | Baseline: authors' code path, PI vs PT delta within the same run |
 | 2 | `exp5-hooks` | forward hooks on `mod_router` | raw JSON | Extraction-method equivalence (captures logits before topk) |
 | 3 | `exp5-cf-sorted` | custom forward, `topk(sorted=True)` | raw JSON | Forced topk reordering, hypothesised to restore A100-like behaviour |
-| 4 | `exp5-cf-argparse` | custom forward | argparse (dtype=bf16) | Config-loading path (dtype=None -> float16 vs bfloat16 autocast) |
+| 4 | `exp5-cf-argparse` | custom forward | argparse (dtype=bf16) | Config-loading path (`dtype=None` → float16 vs bfloat16 autocast) |
 
 ### Findings
 
@@ -1084,7 +1606,9 @@ residual unexplained factor must live in:
     intermediate to test.
 
 (b) Differences in the trained router itself. Our ADM v2 reaches PPL
-    24.06 against the paper's 23.83 (A6, delta +0.23). If the authors'
+    24.06 against the paper's 23.83
+    ([§A6](#a6-adm-perplexity-section-42-figure-4-60k-steps),
+    delta +0.23). If the authors'
     Figure 5 was produced from a model trained with a different seed,
     different `acc_steps` decomposition, or different hardware, the
     underlying router weight distribution would differ even before any
@@ -1117,23 +1641,27 @@ itself.
 
 ### Cross-references
 
-- `iridis/eval-adm/README.md` -- full methodology, experiment matrix,
+- `iridis/eval-adm/README.md` — full methodology, experiment matrix,
   per-variant statistics, v1 vs v2 equivalence discussion, and output
   tree.
-- **C3** (orphan MoDBlock): 5 routers allocated, 4 used (original
-  author bug, fixed in our code via B6).
-- `get_router_weights.py`: unified extraction script with `--method`
-  (`cf` / `cf-sorted` / `hooks`) and `--config-loading` (`raw` /
-  `argparse`) flags for the experiment matrix.
-- `plot_fig5.py`: Figure 5 histogram plotter with three outputs
-  (`figure5_raw.png`, `figure5_picascade.png`, `figure5_ptcascade.png`).
+- [§C1](#c1-orphan-modblock-5-allocated-4-used) — orphan MoDBlock:
+  5 routers allocated, 4 used (original author bug, fixed in our code
+  via [§B6](#b6-orphan-modblock-in-adaptivemod-models--resolved)).
+- `get_router_weights.py` — unified extraction script with `--method`
+  (`cf`/`cf-sorted`/`hooks`) and `--config-loading` (`raw`/`argparse`)
+  flags driving the experiment matrix; also emits the
+  `router_weights_meta.json` sidecar consumed by `plot_fig5.py`.
+- `plot_fig5.py` — Figure 5 histogram plotter emitting
+  `figure5_raw.png`, `figure5_picascade.png`, and
+  `figure5_ptcascade.png` from the sidecar-selected last-repeat slot.
 
-## C2. Underspecified Training Schedule (Reproducibility Gap)
+## C3. Underspecified Training Schedule (Reproducibility Gap)
 
-**Impact:** Increases reproduction difficulty for 60k models; ambiguity in
-LR schedule type
+**Impact:** Increases reproduction difficulty for 60k models; ambiguity
+in LR schedule type.
 
-**Status:** Resolved by code inspection. Documented here for completeness.
+**Status:** Resolved by code inspection. Documented here for
+completeness.
 
 ### Warmup steps for 60k models
 
@@ -1144,170 +1672,31 @@ models introduced in Section 4.2.
 
 The original codebase uses `--warmup_percent 0.2` (a fraction of total
 iterations), not a fixed step count. For the 60k ADM and LN-CoTFormer
-runs, this yields 12,000 warmup steps, not 8,000. A reader following the
-paper's "8000 steps" claim verbatim for a 60k reproduction would use a
-shorter warmup than the authors' actual implementation.
+runs, this yields 12,000 warmup steps, not 8,000. A reader following
+the paper's "8000 steps" claim verbatim for a 60k reproduction would
+use a shorter warmup than the authors' actual implementation.
 
 ### LR schedule type
 
 The paper states "linear warmup" but does not specify the post-warmup
-annealing strategy. The codebase uses `torch.optim.lr_scheduler.OneCycleLR`
-with `anneal_strategy='cos'` (cosine annealing) and
-`div_factor=100, final_div_factor=0.05`. This is not a simple linear
-warmup + constant LR schedule; it is a full cosine cycle from
-`lr/100` up to `lr` (warmup phase) then back down to `lr * 0.05`
-(annealing phase). A reproducer without access to the code would likely
-implement a simpler schedule.
+annealing strategy. The codebase uses
+`torch.optim.lr_scheduler.OneCycleLR` with `anneal_strategy='cos'`
+(cosine annealing), `div_factor=100`, and `final_div_factor=0.05` —
+see `main.py:103-105` for the constructor call. This is not a simple
+linear warmup + constant LR schedule; it is a full cosine cycle from
+`lr/100` up to `lr` (warmup phase) then back down to `lr × 0.05`
+(annealing phase). A reproducer without access to the code would
+likely implement a simpler schedule.
 
 ### Resolution
 
-Our reproduction uses the percentage-based warmup and cosine annealing
-from the original codebase, matching the authors' implementation exactly.
-The paper's "8000 steps" claim is accurate for the 40k scope of Section 3.2
-but should not be extrapolated to Section 4.2's 60k runs.
-
----
-
-## C3. Orphan MoDBlock: 5 Allocated, 4 Used
-
-**Impact:** The model allocates one more MoDBlock router than it uses. The
-authors report `n_repeat=5` repeats, but the forward loop only invokes
-routers for repeats 1 through 4. The 5th repeat unconditionally finalises
-all remaining tokens without consulting a router. The orphan module
-(`mod[n_repeat-1]`) is created, initialised with random weights, and
-occupies GPU memory, but never receives gradients and never affects
-inference.
-
-**Status:** Original author bug (commit `2723e30`), present in all 5 model
-variants. Fixed in commit `657de47` by changing `range(self.n_repeat)` to
-`range(self.n_repeat - 1)`. See B6 for the DDP discovery story.
-
-### Why it matters
-
-The model is configured with `n_repeat=5`, implying 5 routing decisions.
-In reality, there are only 4 routing decisions and 5 passes through the
-mid-block stack. The final pass always applies and blends unconditionally.
-This is a documentation/intent mismatch: the code allocates resources for
-a router that never participates in computation.
-
-For reproduction, this has no practical impact: the orphan was never trained,
-its weights are random initialisation artifacts, and dropping them via
-`strict=False` loading changes nothing. For extension work, the fix
-(`n_repeat - 1` blocks) saves memory for one unused router module.
-
-### Cross-references
-
-- **B6**: How this bug manifests under DDP (`find_unused_parameters=False`
-  crashes with parameter index 152 not receiving gradients).
-
----
-
-## C4. Never Mirror `main.py`'s Checkpoint Path in Bash (Infrastructure Trap)
-
-**Impact:** Bash-side pre-creation of the checkpoint directory diverges from
-`main.py`'s Python-side path construction, producing ghost directories,
-silent wrong-location writes, and near-miss data loss. Affected our
-`cot-res-train` package over 3 iterations before the root cause was
-identified.
-
-**Status:** Resolved. The canonical pattern is `iridis/lncot-train/job.sh`
-and `iridis/adm-train/job.sh`: neither script constructs any bash-side path
-variable. All checkpoint directory creation is delegated to `main.py:122`'s
-`os.makedirs(ckpt_path)` on rank 0.
-
-### The trap
-
-`main.py:119` builds:
-
-```python
-ckpt_path = os.path.join(
-    args.results_base_folder, args.dataset, args.model, args.exp_name
-)
-```
-
-and creates it via `os.makedirs(ckpt_path)` at line 122. This is the single
-source of truth for where a training job writes checkpoints.
-
-The trap appears when a job script introduces a bash-side `CKPT_DIR` (or
-`CKPT_PARENT`) variable to "pre-create the path for early permission
-failure detection." The bash formula and the Python formula then become
-two independent path-construction sites that must be kept in sync
-by eye — and eventually diverge.
-
-### The case study: `cot-res-train` over 4 weeks, 3 occurrences
-
-Our `cot-res-train` package trains `cotformer_full_depth` with reserved
-layers (Table 2, row 2). The `cotformer_full_depth` model-class name is
-also used by another team member (`tak1e25`) for unrelated experiments,
-and their runs had created `/scratch/ab3u21/exps/owt2/cotformer_full_depth/`
-with group-write mode 755 (no write for others in group `fp`).
-
-| Occurrence | Bash-side "fix" | What happened |
-|------------|-----------------|---------------|
-| 1 | Added `mkdir -p "$EXPS_DIR/owt2/cotformer_full_depth/$EXP_NAME"` in bash before `torchrun`. | Bash `mkdir -p` cannot override parent directory permissions. The mkdir failed with EACCES on tak's 755 parent. Same as main.py would have failed — just at login-node stage instead of compute-node. |
-| 2 | Changed bash target parent to `cotformer_full_depth_res_only/` (owned by Abe). | Bash `mkdir -p` succeeded, creating a ghost directory in the new parent. BUT `--model cotformer_full_depth` and `--exp_name cotformer_full_depth_lr0.001_bs8x16_seqlen256` were left unchanged on the CLI, so `main.py:119` kept building the Python path at `/scratch/ab3u21/exps/owt2/cotformer_full_depth/cotformer_full_depth_lr.../` — still on tak's 755 parent. PermissionError at `os.makedirs`. |
-| 3 | Hoped tak would `chmod g+w` (which they eventually did, 2026-04-12). | `main.py:122`'s `os.makedirs` succeeded on the chmod'd parent and silently wrote 21 checkpoints (52 GB) into the tak-owned `cotformer_full_depth/cotformer_full_depth_lr0.001_bs8x16_seqlen256/` directory — NOT the `cotformer_full_depth_res_only/` parent that bash had been mkdir'ing into. The bash ghost directories stayed empty. The operator concluded the checkpoints had been deleted by a teammate. Forensic `ls` revealed the real location 4 weeks after the job started writing there. |
-
-### Why `lncot-train` and `adm-train` never hit this
-
-Neither script defines any bash-side `CKPT_DIR`/`CKPT_PARENT`/`EXP_NAME`
-variable for path construction. Both pass `--model`, `--exp_name`, and
-`--results_base_folder` as CLI flags and let `main.py:122`'s
-`os.makedirs` create the full path. Because their `--model` values
-(`cotformer_full_depth_lnmid_depthemb`, `adaptive_cotformer_mod_efficient_sigmoid_crw_lnmid_de_random_factor_single_final`)
-are unique to the operator's own experiments, the parent directory was
-created by the operator's first run ever with the operator's own umask
-— no collision possible, no permission trap.
-
-### Canonical pattern
-
-```bash
-# Training job script — NO bash-side CKPT_DIR, NO parallel path formula.
-EXPS_DIR="/scratch/$USER/exps"
-mkdir -p "$EXPS_DIR" "$DATA_DIR" "$HF_HOME" "$TIKTOKEN_CACHE_DIR" "$WANDB_DIR"
-
-TRAIN_ARGS=(
-    # ...
-    --model <model_class>
-    --results_base_folder "$EXPS_DIR"
-    --exp_name "<unique_leaf_dir_name>"
-    # ...
-)
-
-torchrun --nproc_per_node="$N_GPUS" main.py "${TRAIN_ARGS[@]}"
-```
-
-If `os.makedirs` raises `PermissionError` because the intermediate
-`<model_class>/` directory is owned by a teammate with mode 755, the
-correct resolutions are:
-
-1. **Social:** ask the teammate to `chmod g+w <model_class>/` (the
-   preferred fix — it takes one chmod and unblocks the shared parent
-   for everyone in the group).
-2. **Structural (rename):** choose an `--exp_name` that lands in a leaf
-   directory name the teammate has not touched. The CoTFormer model
-   registry is keyed on `args.model` strings, so you cannot change the
-   Python class, but the LEAF directory name (`args.exp_name`) is fully
-   under your control. Example: change
-   `cotformer_full_depth_lr0.001_bs8x16_seqlen256` to
-   `cotformer_full_depth_res_only_lr0.001_bs8x16_seqlen256` so the leaf
-   directory is distinctive.
-
-**Never** "solve" this by adding a bash `CKPT_DIR`/`CKPT_PARENT` that
-constructs a different parent from what `main.py:119` will use. The bash
-and Python formulas MUST point at the same directory or the bash
-formula must not exist.
-
-### Cross-references
-
-- `iridis/lncot-train/job.sh`, `iridis/adm-train/job.sh` — canonical
-  training-script pattern (no bash `CKPT_DIR`, just CLI flags).
-- `iridis/job-train.example` — reusable template carrying this convention.
-- `iridis/job-eval.example`, `iridis/job-analysis.example` — sibling
-  templates for eval/analysis packages (which DO hardcode `CKPT_DIR` as
-  the full path to an existing training dir, because they only READ).
-- README.md QuickStart "Submitting and Monitoring" — cluster access,
-  partitions, and general submission workflow.
+Our reproduction inherits the percentage-based warmup and cosine
+annealing from the original codebase (specifically
+`warmup_percent=0.2` and `final_div_factor=0.05` per
+[§M4](#m4-training-configuration-shared-across-variants)), matching
+the authors' implementation exactly. The paper's "8000 steps" claim
+is accurate for the 40k scope of Section 3.2 but should not be
+extrapolated to Section 4.2's 60k runs.
 
 ---
 
