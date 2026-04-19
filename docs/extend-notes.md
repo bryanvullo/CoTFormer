@@ -62,8 +62,19 @@ M2 has two sub-streams:
 The authors write (Appendix F): "a thorough discussion around
 understanding how these models operate is outside the scope of the
 current work, we hope these results encourage such investigations."
-No existing work applies mechanistic interpretability to
-iterative/recurrent transformers [7]. This is the contribution gap.
+Prior work on depth-recurrent transformers (Lu et al. [27] on
+Huginn-3.5B [16] applies Logit Lens and Coda Lens; Chen et al. [28]
+on looped transformers measures cross-loop representation
+degradation) does not cover the specific combination of cross-repeat
+KV attention, weight-tied mid-block with reserved begin/end layers,
+and canonical Belrose 2023 [24] Tuned Lens at five virtual layers
+that CoTFormer exhibits. This narrower gap is the contribution.
+Knupp et al. [37] is a contemporary architectural comparator
+(depth-recurrent attention mixtures with FLOP/parameter/memory
+matching) but does not perform the lens-trajectory or cross-repeat
+KV measurement programme proposed here. See
+[§1.9 novel contributions](#novel-contributions-confirmed-narrow-reframings)
+for the per-claim novelty audit.
 
 Every experiment in M2 must satisfy:
 1. **Specificity**: name the model, checkpoint, layer range, data
@@ -96,6 +107,18 @@ The lecturer cautioned that interpretability tools may not give
    specified in
    [RQ1](#rq1-prediction-convergence-across-repeats-sq1).
 
+The triangulation rule is stated here once and binds every row of
+the [§1.6](#16-reliability-discipline-and-triangulation)
+cross-validation matrix. Each row is audited for operational
+independence: a row whose primary and secondary measurements share
+the same forward pass and the same derived statistic counts as a
+single measurement, and the claim is downgraded to
+"single-measurement preliminary" with the downgrade documented in
+the synthesis output rather than left implicit. This audit is
+explicit, not aspirational; the [§1.6](#16-reliability-discipline-and-triangulation)
+matrix shows the result of the audit row by row, with downgrades
+flagged.
+
 ### Ontological Cleanliness
 
 Every research question answers the lecturer's "what is the question"
@@ -111,6 +134,60 @@ the M2 deliverable. Whatever protocols produce triangulated results by
 the ceiling are reported; the remainder go to "future work". This
 addresses the lecturer's concern that the analysis "could become an
 entire project in its own right."
+
+##### Scope-shedding pre-registered order
+
+A scope-shedding hybrid milestone-and-time trigger, pre-registered
+before any HPC submission, governs which protocols are sacrificed if
+the ceiling is at risk. Three triggers fire in order of precedence:
+
+1. **Pilot 1 validation fail at approximately day 3 of the schedule**
+   (see [§1.8 sequencing](#18-compute-budget-and-sequencing) for the
+   schedule): if the
+   [RQ9](#rq9-recurrent-inductive-bias-for-algorithmic-counting)
+   Pilot 1 does not reproduce Chang and Bisk [25] within the
+   per-OOD-length pass band documented in
+   [§B13](../docs/reprod-notes.md#b13-pilot-1-cb-exact-results-stub) of
+   `docs/reprod-notes.md`, the entire RQ9 sub-stream is shed to M3.
+   The analytic sub-stream (RQ1-RQ8) continues unchanged.
+2. **Calibration inconclusive at approximately day 5**: if the
+   Protocol D-calibration four-gate validation ladder (see
+   [§1.3 Protocol D-calibration](#protocol-d-calibration-rq5-dv-2-attention-entropy-validation))
+   produces an AMBIGUOUS verdict on both Tier 1 (GPT-2-large) and
+   Tier 2 (ADM C5), DV-2 is flagged single-measurement-preliminary
+   and the
+   [RQ5](#rq5-context-preservation-under-adaptive-depth-sq4)
+   "Contextual isolation" claim downgrades to DV-1 + DV-3 only.
+3. **Day-10 progress review under 60 % of protocols complete**: shed
+   in fixed order [RQ8](#rq8-depth-embedding-freeze-ablation-sq1)
+   first, then [RQ5](#rq5-context-preservation-under-adaptive-depth-sq4),
+   then RQ9 (if not already shed by trigger 1). This order minimises
+   the loss of cross-RQ triangulation: RQ8 is single-RQ, RQ5 has DV-1
+   triangulation backup, RQ9 has standalone publication value but
+   does not feed the M2 mechanistic synthesis.
+
+Triggers are checked at the day-3, day-5, and day-10 review
+checkpoints; the human-in-the-loop reviewer (Abe) authorises the
+shed and the rationale enters the [§1.9](#19-m2-decision-log)
+decision log as a dated DEC-M2-NNN entry. Shedding is one-way
+within M2; shed protocols re-enter scope only post-M2.
+
+### Pre-registration venue
+
+All H0 statements, validation gates, threshold values, and
+falsification criteria documented in this section and
+[§1.2](#12-research-questions) are pre-registered at the **Phase 1
+skeleton commit** (see [§1.8 sequencing](#18-compute-budget-and-sequencing)).
+The skeleton commit freezes the protocol contract before any
+training or analysis run begins. Subsequent revisions require a new
+DEC-M2-NNN entry in [§1.9](#19-m2-decision-log) with rationale, and
+the corresponding commit message carries a `pre-registration:
+DEC-M2-NNN` marker so the protocol-history audit is reconstructable
+from `git log --grep`. Calibration-specific gates (Protocol
+D-calibration: Spearman threshold, classifier-accuracy threshold,
+sink-shift threshold) are additionally pre-registered in
+`analysis/calibration/preregister.md` per the Code-wave deliverable
+documented in [§1.3](#13-experimental-protocols).
 
 ### Checkpoint Matrix
 
@@ -128,6 +205,22 @@ Comparison C2-vs-C1 isolates `ln_mid`. C4-vs-C2 isolates the router.
 C5-vs-C4 isolates training duration. C5'-vs-C5 isolates the
 init-order RNG offset from the orphan-MoDBlock fix (see
 `docs/reprod-notes.md` §C1 for the mechanism).
+
+**C4 provenance footnote**: C4 is an in-run 40k snapshot extracted
+from the same ADM training trajectory that produced C5 at 60k
+(checkpoint at `/scratch/ab3u21/exps/owt2/adaptive_cotformer_.../adm_v2_lr...`),
+not an independent end-of-training run. C4 and C5 therefore share
+the same optimiser trajectory, learning-rate schedule, RNG history,
+and DDP communication record up to step 40k. The C4-vs-C2
+comparison consequently carries a **learning-rate trajectory
+confounder**: C2 was trained on the LN-CoTFormer schedule and C4
+on the ADM schedule, so any C4-vs-C2 differential includes both the
+router contribution and the schedule contribution. The C4-vs-C5
+comparison is unaffected because both endpoints inherit the same
+trajectory from step 0 to step 40k, with the only contrast being
+the additional 20k steps; the LR schedule discontinuity documented
+in `docs/reprod-notes.md` §B10 applies to the 40k-to-60k extension
+and is the same for C5 and C5'.
 
 ---
 
@@ -148,6 +241,25 @@ distinct aspect of the model's internal dynamics:
 | SQ3 | Does the ADM router learn a meaningful proxy for token difficulty, or does it approximate random pruning? | Whether the budget-adaptive claim is scientifically supported. The init-order RNG divergence (v1 vs v2 routing patterns; see `docs/reprod-notes.md` §C1) makes this urgent -- if the router converges to different patterns under minor training perturbations, it may not learn a robust difficulty signal. |
 | SQ4 | When only a fraction of tokens survive to repeat 5, do the surviving tokens lose contextual information because their sequence neighbours halted earlier? | Whether the cross-repeat KV cache (containing mixed-depth frozen representations from halted tokens) provides meaningful context, or whether surviving tokens become informationally isolated. No existing literature addresses this. |
 | SQ5 | Does the absence of a proper causal mask in the ADM's cross-repeat attention degrade routing quality? | Whether the ADM's routing decisions are less informed than they could be. The current mask (`k_indices <= indices`) enforces temporal ordering but does not account for repeat-depth relationships. |
+
+##### SQ5 deferral to M3
+
+SQ5 is decomposed here for ontological completeness but
+operationalised in [§2.3 Causal Cross-Repeat Mask for ADM](#23-causal-cross-repeat-mask-for-adm)
+in M3, where the proposed mask redesign is treated as a Milestone 3
+ablation alongside MLA and mcHC. The decomposition stays in M2 so
+that the [§1.6](#16-reliability-discipline-and-triangulation)
+matrix can reference the SQ5 question text when the M2 attention
+analyses ([RQ3](#rq3-attention-head-specialisation-sq2),
+[Protocol C](#13-experimental-protocols)) report cross-repeat
+attention-mass distributions. A descriptive analysis of the current
+ADM mask's attention-mass allocation (per `(layer, repeat,
+position)`) is included in Protocol C as a secondary output, with
+~30 min eval compute beyond the protocol's primary RQ3 budget; this
+descriptive output supplies an empirical baseline for the M3 mask
+redesign without committing M2 compute to a counterfactual mask
+ablation. The H0/falsification statements for SQ5-as-experiment
+appear in [§2.3](#23-causal-cross-repeat-mask-for-adm), not here.
 
 ### 1.2 Research Questions
 
@@ -180,6 +292,17 @@ Logit Lens and Tuned Lens [24] agree on the convergence trajectory?
     intermediate residuals live in a geometrically different subspace
     than final-layer residuals. Tuned Lens eliminates this via
     learned affine translation.
+  - **LR-trajectory confounder for cross-checkpoint comparisons**:
+    C1-vs-C3 and C2-vs-C3 both span the 40k-to-60k extension whose
+    LR schedule was reconstructed rather than restored from the
+    original optimiser state, see `docs/reprod-notes.md` §B10. The
+    schedule discontinuity affects the late-training trajectory and
+    therefore the lens-based "convergence" claim at sites whose
+    trained representation depended on the post-40k LR sequence.
+    Mitigation: report C3-vs-C2 as the primary cross-checkpoint
+    comparison (both LN-CoTFormer; the discontinuity is identical
+    in shape across them) and treat any C1-vs-C3 differential as
+    confounded by both `ln_mid` and the LR trajectory.
 - **H0**: Top-1 accuracy is flat across repeats AND Spearman rho
   between lenses >= 0.80 on the trajectory.
 - **Falsifies H0**: Paired t-test p < 0.01 between repeats 1 and 5
@@ -223,6 +346,44 @@ toward the correct answer" interpretation, condition the trajectory
 analysis on tokens where the final-layer probability of the
 ground-truth token exceeds 0.5.
 
+**Narrow novelty framing** (per [DEC-M2-023](#19-m2-decision-log)):
+the contribution is the first canonical Belrose 2023 [24] Tuned Lens
+(affine + bias, SGD + Nesterov, forward-KL, identity-init) on a
+CoTFormer-style weight-tied depth-recurrent transformer with
+cross-repeat KV attention. The closest prior art is Paulo et al.
+[30], which transferred Tuned Lens to RNN architectures (Mamba,
+RWKV) but not to weight-tied recurrent transformers; Lu et al.
+[27] used Logit Lens and Coda Lens (not canonical Tuned Lens) on
+Huginn-3.5B [16]. The combination of cross-repeat KV cache, five
+weight-shared mid-block repeats, and per-(layer, repeat) translator
+fitting is the specific gap. Conclusions are scoped accordingly:
+results validate the Tuned Lens for this architectural family,
+they do not generalise to depth-recurrent models without the
+weight-tying constraint.
+
+##### Tuned Lens identity diagnostic (per-site applicability gate)
+
+For each of the 105 trained translators T_l, report the Frobenius
+distance from the identity `||A_l - I||_F` and the bias norm
+`||b_l||_2` after the 250-step optimisation has converged
+(see [Tuned Lens convergence gate](#tuned-lens-convergence-gate-dec-m2-017)).
+A site whose translator stays close to the identity contributes
+nothing the unweighted Logit Lens does not already capture, and
+the redundant translator should not be over-interpreted as
+evidence of "tuned-lens-confirmed convergence" at that site.
+
+| Diagnostic band | Threshold | Interpretation |
+|---|---|---|
+| Identity-equivalent | `||A - I||_F < 0.1` and `||b||_2 < 0.1` | Translator is empirically the identity. Report unweighted Logit Lens as the operative measurement; flag the Tuned Lens row as redundant rather than confirmatory. |
+| Mild adjustment | `0.1 <= ||A - I||_F < 1.0` | Translator applies a small affine correction. Report both lenses; cross-lens KL is informative. |
+| Substantive translation | `||A - I||_F >= 1.0` | Translator implements a non-trivial reorientation; the lens is doing meaningful work. The cross-lens KL becomes the canonical convergence signal. |
+
+The diagnostic is reported per (layer, repeat) site as a 21x5 grid
+in the synthesis output. Sites in the identity-equivalent band do
+not contribute to the agreement-vs-disagreement counts in the
+[Tuned Lens triangulation](#tuned-lens-triangulation) gate;
+they are reported as "lens-redundant" in the synthesis.
+
 ##### Tuned Lens failure modes (non-claims)
 
 Three documented failure modes that Protocol A does NOT conclude
@@ -255,6 +416,32 @@ Post-training diagnostic: inspect the singular-value spectrum of each
 learned translator A_l. A sharp spectral drop cross-validates
 [RQ6](#rq6-effective-dimensionality-sq1) dimensionality findings.
 
+##### Tuned Lens convergence gate (DEC-M2-017)
+
+After 250 SGD steps, the Tuned Lens forward KL must be lower than
+the unweighted Logit Lens KL at the same site for >= 95 of the 105
+sites. If the Tuned Lens fails to improve over identity (the logit
+lens IS the identity translator), the training has failed. Failure
+triggers the Muon fallback: re-train all failing sites with Muon
+optimiser for 250 steps (same batch size, same identity init), then
+re-check the same >= 95/105 gate. If Muon also fails, report the
+Tuned Lens as "unconverged" and rely on unweighted logit lens plus
+[RQ2](#rq2-representation-structural-similarity-sq1) CKA plus
+[RQ6](#rq6-effective-dimensionality-sq1) dimensionality for the
+convergence claim (degraded triangulation, explicitly flagged).
+
+##### Inter-batch robustness
+
+All activation-based analyses (Protocols A through I, except
+Protocol I which is a counterfactual intervention) run on **4
+independent validation batches** (4 consecutive non-overlapping
+batches from OWT2 val starting at token offset 0, each of length
+2048; total 8192 tokens; fixed seed for reproducibility).
+Inter-batch coefficient of variation is reported for every metric.
+If CV < 5 % across batches for a given metric, the single-batch
+point estimate is validated. Compute overhead: ~4x on the
+forward-pass-dependent protocols (~2.4 h to ~4.5 h GPU).
+
 #### RQ2: Representation Structural Similarity (SQ1)
 
 **Statement**: Across the 105 (layer, repeat) activation sites in the
@@ -271,13 +458,50 @@ representations as measured by centred kernel alignment (CKA)?
   representations (mitigation: RBF kernel cross-check); finite-sample
   CKA has positive bias at small N (mitigation: Chun et al. [9]
   correction at 2048 tokens).
-- **H0**: CKA > 0.9 across all cross-repeat pairs within each layer
+- **Estimator** (per [DEC-M2-026](#19-m2-decision-log) and
+  Murphy et al. [32]): debiased linear CKA via the unbiased HSIC
+  U-statistic. The biased estimator returns spuriously high
+  similarity in the low-data high-dimensionality regime that
+  applies to per-(layer, repeat) site comparisons (105 sites x 2048
+  tokens vs `n_embd=768` features). Davari et al. [31] further
+  document that biased CKA fails to identify functionally
+  equivalent networks, motivating the switch.
+- **Three-zone interpretation** (pre-registered, **empirical
+  quantiles** of the 1000-permutation null distribution rather than
+  fixed numeric cut-offs): the null distribution is generated by
+  permuting one side of each comparison's token order 1000 times
+  and recomputing the debiased CKA on each shuffle. The thresholds
+  are set as quantiles of the resulting null:
+  - **Redundant**: observed CKA above the 99th-percentile of the
+    permutation null. Cross-repeat KV is compressible with minimal
+    information loss at this site.
+  - **Partially distinct**: observed CKA between the 90th- and
+    99th-percentile of the null. Report as "partial refinement"
+    with the layer-resolved map showing WHERE distinctiveness
+    emerges.
+  - **Structurally distinct**: observed CKA below the
+    90th-percentile of the null. Each repeat contributes unique
+    information at this site.
+- **RBF kernel cross-check** uses bandwidth `sigma = median pairwise
+  distance / sqrt(2)` (median heuristic). The RBF result is reported
+  as a robustness column; the linear debiased estimator is primary.
+- **H0**: observed CKA above the 99th-percentile of the per-pair
+  permutation null at every cross-repeat pair within each layer
   (redundant representations through same weights).
-- **Falsifies H0**: CKA < 0.7 for any adjacent-repeat pair.
-- **What truth**: if H0 holds, cross-repeat KV is redundant and
-  highly compressible. If rejected, each repeat's contribution is
-  unique. The layer-resolved CKA map shows WHERE the model does its
-  most distinctive work.
+- **Falsifies H0**: observed CKA below the 90th-percentile of the
+  null for any adjacent-repeat pair.
+- **What truth**: the distribution of CKA values across all 105
+  sites and the fraction falling into each zone determines whether
+  cross-repeat KV is redundant, partially refined, or structurally
+  unique. Every outcome has a pre-registered interpretation.
+- **Confounders update**: the biased-CKA inflation documented by
+  Davari et al. [31] and Murphy et al. [32] is now a controlled
+  variable rather than a residual confounder; the permutation null
+  also absorbs the finite-sample bias documented by Chun et al. [9].
+  The original Kornblith et al. [40] CKA definition (linear,
+  orthogonal-invariant, isotropic-scaling-invariant) is the
+  reference; the debiased estimator preserves both invariances
+  while removing the small-N bias.
 
 #### RQ3: Attention Head Specialisation (SQ2)
 
@@ -289,10 +513,19 @@ and late (layers 17-21) mid-layers?
 - **IV**: (Layer index, head index) -- 252 heads
 - **DV**: Final-token attention distribution at repeat 5 over all
   (token, repeat) pairs, clustered via k-means (k=4-6, silhouette
-  selection); additionally, 7 attention-geometry metrics
-  (`macro_budget`, `macro_rep_entropy`, `macro_in_entropy`,
-  `macro_same_pos`, `head_budget`, `head_rep_entropy`,
-  `appendix_f_heatmap`) per forward pass
+  selection from k in {2, 3, 4, 5, 6, 7, 8}; **silhouette quality
+  gate**: the observed best silhouette must exceed the 95th-percentile
+  of a 1000-permutation null distribution constructed by independently
+  shuffling cluster labels and recomputing the silhouette. The
+  permutation null replaces the prior fixed 0.25 cut-off (which was
+  a categorical convention in Kaufman and Rousseeuw [51] not
+  derived from the data distribution); a one-tailed p < 0.05 against
+  the empirical null is required to claim "meaningful clustering
+  detected". The Kaufman-Rousseeuw 0.25 reference is retained as a
+  sanity-check secondary diagnostic. Additionally, 7
+  attention-geometry metrics (`macro_budget`, `macro_rep_entropy`,
+  `macro_in_entropy`, `macro_same_pos`, `head_budget`,
+  `head_rep_entropy`, `appendix_f_heatmap`) per forward pass
 - **Controls**: Same checkpoint, averaged over full validation set
 - **Confounders**: Flash Attention does not return weights (mitigation:
   non-flash forward pass; verify overall PPL matches the flash-pass
@@ -347,7 +580,21 @@ repeat 5?
 - **Controls**: Same checkpoint (C5), same data (OWT2 val)
 - **Confounders**: Position-in-sequence correlates with both loss and
   halting. Mitigation: partial correlation controlling for position.
-- **H0**: No correlation (Pearson |r| < 0.1 after position control).
+- **H0**: No correlation between halting depth and per-token CE
+  loss after partial-correlation position control. Operationalised
+  via a non-parametric **bootstrap 95 % confidence interval**
+  (B = 1000 resamples with replacement at the token level). Claim
+  "router learns difficulty proxy" only if the CI excludes zero AND
+  the point estimate `|r|` exceeds **0.05** (a smaller threshold
+  than the Cohen 1988 [49] |r| < 0.1 trivially-small cut-off
+  because N exceeds 10^6 tokens; per Curran-Everett 2008 [50] the
+  practical-significance threshold should track the achievable
+  precision rather than a categorical convention from a textbook
+  that addressed N << 10^4). Additionally compute Spearman rho; if
+  Pearson |r| < 0.05 but Spearman |rho| >= 0.2, report "non-linear
+  monotonic association detected" and follow up with
+  quintile-binned analysis (ANOVA across halting-depth quintiles
+  with Holm-Bonferroni correction across the four contrasts).
 - **What truth**: if H0 rejected, router learns difficulty proxy. If
   H0 holds, router decisions are not meaningfully related to
   difficulty. C5'-vs-C5 tests robustness to training perturbations.
@@ -359,18 +606,127 @@ produce higher-quality predictions when their context tokens also
 survived deep, compared to when most context halted at repeat 1-2?
 
 - **IV**: Fraction of context tokens surviving to same depth
-- **DV**: Per-token CE loss for the target token
+- **DV-1**: Per-token CE loss for the target token (logit-derived;
+  measures output quality).
+- **DV-2** (attention-derived; per
+  [DEC-M2-026](#19-m2-decision-log) and the calibration verdict
+  documented in
+  [§1.3 Protocol D-calibration](#protocol-d-calibration-rq5-dv-2-attention-entropy-validation)):
+  the attention distribution at the final repeat for surviving
+  tokens, binned by context survival fraction, is reduced to an
+  **empirically-calibrated isolation score** rather than to raw
+  attention entropy. The calibration is performed via the
+  three-tier substrate (Tier 1 GPT-2-large, Tier 2 ADM C5, Tier 3
+  contingent 24L standard; see
+  [DEC-M2-029](#19-m2-decision-log)) on synthetic induction-head
+  and broad-integration sequences whose ground-truth attention
+  targets are known by construction. The classifier's decision
+  boundary in (entropy, attention-target-accuracy) space labels
+  each natural test-time bin as "isolation" or "integration"; the
+  classifier-accuracy validation gate is `>= 0.8` at test time.
+  When tiers 1 and 2 disagree, the **ADM C5 tier governs** because
+  the target architecture, not the published-checkpoint reference
+  point, determines DV-2's validity for an adaptive-depth
+  measurement.
+  - **Sink correction is mandatory**: both raw `H_full` and
+    sink-excluded `H_no_sink` (initial-position attention mass
+    masked and the distribution renormalised) are reported.
+    `H_no_sink` is the primary metric whenever the per-bin
+    sink-attention shift exceeds 1 bit, in line with the
+    attention-sink phenomenology of Xiao et al. [26] and Gu et al.
+    [46]. Sink-uncorrected entropy is never reported as a
+    standalone DV-2 number.
+  - **Failure mode**: if the calibration classifier accuracy at
+    test time falls below 0.8 (the
+    [Protocol D-calibration](#protocol-d-calibration-rq5-dv-2-attention-entropy-validation)
+    fourth-gate threshold), DV-2 is flagged
+    single-measurement-preliminary and the contextual-isolation
+    claim is downgraded accordingly. Where calibration is REFUTED
+    on both Tier 1 and Tier 2, the
+    REPLACE-WITH-TOP-K-MASS fallback substitutes DV-2 with the
+    fraction of attention mass at repeat 5 landing on
+    same-or-deeper-survived context tokens (see
+    [Protocol D-calibration](#protocol-d-calibration-rq5-dv-2-attention-entropy-validation)).
+- **DV-3** (representation-derived; new triangulation partner per
+  [DEC-M2-026](#19-m2-decision-log) responding to the pre-Phase-1
+  hostile review's operational-independence concern): cosine
+  similarity between the surviving target token's
+  final-mid-block hidden state and the **unweighted mean** of
+  surviving-context tokens' final-mid-block hidden states, both
+  evaluated at repeat 5 and at the residual stream **PRE-`ln_mid`
+  application** so the comparison is on the unnormalised
+  representation rather than the post-LN unit-norm projection.
+  The unweighted mean is chosen because the alternative
+  attention-weighted mean would import DV-2's attention signal and
+  break operational independence.
+  - **Inclusion criterion**: only tokens with `halt_depth(j) >= 5`
+    (strict deep-survival) are included in the context mean. The
+    sample-size gate (N >= 200 per context-fraction bin) applies
+    to DV-3 separately from DV-1/DV-2; under-resourced bins are
+    reported as "DV-3 deferred" rather than merged.
+  - **Operational independence**: DV-1 is logit-derived, DV-2 is
+    attention-derived, DV-3 is hidden-state-derived. All three are
+    extracted from the same forward pass (no extra GPU cost) but
+    they are three operationally distinct quantities (probability
+    distribution over vocab; probability distribution over KV
+    positions; cosine in `n_embd`-dimensional residual space).
+    This is the W-18 operational-independence bar; it does not
+    require sampling independence.
+  - **H0**: per-token Pearson `|r|` between DV-3 cosine and
+    context-survival-fraction is below 0.1, evaluated under the
+    Holm-Bonferroni-corrected family of RQ5 tests (DV-1, DV-2, and
+    DV-3 jointly; see
+    [§1.6 Concern 3](#concern-3-multiple-comparisons-correction)).
+  - **Falsifies H0**: bootstrap 95 % CI on `r` excludes zero AND
+    one-tailed p < 0.01 against a 1000-permutation null
+    constructed by shuffling the survival-fraction labels.
 - **Controls**: Conditioned on target surviving to repeat 5
-- **Confounders**: Sequence difficulty. Mitigation: z-score loss per
-  sequence.
-- **H0**: Target loss independent of context survival fraction.
-- **What truth**: if H0 rejected, surviving tokens suffer "contextual
-  isolation" -- a fundamental limitation of adaptive depth.
+- **Confounders**: (a) Sequence difficulty -- mitigation: z-score
+  loss per sequence. (b) Position-in-sequence -- mitigation: partial
+  correlation controlling for position (matching
+  [RQ4](#rq4-router-validity-sq3) treatment).
+- **Sample-size gate**: N >= 200 surviving tokens per
+  context-fraction bin. If any bin has fewer, merge adjacent bins
+  until the minimum is met. The ADM uses MoD-style top-k selection
+  with capacity factors (not per-token halting thresholds): survival
+  at repeat 5 is approximately `product(c_i for i in 1..4)` of the
+  sequence. With typical capacity factors ~0.6, approximately
+  `0.6^4 = 13 %` of tokens survive -- well above the gate. If a
+  specific configuration yields less than 5 % survival, report
+  "insufficient data" and defer.
+- **H0** (joint, three-DV): target CE loss independent of context
+  survival fraction AND calibrated isolation score independent of
+  context survival fraction AND DV-3 cosine independent of context
+  survival fraction. Rejection requires Holm-Bonferroni-corrected
+  p-values across the three DVs at family-wise alpha = 0.01 (per
+  [§1.6 Concern 3](#concern-3-multiple-comparisons-correction)).
+- **What truth**: if H0 rejected on at least two of the three DVs,
+  surviving tokens suffer "contextual isolation" -- a fundamental
+  limitation of adaptive depth (triangulated claim with operational
+  independence across logit/attention/hidden-state derivation). If
+  only one DV rejects, the claim is "preliminary,
+  single-measurement". If DV-2 calibration fails the
+  classifier-accuracy gate, the claim is reported under DV-1 + DV-3
+  triangulation only, with DV-2 explicitly downgraded.
 
-**Novelty**: no prior literature addresses contextual isolation in
-adaptive-depth models. This investigation is novel with no existing
-baselines or predictions to calibrate against -- both more valuable
-as a contribution and less constrained by prior expectations.
+**Novelty**: Raposo et al. [48] (Mixture-of-Depths) and Bae et al.
+[47] (Mixture-of-Recursions) introduce per-token dynamic depth
+allocation but neither reports an information-propagation
+measurement of the kind targeted here -- both papers focus on
+performance and routing-quality metrics. Jain et al. (Mixture of
+Nested Experts) extends MoD to vision tokens with similarly
+performance-focused reporting. The cross-repeat KV-cache contextual
+isolation question is therefore genuinely novel within the
+adaptive-depth and mixture-of-recursions literature, with no
+existing baselines or predictions to calibrate against. The
+calibration substrate proposed in
+[Protocol D-calibration](#protocol-d-calibration-rq5-dv-2-attention-entropy-validation)
+fills the methodological gap by anchoring DV-2 against an
+induction-head ground truth on architectures where the mapping
+from attention entropy to information localisation can be checked
+empirically; the
+[contextual-isolation triangulation row](#16-reliability-discipline-and-triangulation)
+is updated to reflect the three operationally independent DVs.
 
 #### RQ6: Effective Dimensionality (SQ1)
 
@@ -383,11 +739,39 @@ as a contribution and less constrained by prior expectations.
   residual-stream scale `||x||_2` per repeat as a pre-check for
   exponential norm growth
 - **Controls**: Same checkpoint, same 2048 tokens
-- **H0**: d_eff constant (+/- 5 %) across repeats within each layer.
-- **Falsification**: Mann-Kendall monotonic decrease p < 0.01.
-- **What truth**: if d_eff decreases, later repeats operate in
-  lower-dimensional subspaces -- directly determining MLA rank
-  allocation (DEC-EXT-001).
+- **H0**: per-layer slope of `log(d_eff)` regressed against repeat
+  index `r in {1,2,3,4,5}` is non-negative, evaluated by
+  Holm-Bonferroni-corrected one-tailed t-test across the 21 mid-
+  layer regressions. The Mann-Kendall test originally proposed at
+  this site is **dropped as the primary statistic**: at n = 5
+  observations per regression Mann-Kendall is severely
+  underpowered (Wang et al. [34] document a power floor below
+  approximately 0.6 at small n even for monotone signals well
+  separated from noise). The per-layer trend regression on 105
+  observations per (layer, repeat) site provides direct
+  log-linear-slope evidence with a per-layer confidence interval.
+  The Mann-Kendall test is retained as a **secondary
+  robustness-check** with explicit power caveat; agreement between
+  the two methods strengthens the claim, disagreement is reported.
+- **Falsification**: per-layer log-linear slope significantly
+  negative (one-tailed t-test p < 0.01 with Holm-Bonferroni across
+  21 layers) **for at least 16 of 21 layers** (a non-arbitrary
+  threshold of 75 % of layers; the remaining layers are reported
+  with their slope CI for transparency).
+- **Ontological purpose**: the truth sought is whether
+  iterative computation in CoTFormer compresses representations
+  into a low-rank manifold across repeats (a structural property
+  of how the recurrent architecture allocates representational
+  capacity). If d_eff decreases monotonically, later repeats
+  operate in lower-dimensional subspaces; if d_eff is flat or
+  increasing, the recurrent architecture preserves or expands
+  representational dimensionality despite identical weights.
+  - *Consequences for M3*: a positive d_eff-decrease finding
+    directly informs the MLA rank allocation (DEC-EXT-001 in
+    [§2.1](#21-multi-head-latent-attention-mla)); a flat or
+    expanding d_eff trajectory suggests uniform or per-repeat
+    rank allocation in MLA. The M3 consequence is downstream of
+    the truth-seeking question, not the motivation for it.
 
 ##### Rogue dimensions and three-way cross-validation
 
@@ -433,15 +817,54 @@ attention entropy on polluted positions?
 - **Confounders**: Position correlates with loss and halting
   (mitigation: partial correlation); easy-token bias (mitigation:
   control for hidden-state norm at entry).
-- **H0**: DV-1 independent of `s_i` bin (|r| < 0.1) AND clone-set
-  attention entropy <= 0.05 higher than non-clone set.
-- **Falsification**: Attention entropy delta >= 0.2 (permutation
-  test, 1000 shuffles).
-- **Ontological purpose**: whether the ADM's interpolation formula is
-  the "safety net" the paper [3] claims or a source of cross-repeat
-  KV cache pollution. If positive, the 0.64 PPL gap reported in
-  Section 5 of [3] gains a mechanistic explanation independent of the
-  gradient-starvation hypothesis.
+- **Three-zone interpretation** for DV-2 (pre-registered with
+  **empirical zone bounds** rather than fixed numeric cut-offs;
+  the original 0.05 / 0.2 thresholds had no literature
+  derivation): the bounds are derived from a control-group
+  calibration on an OWT2 forward pass that does NOT contribute to
+  RQ7 (a held-out validation slice processed with the same model
+  but without the clone-set selection), and additionally
+  cross-checked against CoTFormer training-run inter-step variance.
+  Per [DEC-M2-026](#19-m2-decision-log) (S6 resolution), both
+  control-group calibration and training-run variance are computed
+  and reported; the smaller of the two is the operational zone
+  boundary.
+  - **No pollution** band: entropy delta within `1 sigma` of the
+    control-group non-clone inter-token entropy variance --
+    interpolation works as claimed.
+  - **Mild pollution** band: entropy delta between `1 sigma` and
+    `3 sigma` of the same control variance -- statistically
+    detectable, practically modest. Report exact delta and
+    permutation test p-value.
+  - **Significant pollution** band: entropy delta beyond `3 sigma`
+    of the control variance -- KV cache quality degraded by
+    clones.
+- **H0**: DV-1 independent of `s_i` bin (per RQ4 bootstrap CI
+  procedure) AND clone-set attention entropy delta within the "no
+  pollution" band.
+- **Falsification**: Attention entropy delta beyond the
+  significant-pollution band, evaluated against a
+  **10000-permutation null** (raised from the previous 1000 to
+  ensure the minimum achievable p-value of 0.0001 is well below
+  the family-wise alpha = 0.01 of
+  [§1.6 Concern 3](#concern-3-multiple-comparisons-correction)).
+- **Ontological purpose**: the truth sought is the mechanical
+  behaviour of the ADM's interpolation formula at low router
+  scores -- whether the small-`s_i` update preserves the previous
+  hidden state (as the paper [3] presents as a "safety net") or
+  injects clones whose later KV-cache attention degrades the
+  per-(layer, repeat) attention distribution. Identifying which of
+  these two mechanical regimes operates is itself the
+  contribution; it determines whether ADM's failure mode (when
+  it fails) is router miscalibration or interpolation pollution.
+  - *Consequences for M3*: a positive pollution finding feeds the
+    M3 mcHC design decision (router replacement vs router
+    complement; see [§2.2](#22-manifold-constrained-hyperconnections-mchc)).
+    Independently, a positive finding offers a mechanistic
+    explanation for the 0.64 PPL gap reported in Section 5 of [3]
+    that is distinct from the gradient-starvation hypothesis.
+    The M3 design consequence and the paper-numbers explanation
+    are downstream of the truth-seeking question.
 - **Priority**: HIGH -- feeds M3 mcHC design decision (router
   replacement vs complement).
 - **Relation to [RQ4](#rq4-router-validity-sq3)**: orthogonal. RQ4
@@ -472,8 +895,17 @@ essential to disentangle these.
 embedding is frozen to a constant index at evaluation time, how does
 the per-repeat logit-lens distribution deviate from its natural state?
 
-- **IV**: `depth_idx` condition in {actual, frozen-to-0, frozen-to-4,
-  random} -- 4 conditions
+- **IV**: `depth_idx` condition in {actual, frozen-to-0,
+  frozen-to-1, frozen-to-2, frozen-to-3, frozen-to-4, random,
+  **zero-vector**} -- 8 conditions. The `zero-vector` condition
+  replaces the looked-up depth embedding with a length-`n_embd`
+  zero vector (true signal ablation: `depth_emb` is removed rather
+  than substituted). The 8-condition design separates "frozen at a
+  specific learned vector" from "no signal at all"; both are
+  necessary because the paper architecture commits the model to
+  consume some `depth_emb` input and the model's behaviour under
+  zero input is the ablation reference, while frozen-to-`k`
+  measures sensitivity to substituted-but-trained signal.
 - **DV-1**: Per-repeat logit-lens top-1 accuracy against ground truth
 - **DV-2**: Per-repeat KL divergence
   `D_KL(P_{r, condition} || P_{r, actual})`
@@ -484,14 +916,32 @@ the per-repeat logit-lens distribution deviate from its natural state?
   residual (mitigation: dual measurement without `ln_mid`);
   counterfactual probe limitations (mitigation: state findings as
   "the model's LEARNED use of `depth_emb` at inference").
-- **H0**: Freezing has < 0.01 PPL impact per repeat AND < 1 % drop
-  in per-repeat top-1 accuracy.
-- **Falsification**: Frozen-to-0 causes > 0.05 PPL degradation at
-  repeats 3-5 OR random condition causes non-monotonic accuracy
-  fluctuations.
-- **Ontological purpose**: whether `depth_emb` encodes meaningful
-  "repeat identity"; directly informs M3 DEC-EXT-002 (MLA RoPE
-  branch dimensioning).
+- **H0**: Freezing has less than 0.01 PPL impact per repeat AND
+  less than 1 % drop in per-repeat top-1 accuracy across all 8
+  conditions.
+- **Falsification**: Frozen-to-0 or zero-vector causes more than
+  0.05 PPL degradation at repeats 3-5 OR random condition causes
+  non-monotonic accuracy fluctuations OR zero-vector PPL diverges
+  from frozen-to-0 PPL by more than 0.05 (which would isolate the
+  signal carried by the *trained* depth-0 vector beyond the
+  no-signal ablation reference).
+- **Ontological purpose**: the truth sought is whether the learned
+  `depth_emb` lookup encodes meaningful "repeat identity" that the
+  model exploits at inference, or whether the embedding has been
+  trained but the model has learned to ignore it. The 8-condition
+  IV separates three logical possibilities: (a) the model uses
+  the embedding's signal (large delta vs zero-vector), (b) the
+  model uses a *specific* trained vector (large delta between
+  frozen-to-`k` conditions), (c) the model treats the embedding
+  as a no-op (no condition produces a delta). All three are
+  experimentally distinguishable with this IV and form the
+  ontological output.
+  - *Consequences for M3*: a positive (a) finding informs
+    DEC-EXT-002 (MLA RoPE branch dimensioning in
+    [§2.1](#21-multi-head-latent-attention-mla)); a (c) finding
+    suggests the embedding can be removed without behavioural
+    cost. The M3 consequence is downstream of which of (a)/(b)/(c)
+    the experiment selects.
 - **Priority**: MEDIUM.
 
 #### RQ9: Recurrent Inductive Bias for Algorithmic Counting
@@ -501,6 +951,48 @@ and recurrent attention learn to count from a random starting
 integer, generalising to OOD sequence lengths (train <= 50,
 test <= 200), at higher accuracy than a standard 4-layer Transformer
 with RoPE trained on the same data with the same compute?
+
+##### Twin-pilot design for RQ9 reproduction validity
+
+Per [DEC-M2-021](#19-m2-decision-log) (Abe 2026-04-18, addressing
+the pre-Phase-1 hostile review's reproduction-fidelity concern),
+RQ9 runs two regimes in parallel before any cross-architecture
+comparison is reported. The twin-pilot architecture cleanly
+isolates the *training-regime* effect from the *architecture*
+effect, so that subsequent CoTFormer-vs-baseline comparisons in
+the main sweep cannot be confounded by undocumented configuration
+drift between our setup and Chang and Bisk [25]'s setup.
+
+| Pilot | Substrate | Hyperparameter regime | Seeds | Compute |
+|---|---|---|---|---|
+| Pilot 1 (Chang and Bisk-exact reproduction) | 4L standard Transformer at `n_embd=1024`, 4 heads, `d_ff=4096`, ReLU, `tie_word_embeddings=False`, `scale_attn_by_inverse_layer_idx=True`, `max_grad_norm=1.0`, `get_constant_schedule_with_warmup`, AdamW defaults (`wd=0.01`, `beta2=0.999`), no decay grouping, `n_head=8`, `fp16`, `enable_flash=False` | Bit-identical to [25]'s defaults verified through `inductive_counting_with_LMs/scripts/causal_transformer/{trainer,config}.py` (see [DEC-M2-020](#19-m2-decision-log) and `docs/reprod-notes.md` §B12 for the seven divergences from the paper's prose to the code). | 5 (`[1234, 12, ...]`-style following [25]'s seed convention) | ~1-1.5 L4-hours per seed; ~5-7.5 L4-hours total |
+| Main sweep (CoTFormer-native) | 4L standard + 1L-4R CoT+Reserved + 1L-4R LN-CoTFormer at four widths `n_embd in {128, 256, 512, 1024}` | CoTFormer regime: GELU, `tie_word_embeddings=True` (weight-tied baseline matches the CoTFormer architecture's hardcoded tying), `scale_attn_by_inverse_layer_idx=False`, `max_grad_norm=1.0`, cosine schedule with `warmup=3000`, AdamW (`wd=0.1`, `beta2=0.95`), decay grouping, `n_head=4`, `bf16`/FP32, `enable_flash=True` where supported. Match-samples to 10M total (per [DEC-M2-031](#19-m2-decision-log) and the S11 resolution): **78K steps at effective batch size 128** instead of the originally proposed 312.5K at batch 32. | 3 seeds at `{128, 512}`, **5 seeds at {256, 1024}** (per [DEC-M2-031](#19-m2-decision-log) seed-symmetry resolution) | ~3-4 L4-days |
+
+**Why the twin design**: Pilot 1 establishes that our codebase can
+reproduce [25]'s published 4L-at-1024 result *under their training
+regime*. If Pilot 1 fails, we cannot trust any cross-architecture
+comparison the main sweep produces and the entire RQ9 sub-stream
+sheds to M3 (per the
+[scope-shedding pre-registered order](#scope-shedding-pre-registered-order)
+trigger 1). If Pilot 1 passes, the main sweep's CoTFormer-native
+regime is justified as a *fair-comparison experiment* rather than
+a *reproduction*: the main sweep tests "does the recurrent
+inductive bias help under the training regime we use elsewhere
+in this thesis?", which is the publication-relevant question. The
+distinction between reproduction-fidelity and fair-comparison
+regimes is a named methodology subsection in
+`docs/reprod-notes.md` §M6 (Reproduction-fidelity vs
+fair-comparison regime distinction); see that subsection for the
+discipline that governs how the two regimes are reported.
+
+**Pilot 1 RNG seed protocol**: Pilot 1 uses Chang and Bisk [25]'s
+`[1234, 12]`-style seed convention extended to 5 seeds for
+seed-symmetry parity with the main sweep at `n_embd=1024`. The
+main sweep uses the project's standard seed convention `(train =
+2357, val = 8191, ood = 19937)` plus per-seed perturbations
+documented at training-job submission. Both regimes record their
+seed list in `summary.json` under `--seed_list` so that the
+post-hoc audit can attribute any seed-driven variance correctly.
 
 - **IV-1**: Architecture in {4-layer standard Transformer
   (depth-matched), 1-layer-4-repeat CoT+Reserved CoTFormer (no
@@ -514,8 +1006,74 @@ with RoPE trained on the same data with the same compute?
   isolates width as a confounder; see
   [width sweep design](#width-sweep-design-dec-m2-012) below and
   DEC-M2-012 in [§1.9](#19-m2-decision-log))
-- **DV**: Per-position next-token top-1 accuracy, per-sequence
+- **DV-1**: Per-position next-token top-1 accuracy, per-sequence
   exact-match accuracy, accuracy-by-position curve
+- **DV-2** (mechanistic triangulation): paired
+  linear-and-non-linear probe R^2 for predicting the ground-truth
+  count value from the hidden state at each repeat/layer. The
+  paired design follows Hewitt and Liang [35] selectivity discipline:
+  a non-linear probe with capacity above the linear probe's must
+  beat the linear probe's R^2 by a quantitatively significant
+  margin to claim "non-linear count representation"; otherwise the
+  linear probe's R^2 is the operative result.
+  - **Linear probe**: `sklearn.linear_model.Ridge(alpha=1.0)` on
+    frozen hidden states. One probe per (architecture, width,
+    repeat/layer, seed).
+  - **Non-linear probe**: a small MLP `Linear(n_embd, 8) -> ReLU
+    -> Linear(8, 1)` capacity-matched to the Ridge's effective
+    degrees of freedom (8-unit hidden width keeps the parameter
+    count below `n_embd + 8 + 1` so the non-linear probe does not
+    out-capacity its linear counterpart by more than one order of
+    magnitude). Trained for 200 epochs with Adam at lr=1e-3 on the
+    same 80/20 split as the Ridge; same seed assignment.
+  - **Selectivity rule**: if the MLP probe's R^2 exceeds the Ridge
+    probe's R^2 by less than 0.05 absolute, report the linear
+    probe as the canonical DV-2 number; if the gap exceeds 0.05,
+    report both with the gap size and flag "non-linear
+    representation likely".
+  - Accuracy (DV-1) measures "does the model output the right
+    number?"; the probe (DV-2) measures "does the model internally
+    represent the count?" These can diverge: a model might
+    represent the count but fail to decode it, or output correctly
+    via a shortcut without a clean internal counter. Agreement
+    between probe and accuracy strengthens the "inductive bias"
+    claim.
+  - Implementation: for CoTFormer (1L-4R), one probe pair per
+    repeat exit (4 pairs); for the 4L baseline, one probe pair per
+    layer exit (4 pairs). Input: full `n_embd`-dimensional hidden
+    state. Target: ground-truth integer. ~800 tiny fits total
+    (400 Ridge + 400 MLP), less than 5 min compute on a single L4.
+- **DV-3** (attention-pattern analysis at penultimate repeat; per
+  [DEC-M2-027](#19-m2-decision-log) and S4): structure of the
+  attention distribution at the penultimate decoding step (just
+  before the model emits its prediction) over the input positions
+  carrying the running count tokens. For the CoTFormer (1L-4R),
+  this is the layer-1 repeat-3 attention; for the 4L baseline, the
+  layer-3 attention. Operationalised via two summary statistics:
+  (a) **count-position attention mass** — total attention assigned
+  to the input positions whose tokens are counting numbers (as
+  opposed to filler `a` tokens or BOS); (b) **per-position
+  attention slope** — slope of attention assigned to position `p`
+  as a function of `count_at_p`, fit by linear regression. A
+  recurrent-bias hypothesis predicts both a high count-position
+  attention mass and a clean monotone slope; a baseline that
+  succeeds via a non-counting shortcut shows neither.
+- **DV-4** (causal intervention via zero-ablation; per
+  [DEC-M2-027](#19-m2-decision-log) and S4): at the penultimate
+  decoding step, replace the hidden state at repeat `r in {1, 2,
+  3, 4}` with a zero vector and re-run the remaining
+  forward-pass; record the per-position accuracy delta and the
+  change in cross-entropy at the target position. For CoTFormer,
+  this is one ablation per repeat (4 conditions); for the 4L
+  baseline, one ablation per layer (4 conditions). The
+  intervention is *causal* in the sense that the change in
+  prediction is attributable to the absent computation, modulo
+  the standard caveat that zero-ablation is not the same as
+  removing-the-mechanism (it injects a specific signal: the
+  zero vector). Compute: 4 conditions x 36 main-sweep runs x 7
+  OOD lengths x 1 forward pass each = ~1000 extra forward passes
+  on already-trained models; ~30 min on a single L4 (4x the
+  current eval compute, per Abe's S4 budget allocation).
 - **Controls**: 25-item checklist below
 - **Confounders**: Parameter count (mitigation: the width sweep
   naturally provides param-matched comparisons -- see table below);
@@ -532,18 +1090,61 @@ with RoPE trained on the same data with the same compute?
   that CoTFormer's vertical recurrence partially substitutes for RNN
   horizontal recurrence.
 
-##### Merrill TC^0 framing
+##### Factorial sub-analysis structure
 
-We empirically test whether vertical recurrence (weight-tied repeats)
-provides an inductive bias analogous to horizontal chain-of-thought
-for sequential reasoning tasks. Merrill and Sabharwal [17] prove that
-horizontal CoT expands the complexity class from TC^0 to NC^1 with
-O(n) decoding steps, but their proof requires generating intermediate
-tokens that serve as external memory. Vertical recurrence updates the
-hidden state in place without token generation, so the formal result
-does not directly apply. Both the 1L-4R CoTFormer and the 4L standard
-Transformer are O(1)-depth architectures -- both TC^0. Our experiment
-tests whether the practical benefit transfers despite the formal gap.
+RQ9 has four IVs. Each is analysed in a dedicated sub-analysis with
+all other IVs fixed:
+
+| Sub-analysis | Fixed | Varied | Purpose |
+|---|---|---|---|
+| Architecture comparison | n\_embd=256, Task 1, length=200 | 3 architectures | Core hypothesis test |
+| Width scaling | 4L baseline, Task 1, length=200 | 4 widths | Confounder isolation |
+| OOD generalisation | n\_embd=256, CoT+Res, Task 1 | 7 test lengths | Fragility profile |
+| Task generality | n\_embd=256, CoT+Res, length=200 | 3 tasks | Robustness check |
+
+The architecture x width interaction is the main experiment. The
+full matrix is reported but the dedicated sub-analyses isolate each
+IV per the variable-isolation principle. n\_embd=256 uses 5 seeds
+(matching Chang and Bisk); other widths use 3.
+
+##### Xu and Sato 2025 framing (formal prior)
+
+Per [DEC-M2-024](#19-m2-decision-log) (S2 resolution), RQ9 is
+framed as an **empirical test of Xu and Sato 2025 [29] Theorem 1**
+on the approximate-counting expressiveness gap between latent
+(weight-tied depth-recurrent) and horizontal (token-generating)
+chain-of-thought. Xu and Sato prove that latent-thought reasoning
+admits more efficient parallel computation than sequential CoT
+under bounded budgets while CoT retains an *approximate-counting
+gap*: the horizontal regime can implement counting via explicit
+intermediate token generation that the latent regime cannot
+trivially mirror. Theorem 1 provides the formal prediction; our
+RQ9 design measures whether the gap is empirically narrowed,
+preserved, or widened in the CoTFormer architecture's specific
+weight-tied recurrent setting.
+
+Merrill and Sabharwal [17] established the foundational TC^0
+expressivity baseline for transformers and proved that horizontal
+CoT expands the complexity class from TC^0 to NC^1 with O(n)
+decoding steps, with the proviso that the proof requires
+generating intermediate tokens that serve as external memory; we
+cite Merrill and Sabharwal [17] as the upstream complexity-class
+result that motivated Xu and Sato's [29] subsequent comparison
+analysis, but the framing of RQ9 as a *test of a published
+formal claim* rests on Xu and Sato [29] Theorem 1 rather than on
+the Merrill and Sabharwal [17] complexity bound directly.
+
+Both the 1L-4R CoTFormer and the 4L standard Transformer are
+O(1)-depth architectures and both belong to the same complexity
+class under uniform analysis. The question RQ9 answers is
+empirical: "does the practical benefit Xu and Sato [29] predict
+under approximate-counting conditions transfer to the CoTFormer's
+weight-tied recurrent setting?" A positive RQ9 result (CoTFormer
+beats the 4L baseline at OOD lengths) corroborates Xu and Sato's
+[29] approximate-counting prediction; a negative result either
+falsifies the prediction at the architectural scales we tested or
+identifies a confound (training data, optimisation, attention
+implementation) that the original analysis did not control.
 
 ##### Width sweep design (DEC-M2-012)
 
@@ -687,10 +1288,151 @@ clipping to the CoTFormer variants for a fair comparison. The Conv1D
 vs nn.Linear difference is mathematically equivalent (transposed
 weight matrix) and does not affect model behaviour.
 
-**Compute update**: with two CoTFormer variants (CoT+Reserved and
-LN-CoTFormer) at all four widths, the run count increases from 24
-to 36 (4 widths x 3 architectures x 3 seeds). Estimated wall-clock
-on 2x L4: ~2.5-3 days (up from ~1.5-2 days).
+**Code changes required** (Phase 1 skeleton orch deliverables):
+
+1. **`--activation` flag** (`config/base.py`): choices `gelu`,
+   `relu`. Parameterise `MLP.__init__` in all model files (currently
+   hardcoded `nn.GELU()`). Default: `gelu` (preserves existing
+   behaviour); counting jobs pass `--activation relu`.
+2. **`--tie_word_embeddings` flag** (`config/base.py`): default
+   `True` (preserves existing behaviour). When `False`, skip the
+   `wte.weight = lm_head.weight` assignment AND the corresponding
+   `decay.remove('lm_head.weight')` in `get_parameter_group_specs`.
+   Counting 4L baseline passes `--tie_word_embeddings False`.
+3. **`--scale_attn_by_inverse_layer_idx` flag** (`config/base.py`):
+   default `False`. When `True`, `CausalSelfAttention` divides
+   attention logits by `(layer_idx + 1)` before softmax. Requires
+   threading `layer_idx` through `Block.__init__`. Per
+   [DEC-M2-020](#19-m2-decision-log) (the seven-divergence
+   reconciliation), this flag is enabled **only in Pilot 1**
+   (Chang and Bisk-exact regime) and disabled in the main sweep.
+   The SDPA integration uses PyTorch >= 2.1's `scale` keyword
+   argument (`F.scaled_dot_product_attention(q, k, v, scale=1/sqrt(d_k)/(layer_idx+1))`)
+   when Flash is disabled, or pre-multiplies `q` by
+   `1/(layer_idx + 1)` before the SDPA call when Flash is
+   enabled (Flash does not accept a `scale` argument).
+4. **`data/counting.py` module + dispatcher refactor**: a
+   five-file change touching the dataloader, config, dataset
+   dispatcher, training-loop branch, and main entrypoint:
+   - `data/counting.py` (new): a `CountingDataset` class providing
+     the `__getitem__` and `__len__` protocol expected by the
+     existing `optim/base.py` training loop. Generators support
+     `(start, length)` sampling, the `[start_int, "a"*L]` input
+     format, and the `["-1", start+1, ...]` output format
+     documented above. Constructor seeds the per-rank RNG via the
+     project's `seed_list` convention; the val/ood splits use
+     disjoint seeds per the existing `data/utils.py` pattern.
+   - `config/base.py:43`: add `"counting"` to the `--dataset`
+     choice list so command-line parsing accepts the new dataset
+     name.
+   - `data/utils.py:7-9`: extend the `PREPARE_GET_DATASET_MAP`
+     dispatcher with `"counting": data.counting.prepare_counting_dataset`
+     so the train-loop's loader-resolution finds the new module.
+   - `optim/base.py`: branch the training loop on
+     `args.dataset == "counting"` to skip the OWT2-specific data
+     handling (numpy memmap of token IDs) and consume the
+     counting dataset's tensor-dict output directly. Also add
+     control-row 3 (cumulative-product-of-counts as control-task
+     selectivity baseline) at the loss-computation step:
+     compute the per-position cross-entropy on a label-side mask
+     that excludes the start token but includes the running-count
+     positions, addressing the original directive's "control-row
+     3 label-side masking" gap.
+   - `main.py`: add `--scheduler constant_with_warmup` to the
+     `--scheduler` choice list, exposing the constant-with-warmup
+     option that Chang and Bisk [25]'s `trainer.py:72` actually
+     uses (their paper prose said `cosine` but the code does
+     not use it; see `docs/reprod-notes.md` §B12).
+5. **Shifted PE support** (BLOCKER 5 expansion): the existing
+   RoPE encoder accepts `start_index` (an integer offset). To
+   thread per-sample random offsets through the 4L baseline:
+   - `but_full_depth.CausalSelfAttention.forward:88` accepts an
+     `indices` keyword argument and forwards it to
+     `apply_rotary_emb_torch` (or the `RoPE.adapt_keys/queries`
+     path).
+   - `but_full_depth.Block.forward:175` propagates the `indices`
+     keyword argument through the block's residual flow.
+   - `GPTBase.forward` adds a `position_ids=None` keyword
+     argument; when provided, it overrides the model's default
+     `arange(seq_len)` position generation and threads through to
+     each block's `forward`.
+6. **Pad-mask-aware attention** (BLOCKER 6): the counting data
+   has variable-length sequences padded to the per-batch maximum.
+   The model's attention path must mask out padded positions so
+   that (a) padded positions do not contribute to the attention
+   computation for valid positions, and (b) the loss at padded
+   positions is excluded. Add a per-sample `attention_mask` tensor
+   (shape `[B, L]`, 1 for valid, 0 for pad) threaded through the
+   block forward; use the mask to construct the SDPA additive
+   bias `-1e9 * (1 - attention_mask)` for padded keys; use the
+   mask to scatter the cross-entropy loss only over valid
+   positions. Without BLOCKER 6, the model's attention learns
+   from pad tokens during training and the per-batch loss is
+   biased by padding mass.
+
+**Compute update**: the main sweep retains the 36-run baseline
+matrix (4 widths x 3 architectures x 3 seeds at small widths),
+**increased to 42 runs** by [DEC-M2-031](#19-m2-decision-log)'s
+seed-symmetry resolution at `n_embd in {256, 1024}` (5 seeds at
+each, +6 runs over 3-seed). Pilot 1 adds 5 seeds at
+`n_embd=1024` (4L Chang and Bisk-exact regime), ~5-7.5 L4-hours.
+Estimated wall-clock on 2x L4 for the main sweep at the
+match-samples 78K-step budget: ~3-4 L4-days; Pilot 1 finishes
+within the first half-day of the schedule.
+
+##### RQ9b — `ln_mid` effect on counting (pre-registered interaction test)
+
+Per [DEC-M2-028](#19-m2-decision-log) (S7 resolution), RQ9b
+explicitly pre-registers the architecture x `ln_mid` interaction
+test as its own falsifiable claim, alongside the RQ9 main-effect
+architecture comparison. The CoT+Reserved variant (no `ln_mid`)
+and the LN-CoTFormer variant (with `ln_mid`) are both trained at
+all four widths in the main sweep, so the data needed for RQ9b
+is generated at no extra training cost; only the analysis is new.
+
+- **IV-1**: Architecture in {4L standard Transformer, 1L-4R
+  CoT+Reserved, 1L-4R LN-CoTFormer} (the main-sweep architecture
+  IV).
+- **IV-2**: `ln_mid` presence in {absent (CoT+Reserved), present
+  (LN-CoTFormer)} (a binary IV; the 4L baseline is excluded from
+  the 2x2 factorial because it has no `ln_mid` analogue. The
+  RQ9b factorial is therefore 1L-4R x `ln_mid` only, and the
+  baseline is reported separately as the cross-check).
+- **DV**: Per-position OOD accuracy at length 200 on Task 1
+  (matching the RQ9 primary DV).
+- **Controls**: Same widths {128, 256, 512, 1024}; same Task 1;
+  same training-step budget (78K at eff BS 128).
+- **Statistical test**: **two-way ANOVA** on the
+  CoT+Reserved/LN-CoTFormer x `n_embd` panel (architecture as
+  fixed effect, width as fixed effect, interaction term tested),
+  with bootstrap 95 % CI on the interaction effect's eta-squared.
+  Implementation: `statsmodels.formula.api.ols('accuracy ~ C(arch)
+  + C(width) + C(arch):C(width)', data=df).fit()` plus
+  `anova_lm(model, typ=2)`.
+- **H0**: no architecture x `ln_mid` interaction effect on OOD
+  accuracy (architectural treatments are additive).
+- **Falsification**: ANOVA interaction p < 0.05 AND eta-squared
+  greater than 0.02 (a small effect-size lower bound to ensure
+  detected interactions are practically meaningful, per Cohen
+  1988 [49]). Both conditions must hold; significance without
+  effect size, or effect size without significance, is reported
+  as "preliminary suggestion" rather than a falsification.
+- **Ontological purpose**: the truth sought is whether the
+  `ln_mid` mid-block normalisation is a *neutral* architectural
+  ingredient that scales independently of the recurrent
+  inductive bias, or whether it is a *gating* ingredient whose
+  presence changes how the recurrent bias interacts with width.
+  A positive interaction effect is a significant scientific
+  finding because it implies that any future recurrent-depth
+  architecture must report `ln_mid` presence as a first-class
+  hyperparameter rather than an afterthought, and it bears on
+  the interpretation of the M1 reproduction's C2-vs-C1
+  comparison ([§0 Checkpoint Matrix](#checkpoint-matrix)).
+- **Cross-references**: depends on the same training data as
+  RQ9; Pilot 1 has no `ln_mid` analogue and is excluded from
+  RQ9b. The 4L standard Transformer baseline is reported as a
+  cross-check column (no main-effect interaction, by
+  construction).
 
 #### RQ10: Table-2 Unconfound (DEFERRED)
 
@@ -711,15 +1453,242 @@ comparison), this experiment gains priority.
 | B: CKA Matrix | [RQ2](#rq2-representation-structural-similarity-sq1) | `analysis/cka.py` | ~20 min CPU |
 | C: Attention Taxonomy | [RQ3](#rq3-attention-head-specialisation-sq2) | `analysis/attention_taxonomy.py` | ~9 min GPU |
 | D: Router Analysis | [RQ4](#rq4-router-validity-sq3), [RQ5](#rq5-context-preservation-under-adaptive-depth-sq4) | `analysis/router_analysis.py` | ~10 min GPU |
-| E: Residual Diagnostics | SQ1 | `analysis/residual_diagnostics.py` | ~5 min CPU |
+| D-calibration: Attention-Entropy Calibration | [RQ5](#rq5-context-preservation-under-adaptive-depth-sq4) DV-2 validation | `analysis/calibration/entropy_calibration.py` + `synth_sequences.py` | ~5 min GPU (Tier 1) + ~2-4 min GPU (Tier 2) + ~8 min CPU |
+| E: Residual Diagnostics | [RQ6](#rq6-effective-dimensionality-sq1) pre-check, SQ1 | `analysis/residual_diagnostics.py` | ~5 min CPU |
 | F: Effective Dimensionality | [RQ6](#rq6-effective-dimensionality-sq1) | `analysis/effective_dim.py` | ~5 min CPU |
 | G: KV Compressibility | M3 design, [RQ6](#rq6-effective-dimensionality-sq1) cross-validation | `analysis/kv_rank.py` | ~25 min GPU |
 | H: Interpolation Validity | [RQ7](#rq7-interpolation-mechanism-validity-sq3) | `analysis/interpolation_validity.py` | ~10 min GPU |
-| I: Depth-Emb Freeze | [RQ8](#rq8-depth-embedding-freeze-ablation-sq1) | `analysis/depth_emb_freeze.py` | ~12 min GPU |
+| I: Depth-Emb Freeze | [RQ8](#rq8-depth-embedding-freeze-ablation-sq1) | `analysis/depth_emb_freeze.py` | ~21 min GPU |
 
 All protocols share a unified analysis framework under
 `analysis/common/` with modular backends. Protocols A through I
 share the same forward-pass activation cache to minimise GPU time.
+
+#### Protocol B implementation (debiased CKA)
+
+The CKA matrix protocol implements the **debiased linear CKA** via
+the unbiased HSIC U-statistic per Murphy et al. [32], not the
+original biased estimator. The debiasing absorbs both the
+small-N positive bias documented by Chun et al. [9] and the
+spurious-similarity inflation in low-data high-dimensionality
+documented by Davari et al. [31]. Empirical null distributions
+are constructed by 1000-permutation shuffles of the token order
+on one side of each pairwise comparison; the per-pair quantiles
+of the shuffled distribution define the [RQ2](#rq2-representation-structural-similarity-sq1)
+zone thresholds (99th percentile = redundant, 90th-99th =
+partially distinct, below 90th = structurally distinct). The RBF
+kernel cross-check uses the **median heuristic** for bandwidth
+selection: `sigma = median(pairwise distances) / sqrt(2)`. The
+linear estimator is reported as primary; the RBF estimator is a
+robustness column. The reference for the canonical CKA
+definition (linear form, orthogonal-invariance, isotropic-scaling
+invariance) is Kornblith et al. [40].
+
+#### Protocol C implementation (attention taxonomy + Gini + top-k mass)
+
+Protocol C extends the existing 7-metric attention-geometry
+analysis with two operationally independent secondary sparsity
+metrics:
+
+- **Gini coefficient** of the attention distribution
+  `G(p) = sum_i sum_j |p_i - p_j| / (2 N sum_i p_i)`. Bounded in
+  [0, 1] (uniform = 0; one-hot = 1). Hurley and Rickard [42]
+  identify Gini as one of only two measures (alongside the
+  pq-mean for `p < 1, q > 1`) that satisfies all six of the
+  Robin-Hood, Scaling, Rising-Tide, Cloning, Bill-Gates, and
+  Babies axioms a sparsity measure should satisfy. Shannon
+  entropy fails the Cloning axiom in particular, so Gini and
+  entropy are *not* monotone transforms of each other across
+  duplicated mass distributions; the two metrics are
+  operationally independent in the [W-18 sense](#16-reliability-discipline-and-triangulation).
+- **Top-k attention mass** `M_k = sum_{j in top-k} p_j` with `k`
+  selected by the ADM capacity-factor arithmetic already used in
+  [RQ5](#rq5-context-preservation-under-adaptive-depth-sq4)
+  (`k = floor(c_i * n_seq)` for the per-(layer, repeat) capacity
+  factor `c_i`). For non-ADM checkpoints (C1, C2, C3) `k` is set
+  to `min(8, ceil(log2 n_seq))`. Top-k mass is the upper-tail
+  `k`-th-order-statistic of the distribution and is also
+  operationally independent of entropy per Pagliardini et al. [45].
+
+Protocol C is run on **C1, C2, C3, C4, C5** (extended to C3 per
+the [§1.5 Analysis Matrix](#15-analysis-matrix) update; the
+original matrix only ran Protocol C on C1, C2, C4 because the
+attention-taxonomy clustering was originally not interesting on
+the trained-only-without-`ln_mid` C3, but the secondary Gini and
+top-k mass metrics are informative on all five and the marginal
+compute cost is ~3 min). The Gini and top-k columns are reported
+alongside the entropy column in the per-RQ tables; sink
+correction (mask position 0, renormalise) applies to all three
+metrics, with both raw and sink-corrected variants reported.
+
+#### Protocol D-calibration (RQ5 DV-2 attention-entropy validation)
+
+Protocol D-calibration validates the monotone interpretation
+underlying [RQ5](#rq5-context-preservation-under-adaptive-depth-sq4)
+DV-2 ("low entropy implies isolation; high entropy implies broad
+integration") via an empirical mapping from attention entropy to
+attention-target accuracy on synthetic sequences with known
+ground-truth attention targets. The protocol is required because
+the published interpretability literature (Meister et al. [43] on
+sparse attention's interpretability ambiguity; Zhai et al. [44]
+on entropy collapse decoupled from information content; Xiao et
+al. [26] and Gu et al. [46] on attention sinks systematically
+depressing entropy) does not support a bidirectional monotone
+mapping a priori; it must be calibrated.
+
+The protocol is composed of a three-tier substrate ladder, a
+two-condition synthetic sequence design, and a four-gate
+validation ladder leading to one of three verdicts (PASS,
+AMBIGUOUS, FAIL). The verdict drives the
+[RQ5 DV-2](#rq5-context-preservation-under-adaptive-depth-sq4)
+operational definition.
+
+##### D-cal three-tier substrate
+
+Per [DEC-M2-029](#19-m2-decision-log) (calibration substrate
+three-tier strategy), the protocol runs on three model substrates
+in priority order:
+
+| Tier | Substrate | Cost | Rule |
+|---|---|---|---|
+| 1 (literature-grounded primary) | **GPT-2-large** (36L, 774M, HuggingFace public weights) | ~5 min GPU forward + ~30 min one-time login-node download via the project's `cache_huggingface_model.py` script | Code validation against the published Anthropic induction-head reference point [41]; serves as the literature-grounded calibration anchor. |
+| 2 (target-architecture primary) | **ADM C5** (existing 24L x 5 ADM 60k checkpoint at `/scratch/ab3u21/exps/owt2/adaptive_cotformer_.../adm_v2_lr...`) | ~2-4 min GPU forward (no training) | Target architecture; **ADM C5 governs when Tier 1 and Tier 2 disagree** because the calibration must validate the metric on the architecture where DV-2 will be applied at test time. |
+| 3 (contingency only) | **24L standard transformer** (fresh training, ~40k steps on OWT2) | ~1-1.5 L4-days | Triggered only IF Tier 1 and Tier 2 disagree. Provides a third independent reading and dual-purposes as the M1 "CoTFormer beats standard at same depth" follow-up gap-closure (per residual flag R1). |
+
+##### D-cal two-condition synthetic sequence design
+
+Two conditions, 1000 sequences each, fixed length L = 256 tokens.
+
+- **Condition A (Sparse / Single-Target)**: induction-head-style
+  sequences `... q r ... q ?` with one informative target. The
+  reply `r` is placed at position `p_r = p_q + 1` immediately
+  after the first occurrence of the query token `q`. The query
+  token recurs at position 253; positions 254-255 are filler.
+  Ground-truth attention target: `T_A = {p_r}` (single
+  position). Expected behaviour for a model with mature induction
+  heads: low entropy at position 253, high attention mass on
+  `p_r`. Methodological precedent: Olsson and Elhage et al. [41].
+- **Condition B (Broad-Integration / Multi-Target)**: 10
+  informative target positions `p_1, ..., p_10` drawn uniformly
+  from `[1, 251]` without replacement, each carrying a token
+  from a reserved subvocabulary `V_inf` of size 100. A query
+  marker token at position 252; positions 253-255 are filler.
+  Ground-truth attention target: `T_B = {p_1, ..., p_10}` (10
+  positions, equally weighted). Expected behaviour for a model
+  that integrates broadly: medium entropy near `log_2 10 ~ 3.3
+  bits` with mass distributed across the 10 positions.
+
+The two conditions are deliberately designed to produce
+**equivalent attention entropies for distinct information
+contents**: a model attending uniformly over 10 informative
+positions and a model attending uniformly over 10 random
+positions will report the same Shannon entropy but radically
+different attention-target accuracies. The two-condition design
+is the minimum to falsify the monotone interpretation; it is the
+methodological prerequisite for any subsequent claim about DV-2.
+
+##### D-cal four-gate validation ladder
+
+Each gate must be passed in order; failure at any gate triggers a
+fallback rather than continuing the ladder.
+
+| Gate | Test | PASS criterion | Source |
+|---|---|---|---|
+| 1 | Baseline gate | Tier-1 model's condition-A attention-target accuracy >= 0.5 (the model can do the induction task) | `/research --deep` principle 10 validation gate |
+| 2 | Sink-correction monotonicity | `|H_full - H_no_sink|` < 1 bit on both conditions; if exceeded, `H_no_sink` is the operative metric throughout, and a separate sink-mass-vs-survival-fraction correlation is reported | Xiao et al. [26], Gu et al. [46] |
+| 3 | Triangulation gate | Tier 1 and Tier 2 substrate verdicts agree on PASS/FAIL; if they disagree, Tier 3 is triggered; if Tier 2 disagrees with Tier 1 and Tier 3 is unavailable, ADM C5 governs | DEC-M2-029 |
+| 4 | Spearman gate | `rho(entropy, attention_target_accuracy) <= -0.5` across pooled 2000 sequences (Cohen 1988 [49] "large effect"; at N = 2000 the power to detect rho = -0.5 is greater than 0.999 at alpha = 0.001) AND a linear classifier on `(entropy, attention_target_accuracy)` separates condition A from condition B with accuracy >= 0.8 | Cohen 1992 |
+
+**Verdicts**:
+
+- **PASS** (gates 1-4 all pass): the monotone interpretation is
+  empirically defensible on the calibrated substrate. DV-2 is
+  operationalised as the calibrated isolation classifier; the
+  classifier-accuracy gate must hold at test time as well.
+- **AMBIGUOUS** (Spearman in (-0.5, -0.3)): rerun with N = 4000
+  per condition to determine whether the ambiguity is statistical
+  or structural; if ambiguity persists, [DEC-M2-030](#19-m2-decision-log)
+  scope-shedding triggers downgrade DV-2 to single-measurement-preliminary.
+- **FAIL** (Spearman > -0.3, OR linear classifier on entropy
+  alone >= 0.85): the monotone interpretation is refuted on the
+  calibrated substrate. Apply the **REPLACE-WITH-TOP-K-MASS
+  fallback**: DV-2 is replaced by "fraction of attention mass at
+  repeat 5 landing on context tokens that survived to the same
+  repeat or deeper". The fallback metric is directly ontological
+  (it measures integration of equally-processed context, no
+  monotone interpretation required) and is computed at the same
+  point in the [Router Analysis](#13-experimental-protocols)
+  pipeline.
+
+##### D-cal compute and implementation
+
+Tier 1 (GPT-2-large): ~5 min GPU forward (`L = 256`,
+`batch_size = 16`, 2000 sequences = 125 batches at ~1.0s per
+batch including return_attention overhead; memory ~2.4 GB
+attention cache fits L4 24 GB budget). Tier 2 (ADM C5): ~2-4
+min GPU forward (24L is half the depth of GPT-2-large, fewer
+attention weights per sequence). Tier 3 (24L standard, fresh
+training): ~1-1.5 L4-days (only if triggered). CPU analysis:
+~8 min for entropy, Gini, top-k, attention-accuracy, Spearman,
+linear classifier across 2000 x 256 distributions.
+
+**Implementation files** (Phase 1 skeleton orch deliverables;
+new sub-package under `analysis/`):
+
+- `analysis/calibration/entropy_calibration.py` — main entry
+  point; consumes `--ckpt`, `--n-per-condition`, `--seed`,
+  `--out`; produces `metrics.csv`, `spearman.json`,
+  `classifier.json`, `figure.png`.
+- `analysis/calibration/synth_sequences.py` — deterministic
+  helpers `generate_condition_A(n, L, vocab_size, seed)` and
+  `generate_condition_B(n, L, vocab_size, inf_vocab, seed)`.
+- `analysis/calibration/preregister.md` — the calibration
+  pre-registration document; the four-gate verdict thresholds
+  (Spearman <= -0.5, classifier accuracy >= 0.8, sink shift
+  threshold 1 bit) are frozen at the Phase 1 skeleton commit and
+  cannot be adjusted post-hoc.
+
+Sink correction is mandatory throughout; both `H_full` and
+`H_no_sink` are reported per sequence and `H_no_sink` is the
+operative metric whenever the per-bin sink mass shift exceeds 1
+bit (sink-correction monotonicity gate). The same calibration
+infrastructure is reused for [Prediction P2](#14-theoretical-predictions)
+"sparse attention from repetition", where the same
+monotone-ambiguity applies; the calibration is computed once and
+its decision boundary is reused across both DV-2 and P2.
+
+#### Protocol E operational spec
+
+Protocol E (Residual Diagnostics) is operationalised here as the
+[RQ6](#rq6-effective-dimensionality-sq1) pre-check addressing the
+pre-Phase-1 hostile review's missing-spec finding. For each
+(layer, repeat) site under analysis, Protocol E computes three
+per-token quantities aggregated into one summary triple:
+
+| Quantity | Formula | Aggregation |
+|---|---|---|
+| Mean residual L2 norm | `mean_t ||x_{l, r, t}||_2` | per-(layer, repeat) scalar |
+| Per-token L2 variance | `var_t ||x_{l, r, t}||_2` | per-(layer, repeat) scalar |
+| L_inf norm | `max_t |x_{l, r, t}|_inf` | per-(layer, repeat) scalar |
+
+The protocol produces three plots, each with 21 mid-layer curves
+indexed by repeat:
+
+- Mean L2 norm vs repeat for each of the 21 mid-layers (1 panel,
+  21 curves).
+- Per-token L2 variance vs repeat (1 panel, 21 curves).
+- L_inf norm vs repeat (1 panel, 21 curves).
+
+The pre-check serves
+[RQ6](#rq6-effective-dimensionality-sq1) by surfacing exponential
+norm growth (which would invalidate the
+participation-ratio-vs-repeat trend regression, since the
+Frobenius-normalised PR is not norm-invariant in the presence of
+extreme outliers) and by surfacing rogue-direction emergence
+(which is then handled in [RQ6](#rq6-effective-dimensionality-sq1)
+via the top-2-PC-removed PR cross-check). Run on **C1, C2, C3**
+in the M2 main analytic sub-stream; ~5 min CPU per checkpoint, no
+GPU needed.
 
 The counting experiment
 ([RQ9](#rq9-recurrent-inductive-bias-for-algorithmic-counting)) is
@@ -729,9 +1698,23 @@ not a protocol on existing checkpoints; it trains new models via
 
 ### 1.4 Theoretical Predictions
 
-**Prediction 1** (weight-decay low-rank; from [11]): Weight decay
-(wd=0.1) on weight-tied QK/OV matrices drives them to low-rank
-solutions. The 5x repetition compounds this.
+**Prediction 1** (weight-decay low-rank correlate; observational):
+weight decay (`wd = 0.1`) is **observed in correlation with**
+low-rank weight-tied QK/OV matrices in the analyses of Kobayashi
+et al. [11]; the predicted rank reduction is therefore a
+correlational expectation, not a causal claim about the present
+checkpoints. The framing is observational rather than causal
+because we do not run a `wd` ablation on our own checkpoints; we
+test whether the rank profile observed at our `wd = 0.1` setting
+is consistent with the rank reduction Kobayashi et al. [11]
+documented at the same `wd` value on a similarly-sized model
+with matched `d_head`. The 5x repetition is hypothesised to
+compound the effect (the same weight matrices are exposed to the
+shared optimisation pressure five times per forward pass), but
+this compounding hypothesis is itself observational at frozen
+checkpoints. The prediction's epistemic status is "consistent
+with literature" or "inconsistent with literature", not "proven
+causal".
 
 *Test*: Protocol G; three independent measurements:
 - (a) Weight-matrix pseudo-rank of `W_K^T W_Q` and `PW_V`
@@ -741,11 +1724,23 @@ solutions. The 5x repetition compounds this.
   complement)
 
 *Two-tier threshold*: 95 % effective rank < 48 (fraction < 0.75 of
-nominal d_head=64) is the literature-confirmed prediction, based on
-Kobayashi et al.'s [11] direct measurements at wd=0.1 on a 125M
-model with identical d_head=64. If rank < 40 is observed, this
-constitutes evidence for an additional compounding effect from 5x
-weight tying not studied in the original work.
+nominal d_head=64) is the literature-confirmed correlational
+expectation, based on Kobayashi et al. [11]'s direct measurements
+at `wd = 0.1` on a 125M model with identical `d_head = 64`. If
+rank < 40 is observed, this constitutes evidence for an additional
+compounding effect from 5x weight tying not studied in the
+original work; we report the result as "consistent with" or
+"divergent from" Kobayashi's findings, not as a "causal proof".
+
+*Scope limitation*: Prediction 1 tests the CONSEQUENCE of weight
+decay (rank of frozen checkpoints trained with `wd = 0.1`) but
+cannot establish CAUSALITY (which would require training with
+varied `wd` values: 0, 0.01, 0.1, 0.3). The causal claim is
+deferred to future work with controlled `wd` ablation. The
+[§1.6 triangulation row](#16-reliability-discipline-and-triangulation)
+"Weight tying correlates with low rank" reflects the observational
+framing per [DEC-M2-022](#19-m2-decision-log) (renaming from the
+earlier "induces" framing).
 
 **Prediction 2** (sparse attention from repetition; novel
 hypothesis): We hypothesise that attention entropy decreases across
@@ -755,12 +1750,73 @@ data-repetition setting, our weight-tied repetition provides
 computational depth rather than statistical redundancy. This
 prediction is novel and not directly calibrated against prior work.
 
-*Test*: Protocol C; two complementary measurements:
-1. Spearman rho < -0.5 (exploratory) across repeats 1-5
-   (monotonicity test)
-2. Paired comparison: repeat-1 entropy vs repeat-5 entropy (more
-   powerful, tests whether the endpoint difference is significant
-   regardless of trajectory shape)
+- **H0**: per-head attention entropy at repeat 5 is not
+  significantly lower than at repeat 1, after controlling for
+  representation convergence and per-layer baseline. The original
+  proposal of a 252-head Wilcoxon signed-rank test treated all 252
+  (layer, head) cells as exchangeable; this is incorrect because
+  heads within a single layer share their input distribution and
+  are therefore non-independent. Replaced per
+  [DEC-M2-026](#19-m2-decision-log) with a **mixed-effects model**
+  fit via `statsmodels.regression.mixed_linear_model.MixedLM`:
+  ```
+  entropy ~ repeat + (1 | layer) + (1 | head:layer)
+  ```
+  with `repeat` as the fixed effect of interest and per-layer +
+  per-(head, layer) random intercepts to account for the head-level
+  non-independence. The p-value on the `repeat` slope is the
+  primary test. Per-layer Wilcoxon signed-rank tests (one per
+  mid-layer, with Holm-Bonferroni correction across the 21
+  layers) are reported as a non-parametric robustness check; if
+  the mixed-effects slope is significant but more than half the
+  per-layer Wilcoxons are not, the claim is downgraded to
+  "layer-aggregate effect, not per-layer-uniform".
+- **Confounder**: convergence-induced sharpening. As
+  representations converge across repeats (measured by
+  [RQ2](#rq2-representation-structural-similarity-sq1) CKA),
+  attention naturally sharpens because the target distribution
+  becomes more peaked. Mitigation: condition the entropy
+  comparison on heads whose adjacent-repeat CKA is below the
+  per-pair permutation null's 90th percentile (non-converging
+  heads). If the entropy decrease persists in non-converging
+  heads, it is not a trivial consequence of convergence.
+- **Sink-and-monotonicity confounder**: per the
+  [Protocol D-calibration](#protocol-d-calibration-rq5-dv-2-attention-entropy-validation)
+  monotone-ambiguity finding, low entropy at repeat 5 could be
+  "repetition-induced sparsity", "attention-sink amplification",
+  or "attention-collapse pathology" (Zhai et al. [44]). All three
+  are observationally indistinguishable from raw entropy alone.
+  Mitigation: report Gini coefficient and top-k attention mass
+  alongside entropy (per
+  [Protocol C](#protocol-c-implementation-attention-taxonomy--gini--top-k-mass)),
+  apply sink correction (mask position 0, renormalise), and
+  cross-check with the Tier-1 calibration's decision boundary
+  applied to the natural OWT2 forward pass. The same
+  D-calibration pre-registered classifier from
+  [Protocol D-calibration](#protocol-d-calibration-rq5-dv-2-attention-entropy-validation)
+  is reused for P2 — the monotone-ambiguity is the same
+  underlying problem.
+- **Validation gate**: repeat-1 mean entropy must exceed 2.0 bits
+  across all 252 heads. If already near zero (maximally sparse),
+  no decrease is possible and P2 is vacuously unfalsifiable.
+
+*Test*: [Protocol C](#protocol-c-implementation-attention-taxonomy--gini--top-k-mass);
+mixed-effects monotonicity test plus paired Gini and top-k mass
+robustness checks:
+
+1. Mixed-effects model `entropy ~ repeat + (1|layer) + (1|head:layer)`
+   on the per-(token, layer, repeat, head) panel; fixed-effect
+   slope p < 0.05 with the slope's bootstrap 95 % CI excluding
+   zero.
+2. Per-layer Spearman `rho` < -0.5 (Cohen 1988 [49] "large
+   effect") across repeats 1-5, with Holm-Bonferroni correction
+   across the 21 layers (per
+   [§1.6 Concern 3](#concern-3-multiple-comparisons-correction)).
+3. Paired comparison: repeat-1 vs repeat-5 entropy, Gini, and
+   top-k mass; the monotonicity claim requires concordant
+   directionality across all three sparsity metrics; if Gini and
+   top-k mass disagree with entropy, the result is reported as
+   "metric-dependent" rather than supporting P2.
 
 ### 1.5 Analysis Matrix
 
@@ -768,58 +1824,122 @@ prediction is novel and not directly calibrated against prior work.
 |----------|:--:|:--:|:--:|:--:|:--:|:---:|:---:|:----:|
 | A: Logit Lens | X | X | X | X | X | -- | -- | Yes |
 | A-ext: Tuned Lens | X | X | X | X | X | -- | -- | CPU |
-| B: CKA | X | X | X | X | X | -- | -- | No |
-| C: Attn Taxonomy | X | X | -- | X | -- | -- | -- | Yes |
+| B: CKA (debiased) | X | X | X | X | X | -- | -- | No |
+| C: Attn Taxonomy | X | X | **X** | X | X | -- | -- | Yes |
 | D: Router Analysis | -- | -- | -- | X | X | X | X | Yes |
-| E: Residual | X | X | -- | X | -- | -- | -- | No |
+| D-cal: Entropy Calibration | -- | -- | -- | -- | X | -- | -- | Yes |
+| E: Residual | X | X | X | X | -- | -- | -- | No |
 | F: Eff. Dim | X | X | X | X | X | -- | -- | No |
 | G: KV Compress. | X | -- | X | -- | X | -- | -- | Yes |
 | H: Interp. Validity | -- | -- | -- | X | X | -- | -- | Yes |
 | I: Depth-Emb Freeze | -- | -- | X | -- | -- | -- | -- | Yes |
 
-Total GPU: ~2.3 h on L4. Total CPU (incl. Tuned Lens training):
-~5.5 h.
+Total GPU: ~4.7 h on L4 (with 4-batch inter-batch robustness; +3
+min for Protocol C extended to C3 + C5; +5 min Tier-1
+calibration on GPT-2-large; +3 min Tier-2 calibration on ADM C5).
+Total CPU (incl. Tuned Lens training and calibration analysis):
+~5.7 h (+8 min for the calibration's Spearman + classifier fit
+across 2000 sequences x 256 attention distributions).
 
 ### 1.6 Reliability Discipline and Triangulation
 
-The lecturer raised two concerns at the M2 proposal stage. Each is
-codified here as a constraint on the experimental programme:
+The lecturer raised two concerns at the M2 proposal stage; the
+pre-Phase-1 hostile review identified a third. Each is codified
+here as a constraint on the experimental programme:
 
-**Concern 1 -- reliability**: interpretability tools may not give
+**Concern 1 — reliability**: interpretability tools may not give
 "meaningful or reliable" results.
 
-*Constraint*: every interpretive claim must be supported by at least
-two independent measurements from the cross-validation matrix below.
-"Independent" means different protocols with different operational
-definitions, not the same metric computed twice. The
-[RQ1](#rq1-prediction-convergence-across-repeats-sq1) Logit Lens /
-Tuned Lens pair is the canonical example: the unweighted lens projects
-through `lm_head(ln_f(h_r))` while the Tuned Lens applies a learned
-affine translator trained on KL divergence from the final-layer
-distribution. Agreement between the two establishes that the
-convergence trajectory is a genuine informational signal rather than a
-projection artefact.
+*Constraint*: the triangulation rule is the authoritative
+codification. See [§0 Reliability Discipline](#reliability-discipline)
+for the rule statement and the row-by-row operational-independence
+audit discipline; this subsection consumes that authoritative
+text and applies it to the cross-validation matrix below. A row
+whose primary and secondary measurements share the same forward
+pass *and* the same derived statistic counts as a single
+measurement, and the row's claim downgrades to
+"single-measurement preliminary" with the downgrade explicit in
+the synthesis output. The
+[RQ1](#rq1-prediction-convergence-across-repeats-sq1) Logit Lens
+and Tuned Lens pair is the canonical operationally-independent
+example: the unweighted lens projects through `lm_head(ln_f(h_r))`
+while the Tuned Lens applies a learned affine translator trained
+on KL divergence from the final-layer distribution.
 
 | Claim | Primary | Secondary | Tertiary |
 |-------|---------|-----------|----------|
-| Representations refine across repeats | RQ1 Logit Lens | RQ1 Tuned Lens | RQ2 CKA decrease |
+| Representations refine across repeats | RQ1 Tuned Lens (per-site identity-diagnostic-filtered) | RQ1 unweighted Logit Lens | RQ2 debiased-CKA monotonic decrease |
 | KV cache is compressible | Protocol G activation rank | KV-CoRE NER per repeat | Chun PR ([RQ6](#rq6-effective-dimensionality-sq1)) |
-| Weight tying induces low rank | Kobayashi weight-matrix rank [11] | Protocol G activation rank | Tuned Lens translator SV spectrum |
-| Attention specialises by repeat | RQ3 k-means clustering | Zheng taxonomy mapping [7] | P2 entropy gradient |
-| Router learns difficulty proxy | RQ4 halting-vs-loss | RQ7 update magnitude | Router-score vs state-delta |
-| Recurrence helps counting | RQ9 accuracy sweep | OOD degradation rate | Cross-seed variance |
+| Weight tying correlates with low rank | Kobayashi weight-matrix rank [11] | Protocol G activation rank | Tuned Lens translator SV spectrum |
+| Attention specialises by repeat | RQ3 k-means clustering (permutation-null gated) | Zheng taxonomy mapping [7] | per-head attention-distribution diversity (pairwise JS divergence across heads within a layer) |
+| Contextual isolation | RQ5 DV-1 per-token CE loss vs context survival (logit-derived) | RQ5 DV-2 calibrated isolation score vs context survival (attention-derived; per [Protocol D-calibration](#protocol-d-calibration-rq5-dv-2-attention-entropy-validation)) | RQ5 DV-3 representation cosine similarity (hidden-state-derived) |
+| Router learns difficulty proxy | RQ4 halting-vs-loss bootstrap CI | RQ7 update magnitude | Router-score vs state-delta correlation |
+| Recurrence helps counting | RQ9 DV-1 OOD accuracy sweep | RQ9 DV-2 paired linear-and-non-linear probe R^2 per repeat | RQ9 DV-3 attention-pattern analysis at penultimate repeat AND DV-4 causal intervention via zero-ablation |
 
-Convergence rule: "supported" if primary + >= 1 secondary agree;
-"preliminary" if only primary; "contradicted" if primary and secondary
-disagree.
+Convergence rule: "supported" if primary plus at least one
+secondary agree under the operational-independence audit;
+"preliminary" if only primary or if primary plus secondary fail
+the operational-independence audit; "contradicted" if primary
+and secondary disagree (the disagreement itself is the finding,
+not a measurement failure).
 
-**Concern 2 -- scope creep**: the analysis "could become an entire
+**Concern 2 — scope creep**: the analysis "could become an entire
 project in its own right."
 
 *Constraint*: the 2-week elapsed ceiling (see
-[Scope Discipline](#scope-discipline)). Protocols that do not produce
-triangulated results by the ceiling are moved to "future work"
-regardless of completion status.
+[Scope Discipline](#scope-discipline)) and the
+[Scope-shedding pre-registered order](#scope-shedding-pre-registered-order).
+Protocols that do not produce triangulated results by the ceiling
+are moved to "future work" regardless of completion status; the
+shedding order in §0 governs which protocols are sacrificed first.
+
+##### Concern 3: multiple comparisons correction
+
+The pre-Phase-1 hostile review identified an unguarded multiple-
+comparison hazard: across the nine RQs each producing one or more
+H0 tests, the family-wise error rate at uncorrected α = 0.05 per
+test exceeds 0.5 even with no underlying effect, inflating the
+risk that at least one false positive is reported as a finding.
+The hybrid correction adopted per [DEC-M2-025](#19-m2-decision-log)
+(S3 resolution) is:
+
+- **Holm-Bonferroni at family-wise α = 0.01** across the
+  **9 RQ-primary tests** (RQ1 logit-lens monotonicity, RQ2 cross-
+  repeat debiased CKA, RQ3 silhouette permutation, RQ4 halting
+  vs loss, RQ5 joint H0 across DV-1/DV-2/DV-3, RQ6 per-layer
+  log-linear slope, RQ7 clone-set entropy delta, RQ8 condition-
+  vs-actual delta, RQ9 OOD accuracy McNemar; RQ9b ANOVA
+  interaction is treated as part of the RQ9 family for the
+  Holm-Bonferroni step). Holm-Bonferroni preserves family-wise
+  error control while being uniformly more powerful than the
+  plain Bonferroni adjustment.
+- **Benjamini-Hochberg FDR at q = 0.05** within each RQ's
+  **secondary tests** (the per-layer regressions, the
+  permutation-null gates, the per-task and per-OOD-length
+  contrasts in RQ9, the per-condition ANOVA contrasts in RQ8).
+  FDR is appropriate for secondary tests because we tolerate a
+  controlled fraction of false positives in exploratory rows but
+  cannot tolerate a single false-positive primary RQ outcome.
+
+**Exemptions**: replication-stability gates (4-batch inter-batch
+CV < 5 % in §1.4 Tuned Lens training) and pre-registered
+validation gates (the Pilot 1 IND > 80 % gate, the Protocol
+D-calibration four-gate ladder, the
+[RQ9 width sweep DEC-M2-012a](#width-sweep-design-dec-m2-012)
+gate) are *not* part of the multiple-comparison family because
+they are not hypothesis tests of the underlying scientific
+claims; they are pre-condition checks whose failure aborts the
+test rather than producing a finding. Cross-checkpoint
+robustness (e.g., RQ1 reported on C1, C3, C5 with concordant
+sign across all three) is also exempt because the claim is the
+agreement across checkpoints rather than the per-checkpoint
+significance.
+
+The correction is applied **once per protocol output**, not
+re-applied at synthesis time; the synthesis output records both
+the raw p-value and the corrected p-value for transparency, and
+the convergence rule above applies to the corrected p-value
+column.
 
 ### 1.7 Code and Infrastructure Strategy
 
@@ -862,16 +1982,57 @@ document. The existing `analyze_kv_compression.py` is absorbed into
 
 A new `data/counting.py` module provides the synthetic counting
 dataset generator for
-[RQ9](#rq9-recurrent-inductive-bias-for-algorithmic-counting).
+[RQ9](#rq9-recurrent-inductive-bias-for-algorithmic-counting); see
+the BLOCKER 4 specification under [§1.2 RQ9](#rq9-recurrent-inductive-bias-for-algorithmic-counting) for the five-file
+refactor that wires the counting dataset into the training loop.
+
+A new `analysis/calibration/` sub-package hosts the
+[Protocol D-calibration](#protocol-d-calibration-rq5-dv-2-attention-entropy-validation)
+implementation: `entropy_calibration.py` (entry point),
+`synth_sequences.py` (two-condition generators), and
+`preregister.md` (frozen pre-registration document).
+
+##### Common loader hook for module-path generality
+
+Per the pre-Phase-1 hostile review's cross-architecture finding
+(the calibration substrate spans GPT-2-large with module path
+`model.transformer.h` and our CoTFormer variants with module path
+`model.transformer.h_mid`), the shared `analysis/common/loader.py`
+accepts a `--module-path` argument that resolves to either the
+standard transformer block list or the CoTFormer mid-block list at
+hook-registration time. The default is `model.transformer.h_mid`
+to preserve the M2 main analytic sub-stream's existing behaviour;
+the calibration entry point passes `--module-path
+model.transformer.h` when running Tier 1 (GPT-2-large). The
+loader is otherwise architecture-agnostic; any HuggingFace-style
+or nanoGPT-style transformer with a list-of-blocks attribute is
+loadable through the same hook.
 
 #### HPC packages
 
 | Package | Purpose | Queue position |
 |---------|---------|---------------|
-| `iridis/analyze-lncot+adm/job-gpu.sh` | GPU protocols (~2.3 h) | 1st |
-| `iridis/analyze-lncot+adm/job-cpu.sh` | CPU protocols + Tuned Lens training (~5.5 h) | 2nd |
-| `iridis/counting-train/job.sh` | RQ9 baseline + CoTFormer training | 3rd |
-| `iridis/counting-eval/job.sh` | RQ9 OOD evaluation across {50-200} | 4th |
+| `iridis/analyze-lncot+adm/job-gpu.sh` | GPU protocols (~2.7 h, including Protocol D-calibration Tier 1 + Tier 2) | 1st |
+| `iridis/analyze-lncot+adm/job-cpu.sh` | CPU protocols + Tuned Lens training + calibration analysis (~5.7 h) | 2nd |
+| `iridis/counting-train/job.sh` | Pilot 1 (5 seeds at n_embd=1024) + main sweep (42 runs) | 3rd |
+| `iridis/counting-eval/job.sh` | RQ9 + RQ9b OOD evaluation across {50-200} | 4th |
+| `environment.yml` | **Phase 0 deliverable**: pinned `pytorch == 2.2.*+cu118`, `numpy < 2`, `scikit-learn >= 1.3`, `pingouin >= 0.5` (mixed-effects), `statsmodels >= 0.14` (ANOVA, MixedLM), `muon-optimizer` (from `github.com/KellerJordan/Muon` per [DEC-M2-017](#19-m2-decision-log) Tuned Lens fallback). The conda env is rebuilt on every Iridis-X login node before HPC submission; the resolved lockfile is committed to the repo as `environment.lock.yml` for bit-exact reproduction. | Phase 0 |
+
+##### env.sh consolidation
+
+Per [DEC-M2-026](#19-m2-decision-log) (T8 finding consolidation),
+`iridis/env.sh` is the **single source of truth** for
+HPC-environment variables shared across the four HPC packages:
+`WANDB_MODE=offline`, `NCCL_PROTO=Simple`, `EXPS_DIR`,
+`PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True`,
+`TIKTOKEN_CACHE_DIR`. Every `iridis/*/job.sh` script `source`s
+this file once at the top, before any other configuration; the
+job scripts contain **no inline assignments** to these variables.
+This eliminates the cross-package drift that surfaced during M1
+when `WANDB_MODE` was set inconsistently across the LN-CoTFormer
+and ADM job scripts. The Phase 1 skeleton orch's first task is
+to grep every `iridis/*/job.sh` for redundant assignments and
+remove them.
 
 #### Branch strategy (DEC-M2-009)
 
@@ -891,6 +2052,29 @@ forward-porting all five fixes.
 | `models/depthemb_eval_metrics.py:374-512` | `analysis/common/collector.py` | Replaced by forward-hook collector |
 | `models/fixed_cot_attn.py:152-172` | `analysis/attention_taxonomy.py` | Flash/causal switch (monkey-patch) |
 | `models/fixed_cot_attn.py:383-426` | `analysis/attention_taxonomy.py` | Reshape pipeline + 7 attention metrics |
+
+##### SHA pinning header convention (DEC-M2-026 T11)
+
+Each ported file's top-of-file header must record the source SHA
+and line range so that the upstream-vs-port relationship survives
+both branch evolution and refactoring. The header pattern is:
+
+```
+# Ported from origin/tak-ablation-code@<7-char-SHA> :: <relative path on tak's branch> L<start>-L<end>
+# Ported on <YYYY-MM-DD> by <author handle>
+# Original-author rationale: <one-line summary; cite tak's commit message if present>
+```
+
+The `<7-char-SHA>` is the abbreviated `git rev-parse --short=7
+HEAD` of the tak branch at the moment of porting, captured at
+port time and frozen — subsequent updates to the tak branch do
+not invalidate the header. If a port is later updated to a newer
+SHA, the entire header is replaced (not appended to), and the
+git history records the SHA bump. The convention is enforced by
+a Phase 0 lint check (`scripts/check_port_headers.py`) that
+greps the `analysis/` package for files containing `tak-` and
+verifies the header pattern; missing or malformed headers fail
+the check.
 
 **Explicitly NOT ported** (with rationale):
 
@@ -916,46 +2100,95 @@ forward-porting all five fixes.
 | Stage 2 non-flash collector (3 ckpts x 5 min) | ~15 min GPU |
 | Stage 3 ADM collector (2 ckpts x 5 min) | ~10 min GPU |
 | logit_lens (5 ckpts x 2 min) | ~10 min GPU |
-| cka (5 ckpts, CPU) | ~20 min CPU |
-| attention_taxonomy (3 ckpts x 3 min) | ~9 min GPU |
+| cka debiased (5 ckpts, CPU) | ~20 min CPU |
+| attention_taxonomy (5 ckpts x 3 min, extended to C3 + C5) | ~15 min GPU |
 | router_analysis RQ4+RQ5 (2 ckpts x 5 min) | ~10 min GPU |
-| residual_diagnostics (5 ckpts, CPU) | ~5 min CPU |
+| Protocol D-calibration Tier 1 (GPT-2-large) | ~5 min GPU |
+| Protocol D-calibration Tier 2 (ADM C5) | ~2-4 min GPU |
+| Protocol D-calibration analysis + classifier fit | ~8 min CPU |
+| residual_diagnostics extended to C3 (5 ckpts, CPU) | ~5 min CPU |
 | effective_dim (5 ckpts, CPU) | ~5 min CPU |
 | kv_rank (5 ckpts x 5 min) | ~25 min GPU |
-| interpolation_validity / RQ7 (2 ckpts x 5 min) | ~10 min GPU |
-| depth_emb_freeze / RQ8 (1 ckpt x 4 conditions x 3 min) | ~12 min GPU |
-| tuned_lens training (5 ckpts x 11 sites x ~5 min) | ~5 h CPU |
-| tuned_lens application + triangulation | ~10 min CPU |
+| interpolation_validity / RQ7 (2 ckpts x 5 min, 10000-permutation null) | ~12 min GPU |
+| depth_emb_freeze / RQ8 (1 ckpt x **8 conditions** x 3 min) | ~24 min GPU |
+| tuned_lens training (5 ckpts x 105 sites x ~0.6 min) | ~5.3 h CPU |
+| tuned_lens application + triangulation + identity diagnostic | ~12 min CPU |
 | synthesis | ~5 min CPU |
-| **Subtotal GPU** | **~2.3 h** |
-| **Subtotal CPU** | **~5.5 h** |
+| **Subtotal GPU (single batch)** | **~2.7 h** |
+| **Subtotal GPU (4-batch robustness)** | **~4.7 h** |
+| **Subtotal CPU** | **~5.7 h** |
+
+Protocol I (depth-emb freeze) is a counterfactual intervention,
+not an activation summary statistic; it is exempt from the
+4-batch requirement (the intervention itself is the variable,
+not the data batch). Protocol D-calibration is also exempt from
+the 4-batch requirement: the calibration's 2000 synthetic
+sequences are the substrate (not OWT2 batches), and the four-gate
+validation ladder runs once per substrate-tier checkpoint.
 
 Split into two HPC submissions:
-- `iridis/analyze-lncot+adm/job-gpu.sh` -- 1 GPU, 4 h walltime,
-  runs Stages 1-3 plus GPU protocols.
-- `iridis/analyze-lncot+adm/job-cpu.sh` -- 0 GPU, 8 h walltime,
-  runs CPU protocols plus Tuned Lens translator training. Consumes
-  the workspace activation cache from `job-gpu`.
+
+- `iridis/analyze-lncot+adm/job-gpu.sh` — 1 GPU, **8 h walltime**
+  (raised from the originally-planned 4 h per
+  [DEC-M2-026](#19-m2-decision-log) T10 finding: the original
+  arithmetic counted Stage 1 + Stage 2 + Stage 3 collectors at
+  ~40 min and the GPU protocols at ~2 h, but did not account
+  for the SLURM queueing overhead nor for the flash-vs-non-flash
+  job-internal context-switch when the same job script runs both
+  flash and non-flash forward passes). The 8 h walltime
+  accommodates the additional Protocol D-calibration Tier 1 +
+  Tier 2 forward passes plus a safety margin.
+- `iridis/analyze-lncot+adm/job-cpu.sh` — 0 GPU, 8 h walltime,
+  runs CPU protocols plus Tuned Lens translator training plus
+  Protocol D-calibration analysis. Consumes the workspace
+  activation cache from `job-gpu`.
 
 #### M2 counting sub-stream
 
-With the width sweep (DEC-M2-012) and both CoTFormer variants
-(CoT+Reserved and LN-CoTFormer), the counting sub-stream trains
-4 widths x 3 architectures x 3 seeds = 36 runs at 312.5K steps
-each (DEC-M2-016):
+The counting sub-stream now consists of **Pilot 1** (Chang and
+Bisk-exact reproduction at `n_embd=1024`, 5 seeds; per
+[DEC-M2-021](#19-m2-decision-log)) plus the **main sweep**
+(per [DEC-M2-031](#19-m2-decision-log) seed-symmetry: 3 seeds at
+{128, 512} + 5 seeds at {256, 1024} = 16 width-seed cells x 3
+architectures = **42 runs** in the main sweep, raised from the
+original 36 by the 1024-symmetry resolution). Per
+[DEC-M2-026](#19-m2-decision-log), the main-sweep training
+budget is **78K steps at effective batch size 128**
+(match-samples to Chang and Bisk [25]'s 10M-sample budget) rather
+than the originally-proposed 312.5K at batch 32; the
+`statsmodels`-based mixed-effects analysis used in the
+[§1.4 Predictions](#14-theoretical-predictions) is sample-count
+sensitive, not step-count sensitive.
 
 | Component | Wall time |
 |-----------|-----------|
-| Dataset generation | ~10 min CPU |
-| Training: 36 runs (small widths fast; 1024-dim dominates) | ~2.5-3 days on 2x L4 |
-| OOD evaluation x 7 lengths x 36 configs | ~9 h L4 |
+| Dataset generation (sweep + Pilot 1 if shipping is per-call) | ~10 min CPU |
+| Pilot 1: 5 seeds x 4L x 1024-dim x 78K steps (Chang and Bisk regime) | ~5-7.5 L4-hours |
+| Main sweep training: 42 runs at 78K steps (small widths fast; 1024-dim dominates) | ~3-4 days on 2x L4 |
+| OOD evaluation x 7 lengths x 42 configs (DV-1) + DV-3 attention extraction + DV-4 zero-ablation (4 conditions) | ~12 h L4 |
+| RQ9b two-way ANOVA + bootstrap CI on interaction effect | ~30 min CPU |
 | Analysis + plotting | ~3 h CPU |
-| **Total** | **~3-4 days on 2x L4** |
+| **Total** | **~3.5-4.5 days on 2x L4** |
 
-The 1024-dim runs dominate compute (~24-36 h each) but are essential
-for the reproduction check against Chang and Bisk [25]. Small widths
-(128, 256) complete in under 1 h each and can be parallelised on a
-single L4.
+The 1024-dim runs dominate compute (~24-36 h each at 78K steps,
+unchanged from the 312.5K-at-BS-32 budget because both produce
+~10M samples). Small widths (128, 256) complete in under 1 h
+each and can be parallelised on a single L4.
+
+##### Empirical step-time validation gate (pre-flight measurement)
+
+Before submitting the main sweep, the code-wave pre-flight
+measures the actual `n_embd=1024` step time on the 2x L4 target
+hardware. The Pilot 1 wall time above (~5-7.5 L4-hours for 5
+seeds) is the empirical anchor; if Pilot 1's per-step time
+exceeds 4 s on the target hardware, the main-sweep budget is
+recalculated and the wall time on the schedule above adjusted
+accordingly. The pre-flight is documented as the
+**empirical-step-time validation gate** in the Phase 1 skeleton
+commit's pre-registration: a Pilot 1 step time more than 50 %
+above the projection triggers a budget revision; a step time
+within 50 % of the projection clears the main sweep for
+submission.
 
 #### Sequencing (linear, no parallelism)
 
@@ -1005,6 +2238,19 @@ single L4.
 | DEC-M2-017 | Tuned Lens fallback | SGD first, Muon if convergence poor |
 | DEC-M2-018 | RQ9 CoTFormer variants | Both CoT+Reserved (no `ln_mid`) and LN-CoTFormer (with `ln_mid`) at all widths. ADM excluded (routing disabled). 36 total runs |
 | DEC-M2-019 | RQ9 baseline config | Match Chang and Bisk codebase: ReLU activation, grad\_clip=0.3, `scale_attn_by_inverse_layer_idx=True`, task-specific vocabulary (V=203 for te200) |
+| DEC-M2-020 | DEC-M2-019 reconciliation | Chang and Bisk reference codebase diverges from paper-implied defaults on seven training-regime parameters: `inductive_counting_with_LMs/scripts/causal_transformer/trainer.py:231 max_grad_norm=1.0` (paper prose said 0.3 but the dead-code value at `config.py:28` is never read), `trainer.py:72 get_constant_schedule_with_warmup` (not cosine), `trainer.py:70 AdamW` defaults `wd=0.01`, `beta2=0.999` (no decay grouping), `config.py:13 n_head=8` at `n_embd=1024`, `trainer.py:52 fp16`, `trainer.py:211 enable_flash=False`. Pilot 1 adopts Chang and Bisk-exact; the main sweep uses CoTFormer-native defaults. See `docs/reprod-notes.md` §B12 for the dead-code documentation. | Post-hostile-review |
+| DEC-M2-021 | Twin-pilot design | Pilot 1 = Chang and Bisk-exact at `n_embd=1024` 4L with 5 seeds; main sweep = CoTFormer-native at all four widths with 5 seeds at `n_embd in {256, 1024}` and 3 seeds at `{128, 512}`. Comparison isolates the training-regime effect from the architecture effect. | Abe 2026-04-18 |
+| DEC-M2-022 | Novelty Claim 1 narrow reframing | "First mechanistic interpretability study of iterative/recurrent transformers" replaced with the CoTFormer-specific scope: cross-repeat KV attention + weight-tied mid-block with reserved begin/end layers + canonical Belrose 2023 Tuned Lens at five virtual layers. Cite Lu et al. [27] and Chen et al. [28] as closest prior art. | Abe 2026-04-18 |
+| DEC-M2-023 | Novelty Claim 2 narrow reframing | "First Tuned Lens on weight-tied architecture" reframed as the canonical Belrose 2023 [24] Tuned Lens (affine + bias, SGD + Nesterov, forward-KL, identity-init) on a CoTFormer-style weight-tied depth-recurrent transformer with cross-repeat KV attention. Closest prior art: Paulo et al. [30]. | Abe 2026-04-18 |
+| DEC-M2-024 | Novelty Claim 5 demotion | "Merrill formal gap: vertical != horizontal CoT" demoted from a novelty claim to related-work cite. RQ9 reframed as an empirical test of Xu and Sato 2025 [29] Theorem 1 on the approximate-counting expressiveness gap between latent and horizontal chain-of-thought; Merrill and Sabharwal [17] retained as an upstream complexity-class result. | Abe 2026-04-18 |
+| DEC-M2-025 | Multiple-comparison correction | Hybrid Holm-Bonferroni at family-wise alpha = 0.01 across the 9 RQ-primary tests; Benjamini-Hochberg FDR at q = 0.05 within each RQ's secondary tests. Replication-stability gates and pre-registered validation gates exempt. | Abe 2026-04-18 |
+| DEC-M2-026 | RQ5 DV-3 + calibration linkage and §1.7/§1.8 fixes | DV-3 = `cos(h_target@rep5, mean(h_context_surviving@rep5))` at final-mid-block PRE-`ln_mid`; unweighted mean; strict `halt_depth(j) >= 5`; H0 `|r| < 0.1` with 1000-permutation null. DV-2 subject to Protocol D-calibration. P2 mixed-effects replaces 252-head Wilcoxon. RQ7 permutation count raised to 10000. RQ8 zero-vector condition added (8 conditions). RQ2 debiased CKA + permutation-null zone thresholds. RQ3 silhouette permutation null. RQ4 bootstrap CI. RQ6 per-layer log-linear regression replaces Mann-Kendall. T8/T9/T10/T11 infrastructure consolidations. | Abe 2026-04-18 |
+| DEC-M2-027 | RQ9 independent DVs | Add DV-3 (attention-pattern analysis at penultimate repeat) + DV-4 (causal intervention via zero-ablation at repeat r). Both mandated per the W-18 operational-independence bar. | Abe 2026-04-18 |
+| DEC-M2-028 | RQ9b explicit pre-registration | 2x2 factorial CoT+Reserved-vs-LN-CoTFormer x `n_embd`; two-way ANOVA on the architecture x `ln_mid` interaction effect; falsification at p < 0.05 with eta-squared > 0.02. | Abe 2026-04-18 |
+| DEC-M2-029 | Calibration substrate three-tier | Tier 1 GPT-2-large (literature-grounded primary), Tier 2 ADM C5 (target-architecture primary; ADM wins when tiers disagree), Tier 3 24L standard (contingency; triggers Phase-0 conditional training). Pre-registration in `analysis/calibration/preregister.md`. | Abe 2026-04-18 |
+| DEC-M2-030 | Scope-shedding hybrid trigger | Pilot 1 fail at approximately day 3 sheds RQ9 to M3 (analytic sub-stream continues); calibration inconclusive at approximately day 5 flags DV-2 single-measurement-preliminary; day-10 progress under 60 % sheds in order RQ8 → RQ5 → RQ9. Triggers checked at day-3, day-5, day-10 review checkpoints with Abe-authorised one-way shedding inside M2. | Abe 2026-04-18 |
+| DEC-M2-031 | Seed assignments and symmetry | Pilot 1 uses Chang and Bisk's `[1234, 12]`-style seed convention (extended to 5 seeds for parity with main-sweep `n_embd=1024`); main sweep uses the project's `(train = 2357, val = 8191, ood = 19937)` convention. Bump main-sweep `n_embd=1024` from 3 to 5 seeds for symmetry with `n_embd=256` (+6 extra runs, ~6-12 L4-hours). | Abe 2026-04-18 |
+| DEC-M2-032 | 48L standard training deferred post-M2 | Cite the paper's 48L standard baseline (24.17 PPL from Table 1 of [3]) rather than reproducing it. Train 24L standard only IF Tier 1 (GPT-2-large) and Tier 2 (ADM C5) calibration verdicts disagree; defer 48L standard to post-M2. | Abe 2026-04-18 |
 
 #### Backlog items (deferred post-M2-main)
 
@@ -1022,15 +2268,21 @@ single L4.
   ceiling), providing a stronger OOD generalisation test. Scope to
   be defined after the primary RQ9 results are analysed.
 
-#### Novel contributions confirmed
+#### Novel contributions confirmed (narrow reframings)
 
-| Contribution | Evidence |
-|---|---|
-| First mechanistic interpretability study of iterative/recurrent transformers | Belrose [24], Zheng [7], Chen [8]: no weight-tied models. Mohtashami [3] Appendix F: explicitly defers |
-| First Tuned Lens on weight-tied architecture | Belrose [24]: all models have distinct params per layer |
-| First KV-CoRE on cross-repeat cache | Chen [8]: all models are standard multi-layer |
-| First counting experiment with CoTFormer | Chang and Bisk [25]: no weight-tied. CoTFormer [3]: no synthetic tasks |
-| Merrill formal gap: vertical != horizontal CoT | Merrill [17]: proof requires token generation |
+The original five-claim novelty roster has been narrowed to
+defensible claims following the pre-Phase-1 hostile review and
+the literature-fetch sub-orch's verification of close prior art.
+Claims 1, 2, and 5 are reframed (DEC-M2-022, DEC-M2-023,
+DEC-M2-024); Claims 3 and 4 are preserved as stated.
+
+| Contribution | Reframed scope | Evidence and closest prior art |
+|---|---|---|
+| Mechanistic interpretability study **specific to weight-tied depth-recurrent transformers with cross-repeat KV attention** (per [DEC-M2-022](#19-m2-decision-log)) | Lu et al. [27] applied Logit Lens and Coda Lens to Huginn-3.5B [16] — depth-recurrent, but no cross-repeat KV cache; Chen et al. [28] measured cross-loop representation degradation in looped transformers — also no cross-repeat KV. Knupp et al. [37] is a contemporary depth-recurrent attention-mixture comparator with FLOP/parameter/memory matching but does not perform lens-trajectory or cross-repeat KV measurements. The CoTFormer-specific gap is the combination of cross-repeat KV cache + weight-tied mid-block + reserved begin/end layers + per-(layer, repeat) Tuned Lens at five virtual layers. Mohtashami et al. [3] Appendix F explicitly defers this analysis. |
+| **Canonical Belrose 2023 [24] Tuned Lens** (affine + bias, SGD + Nesterov, forward-KL, identity-init) on a CoTFormer-style weight-tied depth-recurrent transformer with cross-repeat KV (per [DEC-M2-023](#19-m2-decision-log)) | Paulo et al. [30] transferred Tuned Lens to Mamba and RWKV recurrent architectures — methodological precedent but no weight-tied recurrent transformers; Belrose et al. [24] all models have distinct parameters per layer. Lu et al. [27] used Logit Lens and Coda Lens (not the canonical Tuned Lens) on Huginn-3.5B [16]. The combination of cross-repeat KV cache, five weight-shared mid-block repeats, and per-(layer, repeat) translator fitting is the specific gap. |
+| First **KV-CoRE on cross-repeat cache** | Chen et al. [8]: all models are standard multi-layer; weight-tied recurrent KV cache is a structurally distinct setting. |
+| First **counting experiment with CoTFormer architecture** under twin-pilot reproduction-fidelity discipline | Chang and Bisk [25] use the standard 4L baseline (no weight-tying, no recurrence); the CoTFormer [3] paper reports no synthetic-task experiments. The twin-pilot design (DEC-M2-021) is a methodological extension that separates reproduction-fidelity (Pilot 1) from fair-comparison (main sweep) regimes — a separation not present in the prior counting literature. |
+| **Empirical test of Xu and Sato 2025 [29] Theorem 1** on the approximate-counting expressiveness gap between latent and horizontal CoT (per [DEC-M2-024](#19-m2-decision-log) demoting the original "Merrill formal gap" claim from a novelty to a related-work cite) | Xu and Sato [29] Theorem 1 establishes the formal prior; Merrill and Sabharwal [17] is the upstream complexity-class result motivating Xu and Sato's analysis. RQ9 measures whether the predicted gap is empirically narrowed, preserved, or widened in the CoTFormer's weight-tied recurrent setting. |
 
 ---
 
@@ -1205,8 +2457,11 @@ Compression:   6.9x
      DeepSeek's Multi-Head Latent Attention in Any Transformer.* In ACL, 2025.
      arXiv:2502.14837.
 
-[16] J. Geiping et al. *Scaling up Test-Time Compute with Latent Reasoning: A
-     Recurrent Depth Approach.* arXiv:2502.05171, 2025.
+[16] J. Geiping, S. McLeish, N. Jain, J. Kirchenbauer, S. Singh, B. R.
+     Bartoldson, B. Kailkhura, A. Bhatele, T. Goldstein. *Scaling up
+     Test-Time Compute with Latent Reasoning: A Recurrent Depth Approach.*
+     arXiv:2502.05171, 2025. Local PDF:
+     `docs/LatentReasoningScaling-Geiping2025.pdf`.
 
 [17] W. Merrill and A. Sabharwal. *The Expressive Power of Transformers with
      Chain of Thought.* In ICLR, 2024. arXiv:2310.07923.
@@ -1235,5 +2490,126 @@ Compression:   6.9x
 [25] J. Chang and Y. Bisk. 2025. OpenReview `s3IBHTTDYl`. Local copy:
      `docs/InductiveBiasCheng&Bisk.pdf`.
 
-[26] G. Xiao et al. *Efficient Streaming Language Models with Attention
-     Sinks.* In ICLR, 2024. arXiv:2309.17453.
+[26] G. Xiao, Y. Tian, B. Chen, S. Han, M. Lewis. *Efficient Streaming
+     Language Models with Attention Sinks.* In ICLR, 2024.
+     arXiv:2309.17453.
+
+[27] W. Lu, M. Yang, S. Lee, Y. Li, P. Liu. *Latent Chain-of-Thought?
+     Decoding the Depth-Recurrent Transformer.* COLM 2025 Workshop on
+     LLM Explainability for Reasoning and Planning. arXiv:2507.02199,
+     2025. Local PDF: `docs/LatentCoT-Lu2025.pdf`.
+
+[28] G. Chen, S. Liu, J. Shao. *Loop as a Bridge: Can Looped Transformers
+     Truly Link Representation Space and Natural Language Outputs?*
+     arXiv:2601.10242, 2026. Local PDF:
+     `docs/LoopAsBridge-Chen2026.pdf`.
+
+[29] L. Xu and Y. Sato. *A Formal Comparison Between Chain of Thought
+     and Latent Thought.* arXiv:2509.25239, 2025. Local PDF:
+     `docs/CoTvsLatent-XuSato2025.pdf`.
+
+[30] G. Paulo, T. Marshall, N. Belrose. *Does Transformer
+     Interpretability Transfer to RNNs?* AAAI 2025 (proceedings
+     version). arXiv:2404.05971, 2024. Local PDF:
+     `docs/InterpMethodsRNN-Paulo2025.pdf`.
+
+[31] M. R. Davari, S. Horoi, A. Natik, G. Lajoie, G. Wolf, E.
+     Belilovsky. *Reliability of CKA as a Similarity Measure in Deep
+     Learning.* arXiv:2210.16156, 2022. Local PDF:
+     `docs/CKAReliability-Davari2022.pdf`.
+
+[32] A. R. Murphy, J. Zylberberg, A. Fyshe. *Correcting Biased
+     Centered Kernel Alignment Measures in Biological and Artificial
+     Neural Networks.* ICLR 2024 Re-Align Workshop. arXiv:2405.01012;
+     OpenReview `E1NRrGtIHG`. Local PDF:
+     `docs/CKADebiased-Murphy2024.pdf`.
+
+[33] M. Chun, A. Canatar, S. Chung, K. Lee. *Estimating Neural
+     Representation Alignment from Sparsely Sampled Inputs and
+     Features.* arXiv:2502.15104, 2025. Local PDF:
+     `docs/CKABias-Chun2025.pdf`. Note: distinct from Chun et al. [9]
+     (different first author and topic).
+
+[34] F. Wang, W. Shao, H. Yu, G. Kan, X. He, D. Zhang, M. Ren, K.
+     Wang. *Re-evaluation of the Power of the Mann-Kendall Test for
+     Detecting Monotonic Trends in Hydrometeorological Time Series.*
+     Frontiers in Earth Science. doi:10.3389/feart.2020.00014, 2020.
+     Local PDF: `docs/MannKendallPower-Wang2020.pdf`.
+
+[35] J. Hewitt and P. Liang. *Designing and Interpreting Probes with
+     Control Tasks.* EMNLP 2019. arXiv:1909.03368. Local PDF:
+     `docs/ProbeControl-HewittLiang2019.pdf`.
+
+[36] N. Elhage, T. Hume, C. Olsson, N. Schiefer, T. Henighan, S.
+     Kravec, Z. Hatfield-Dodds, R. Lasenby, D. Drain, C. Chen, R.
+     Grosse, S. McCandlish, J. Kaplan, D. Amodei, M. Wattenberg, C.
+     Olah. *Toy Models of Superposition.* transformer-circuits.pub,
+     September 2022. arXiv:2209.10652. Local PDF:
+     `docs/SuperpositionToyModels-Elhage2022.pdf`.
+
+[37] J. Knupp, J. H. Metzen, V. Bohn, J. Groh, K. Kersting.
+     *Depth-Recurrent Attention Mixtures: Giving Latent Reasoning the
+     Attention it Deserves.* arXiv:2601.21582, 2026. Local PDF:
+     `docs/DepthRecurrentAttn-Knupp2026.pdf`.
+
+[38] S. Takase and S. Kiyono. *Lessons on Parameter Sharing across
+     Layers in Transformers.* arXiv:2104.06022, 2021. Local PDF:
+     `docs/ParameterSharing-TakaseKiyono2021.pdf`.
+
+[39] S. Tan, Y. Shen, Z. Chen, A. Courville, C. Gan. *Sparse Universal
+     Transformer.* arXiv:2310.07096, 2023. Local PDF:
+     `docs/SparseUniversalTransformer-Tan2023.pdf`.
+
+[40] S. Kornblith, M. Norouzi, H. Lee, G. Hinton. *Similarity of
+     Neural Network Representations Revisited.* In ICML, 2019.
+     arXiv:1905.00414. Local PDF:
+     `docs/CKAOriginal-Kornblith2019.pdf`.
+
+[41] C. Olsson, N. Elhage, N. Nanda, et al. *In-context Learning and
+     Induction Heads.* Transformer Circuits Thread, 2022.
+     arXiv:2209.11895.
+
+[42] N. Hurley and S. Rickard. *Comparing Measures of Sparsity.* IEEE
+     Transactions on Information Theory 55(10):4723-4741, 2009.
+     arXiv:0811.4706.
+
+[43] C. Meister, S. Lazov, I. Augenstein, R. Cotterell. *Is Sparse
+     Attention more Interpretable?* In ACL (short), 2021.
+     arXiv:2106.01087.
+
+[44] S. Zhai, T. Likhomanenko, E. Littwin, et al. *Stabilizing
+     Transformer Training by Preventing Attention Entropy Collapse.*
+     In ICML, 2023. arXiv:2303.06296.
+
+[45] M. Pagliardini, D. Paliotta, M. Jaggi, F. Fleuret. *Faster
+     Causal Attention Over Large Sequences Through Sparse Flash
+     Attention.* In NeurIPS, 2023. arXiv:2306.01160.
+
+[46] X. Gu, et al. *When Attention Sink Emerges in Language Models.*
+     In ICLR, 2025.
+
+[47] S. Bae, et al. *Mixture-of-Recursions: Learning Dynamic Recursive
+     Depths for Adaptive Token-Level Computation.* arXiv:2507.10524,
+     2025.
+
+[48] D. Raposo, S. Ritter, B. Richards, T. Lillicrap, P. Humphreys, A.
+     Santoro. *Mixture-of-Depths: Dynamically allocating compute in
+     transformer-based language models.* arXiv:2404.02258, 2024.
+
+[49] J. Cohen. *Statistical Power Analysis for the Behavioral
+     Sciences.* 2nd ed., Lawrence Erlbaum, 1988.
+
+[50] D. Curran-Everett. *Explorations in statistics: standard
+     deviations and standard errors.* Advances in Physiology
+     Education 32(3):203-208, 2008.
+
+[51] L. Kaufman and P. J. Rousseeuw. *Finding Groups in Data: An
+     Introduction to Cluster Analysis.* Wiley, 1990.
+
+[52] S. Holm. *A Simple Sequentially Rejective Multiple Test
+     Procedure.* Scandinavian Journal of Statistics 6(2):65-70, 1979.
+
+[53] Y. Benjamini and Y. Hochberg. *Controlling the False Discovery
+     Rate: A Practical and Powerful Approach to Multiple Testing.*
+     Journal of the Royal Statistical Society Series B
+     57(1):289-300, 1995.

@@ -13,6 +13,7 @@
   - [M3. Confidence intervals and the paper's SEM](#m3-confidence-intervals-and-the-papers-sem)
   - [M4. Training configuration shared across variants](#m4-training-configuration-shared-across-variants)
   - [M5. What "delta" means in this document](#m5-what-delta-means-in-this-document)
+  - [M6. Reproduction-fidelity vs fair-comparison regime distinction](#m6-reproduction-fidelity-vs-fair-comparison-regime-distinction)
 - [Part A: Successful Replications](#part-a-successful-replications)
   - [A1. CoTFormer + Reserved Layers Perplexity (Table 2, 40k steps)](#a1-cotformer--reserved-layers-perplexity-table-2-40k-steps)
     - [Delta interpretation](#delta-interpretation)
@@ -79,6 +80,9 @@
     - [The discontinuity](#the-discontinuity)
     - [Impact assessment](#impact-assessment-2)
   - [B11. Evaluation Batch Size Independence](#b11-evaluation-batch-size-independence)
+  - [B12. RQ9 counting sub-stream is not a Chang and Bisk reproduction](#b12-rq9-counting-sub-stream-is-not-a-chang-and-bisk-reproduction)
+  - [B13. Chang and Bisk `max_grad_norm = 0.3` is dead code](#b13-chang-and-bisk-max_grad_norm--03-is-dead-code)
+  - [B14. Pilot 1 Chang and Bisk-exact results (stub)](#b14-pilot-1-chang-and-bisk-exact-results-stub)
 - [Part C: Original Bugs and Mistakes](#part-c-original-bugs-and-mistakes)
   - [C1. Orphan MoDBlock: 5 Allocated, 4 Used](#c1-orphan-modblock-5-allocated-4-used)
     - [What the code does](#what-the-code-does)
@@ -281,6 +285,71 @@ We train a single seed per variant. We therefore have no inter-seed
 variance estimate of our own, and when the paper's inter-seed SEM is
 mentioned in an A-subsection it is cited as paper context rather than
 as a quantity we can check.
+
+## M6. Reproduction-fidelity vs fair-comparison regime distinction
+
+The M2 counting sub-stream (`docs/extend-notes.md` §1.2 RQ9
+twin-pilot design) runs two regimes in parallel: a
+**Pilot 1** that reproduces the Chang and Bisk reference setup
+bit-for-bit, and a **main sweep** that applies the project's
+CoTFormer-native training regime to the same Chang and Bisk
+counting task. The two regimes serve distinct epistemic
+purposes, and conflating them inflates either the reproduction
+strength or the fair-comparison claim. This subsection codifies
+the distinction so that every section touching RQ9 can cite a
+single named definition rather than re-stating the discipline.
+
+**Reproduction-fidelity regime** — the goal is bit-identical
+reproduction of a published result so that the *codebase* is
+validated as a faithful execution of the published method. In
+the Pilot 1 instance, the reproduction-fidelity regime fixes
+seven training hyperparameters to match
+`inductive_counting_with_LMs/scripts/causal_transformer/{trainer,
+config}.py` exactly: ReLU activation, `tie_word_embeddings =
+False`, `scale_attn_by_inverse_layer_idx = True`,
+`max_grad_norm = 1.0` (the value `trainer.py:231` actually
+hardcodes; see [§B13](#b13-chang-and-bisk-max_grad_norm--03-is-dead-code)
+for the dead-code 0.3), `get_constant_schedule_with_warmup` (not
+cosine), AdamW defaults `wd = 0.01`, `beta2 = 0.999` with no
+decay grouping, `n_head = 8` at `n_embd = 1024`, FP16, and
+non-flash attention. The seed convention follows Chang and
+Bisk's `[1234, 12]`-style values extended to 5 seeds for
+seed-symmetry. Pass criteria are anchored to the paper's
+published per-OOD-length pass band (IND ~100 %, OOD@200
+~22-31 %); see
+[§B14](#b14-pilot-1-chang-and-bisk-exact-results-stub) for the
+results stub.
+
+**Fair-comparison regime** — the goal is a controlled comparison
+between architectures (4L baseline vs 1L-4R CoT+Reserved vs
+1L-4R LN-CoTFormer) under the *training regime the rest of this
+project uses*. The fair-comparison regime fixes the architecture
+as the independent variable and the training regime as a
+controlled constant: GELU activation, `tie_word_embeddings =
+True`, `scale_attn_by_inverse_layer_idx = False`,
+`max_grad_norm = 1.0`, cosine schedule with `warmup = 3000`,
+AdamW with `wd = 0.1`, `beta2 = 0.95` and decay grouping,
+`n_head = 4`, BF16 / FP32, Flash where supported. Seeds follow
+the project convention `(train = 2357, val = 8191,
+ood = 19937)`. The fair-comparison regime is the
+publication-relevant instrument; the question it answers is
+"does the recurrent inductive bias help under the training
+regime we use elsewhere?".
+
+**Discipline**: a result reported under the
+reproduction-fidelity regime is annotated "Pilot 1
+reproduction-fidelity"; a result reported under the
+fair-comparison regime is annotated "main-sweep
+fair-comparison". A result that is reported without the regime
+annotation is a methodological error in the synthesis output.
+The two regimes are not interchangeable: the
+reproduction-fidelity result establishes the codebase's
+faithfulness to [25]; the fair-comparison result establishes
+the architectural inductive-bias claim under our chosen
+training regime. A failure of one does not by itself invalidate
+the other, although a failure of Pilot 1 sheds the entire RQ9
+sub-stream to M3 per the
+`docs/extend-notes.md` §0 Scope-shedding pre-registered order.
 
 ---
 
@@ -1219,6 +1288,100 @@ rather than overriding it, to eliminate this micro-divergence entirely.
 Single-GPU evaluation with `--distributed_backend None` (see
 [§M2](#m2-evaluation-protocol)) also matches the paper's evaluation
 conditions (no DDP data sharding during eval).
+
+## B12. RQ9 counting sub-stream is not a Chang and Bisk reproduction
+
+**Impact:** Scope clarification, not a numeric divergence.
+
+The RQ9 counting sub-stream documented in `docs/extend-notes.md`
+§1.2 runs **two regimes in parallel**: a Pilot 1 that
+reproduces Chang and Bisk's [counting baseline] bit-for-bit, and a
+main sweep that applies our project's CoTFormer-native training
+regime to the same Chang and Bisk counting task. The main sweep
+is **not** a reproduction of Chang and Bisk; it is a
+fair-comparison experiment that uses the published counting
+benchmark as a substrate. The two regimes serve distinct
+epistemic purposes (see
+[§M6](#m6-reproduction-fidelity-vs-fair-comparison-regime-distinction)
+for the discipline), and only the Pilot 1 result feeds the
+"reproduction" claim.
+
+The seven training-regime divergences between Pilot 1 (Chang and
+Bisk-exact) and the main sweep (CoTFormer-native) are documented
+in `docs/extend-notes.md` `DEC-M2-020`. The dead-code source of
+the most consequential divergence (the `max_grad_norm = 0.3`
+value referenced in earlier project documentation) is the subject
+of [§B13](#b13-chang-and-bisk-max_grad_norm--03-is-dead-code).
+
+The synthesis output for RQ9 reports the architecture comparison
+under the *main-sweep fair-comparison* regime annotation; any
+reproduction claim is reported under the *Pilot 1
+reproduction-fidelity* annotation. Conflating the two would be
+the same kind of methodological error documented in
+[§C2](#c2-figure-5-position-indexed-cascade-bug-and-methodological-critique)
+for the original Figure 5 reproduction (substituting an
+alternative methodology for the authors' own).
+
+## B13. Chang and Bisk `max_grad_norm = 0.3` is dead code
+
+**Impact:** Citation correction, not a numeric divergence.
+
+`inductive_counting_with_LMs/scripts/causal_transformer/config.py:28`
+declares `max_grad_norm = 0.3`. This value is **never read by the
+training loop**: the trainer at
+`inductive_counting_with_LMs/scripts/causal_transformer/trainer.py:231`
+passes `max_grad_norm = 1.0` to
+`torch.nn.utils.clip_grad_norm_` directly, hardcoded as a literal,
+without consulting the config object. The `config.py:28` value
+is therefore dead code; any prior reference in our project notes
+that cited Chang and Bisk's "grad clip = 0.3" was repeating the
+unread declaration rather than the actually-applied value.
+
+The correct attribution of Chang and Bisk's grad-clip behaviour
+is `max_grad_norm = 1.0` (the literal in `trainer.py:231`). Our
+`docs/extend-notes.md` DEC-M2-020 reconciliation captures this
+dead-code finding alongside six other training-regime
+divergences between the codebase and the paper's prose; the
+prior `DEC-M2-019` documentation stated `grad_clip = 0.3` because
+it followed the dead-code declaration. `DEC-M2-020` supersedes;
+`DEC-M2-019` is preserved as a historical record of the
+pre-dead-code-discovery state.
+
+The Pilot 1 implementation must use `max_grad_norm = 1.0`
+(matching the actually-applied training behaviour); any HPC job
+script that sets `--max_grad_norm 0.3` for Pilot 1 is a
+specification error and triggers an empirical-step-time
+validation gate failure under the Phase 1 skeleton commit's
+pre-registration.
+
+## B14. Pilot 1 Chang and Bisk-exact results (stub)
+
+**Impact:** TBD — to be filled by the code-wave orch
+post-execution.
+
+This subsection is reserved for the Pilot 1 reproduction-fidelity
+results. After the Pilot 1 run completes, the code-wave orch
+populates this stub with:
+
+- 5-seed mean and standard deviation per OOD length in `{50, 75,
+  100, 125, 150, 175, 200}` for the per-position top-1 accuracy
+  metric.
+- Pass/fail verdict against the paper's published per-OOD-length
+  pass band (IND ~100 %, OOD@200 ~22-31 % per [25]).
+- Step-time measurement and the empirical-step-time validation
+  gate verdict (per `docs/extend-notes.md` §1.8 pre-flight).
+- Citation to the SLURM job ID and the checkpoint paths under
+  `/scratch/$USER/exps/counting/pilot1_*/`.
+
+If Pilot 1 fails the per-OOD-length pass band, the entire RQ9
+sub-stream sheds to M3 per the
+`docs/extend-notes.md` §0 Scope-shedding pre-registered order
+trigger 1; this stub is then re-purposed to record the failure
+and the shedding decision. If Pilot 1 passes, the main-sweep
+fair-comparison results are reported in a separate section to be
+added at synthesis time.
+
+`TODO: filled by code-wave orch post-Pilot-1 execution.`
 
 ---
 
