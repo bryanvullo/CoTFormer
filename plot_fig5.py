@@ -136,12 +136,19 @@ def main():
             f"(40k len={0 if last_40k is None else len(last_40k)}, "
             f"60k len={0 if last_60k is None else len(last_60k)}).")
 
-    # -- Plot (matching paper Figure 5 style: density histogram) --
+    # -- Plot (matching paper Figure 5 style: probability per bin, fractions
+    # summing to 1.0 per series). The paper's y-axis is labelled "Density"
+    # but its numerical range [0.0, 0.7] corresponds to probability mass per
+    # bin, not true statistical density (which would divide by bin width and
+    # produce values >>1 at 40 bins over [0, 1]). We preserve the paper's
+    # axis label verbatim and normalise each series so its bars sum to 1. --
     fig, ax = plt.subplots(figsize=(5.5, 4))
 
     bins = np.linspace(0, 1, 41)
-    counts_40k, _ = np.histogram(last_40k, bins=bins, density=True)
-    counts_60k, _ = np.histogram(last_60k, bins=bins, density=True)
+    raw_counts_40k, _ = np.histogram(last_40k, bins=bins)
+    raw_counts_60k, _ = np.histogram(last_60k, bins=bins)
+    counts_40k = raw_counts_40k / raw_counts_40k.sum()
+    counts_60k = raw_counts_60k / raw_counts_60k.sum()
 
     bin_width = bins[1] - bins[0]
     bar_width = bin_width * 0.48

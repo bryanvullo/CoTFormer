@@ -197,6 +197,37 @@ Per-version, the job runs the following stages in order:
 The `EXPERIMENTS` list controls the extraction variants; see `job.sh`
 lines 67-72.
 
+### Replot-only regeneration
+
+For plotting-only fixes -- changes to `plot_fig4.py` / `plot_fig5.py`
+that do not affect extraction or evaluation logic -- there is no need
+to re-run the full ~5 h matrix on SLURM. The `replot-fig5.sh` script
+reuses the existing workspace `.npy` files on `/scratch` and regenerates
+the entire PNG matrix on the login node in ~1 minute:
+
+```bash
+cd ~/CoTFormer && bash iridis/eval-adm/replot-fig5.sh
+```
+
+The script:
+
+- Pre-flights every `.npy` file it plans to read and fails fast if
+  `/scratch` has been cleared since the last full run.
+- Allocates the next `run_N/` via `next_run_dir` (same layout as
+  `job.sh`).
+- Copies the unchanged `eval_*.txt`, `eval_summary_ckpt_*.json`, and
+  `exp4/eval_per_{threshold,layer}.npy` from the source run (default
+  `run_6`, overridable via `SOURCE_RUN=<run_name>`) so the new `run_N/`
+  is self-contained for downstream readers.
+- Regenerates `figure4_pareto.png` (unchanged plot logic, parity with
+  `run_6` layout) and the full Figure 5 matrix (14 PNGs).
+- Writes a short `run_N/README.md` declaring the run a plotting-only
+  delta.
+
+No SLURM submission, no GPU, no compute-node queue wait. Use this path
+whenever the scientific content of the extractions is unchanged and
+only the visual presentation has moved.
+
 ## Results
 
 Results below are from `run_6` (SLURM job 826926). Figures are under
@@ -291,10 +322,19 @@ the 40k and 60k distributions on the same axes:
 - `figure5_picascade.png` — position-indexed cascade (§C2 bug).
 - `figure5_ptcascade.png` — per-token cascade (correct).
 
-Paths follow `run_6/adm_{v1,v2}/exp5-*/figure5_*.png`. For a quick
-visual comparison of what the paper plots (PI cascade) against what
-the paper's text describes (PT cascade), open the `exp5-original/`
-pair of `figure5_picascade.png` and `figure5_ptcascade.png`.
+Paths follow `run_6/adm_{v1,v2}/exp5-*/figure5_*.png`. Plotting-only
+reruns via `replot-fig5.sh` produce the same layout under later
+`run_N/` directories with updated y-axis normalisation (see
+[Replot-only regeneration](#replot-only-regeneration)). The histograms
+now plot probability per bin summing to 1.0 per series (axis label
+"Density", matching the paper's Figure 5 convention on p. 9); older
+runs prior to this refactor used a true-density normalisation
+(integral = 1) producing numerically larger y-values at the same bin
+resolution. The shapes and comparative interpretations are unchanged.
+For a quick visual comparison of what the paper plots (PI cascade)
+against what the paper's text describes (PT cascade), open the
+`exp5-original/` pair of `figure5_picascade.png` and
+`figure5_ptcascade.png`.
 
 ### ADM v1 vs v2: B4 empirical magnitude
 

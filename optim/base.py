@@ -16,7 +16,9 @@ import numpy as np
 from .utils import eval, get_batch, save_checkpoint
 
 
-def train_base(model, opt, data, data_seed, scheduler, iterations, acc_steps, batch_size, sequence_length, eval_freq, ckpt_path, distributed_backend,extra_args, itr=0,rng_state_dict=None):
+def train_base(model, opt, data, data_seed, scheduler, iterations, acc_steps, batch_size, sequence_length, eval_freq, ckpt_path, 
+        distributed_backend,extra_args, itr=0,rng_state_dict=None):
+    
     device_type = 'cuda' if 'cuda' in str(extra_args.device) else 'cpu'
     type_ctx = nullcontext() if device_type == 'cpu' else torch.amp.autocast(
         device_type=device_type, dtype=extra_args.dtype)  # extra_args.dtype)
@@ -37,7 +39,6 @@ def train_base(model, opt, data, data_seed, scheduler, iterations, acc_steps, ba
     else:
         sampler_state_before_iter = train_sampler.generator.get_state()  
     data_train_iter = iter(data_train)
-
     
     # for val data we don't care about epochs? just cycle through (no need to set_epoch to reshuffle)
     data_val_iter = itertools.cycle(data_val)
