@@ -23,13 +23,13 @@ distribution is a deterministic function of the input, so per-token
 cross-entropy faithfully measures the model's ability to execute a
 simple algorithmic operation (addition by 1). The task is the
 Xu and Sato 2025 Theorem 1 empirical venue cited in
-DEC-M2-024.
+DEC-024.
 
 Reference
 ---------
 Chang and Bisk 2024 ``inductive_counting_with_LMs`` public codebase
 (``dataset.py``, ``config_taskspecific.py``). Per
-DEC-M2-019 and the seven-divergence reconciliation DEC-M2-020,
+DEC-019 and the seven-divergence reconciliation DEC-020,
 Pilot 1 uses their exact hyperparameter regime; the main sweep uses
 the CoTFormer-native regime at identical task design.
 
