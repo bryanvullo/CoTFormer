@@ -6,7 +6,7 @@ Addresses RQ8 (causal necessity of the depth embedding). Runs the
 LN-CoTFormer (C3 at 60k) under 8 freeze conditions produced by the
 Cartesian product of {freeze / unfreeze} x {zero / preserve / random}
 applied to the ``depth_embedding`` entry and two matched controls
-(per DEC-M2-026's zero-vector condition addition). Per-condition
+(per DEC-026's zero-vector condition addition). Per-condition
 perplexity and loss are reported with bootstrap 95 per cent CI.
 
 Falsifiability relevance
@@ -17,7 +17,7 @@ significantly worse than the preserve-condition at paired bootstrap
 p < 0.01 AND the effect exceeds the seed-variance baseline (per
 `docs/extend-notes.md` §1.2 RQ8 "Statistical test"). The 8-condition
 ANOVA is per-condition rather than the earlier 4-condition layout
-per DEC-M2-026.
+per DEC-026.
 
 Ontological purpose
 -------------------

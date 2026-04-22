@@ -6,7 +6,7 @@ Addresses RQ7 (clone-set interpolation entropy). Generates a
 clone-set of sequences with controlled pair-distance in a shared
 feature-space embedding, measures per-sample halting depth on the
 ADM (C5) and entropy of the halting distribution within each
-clone-set. Permutation test (N = 10000 per DEC-M2-026) against a
+clone-set. Permutation test (N = 10000 per DEC-026) against a
 seed-perturbed null.
 
 Falsifiability relevance
@@ -39,7 +39,7 @@ def build_argparser() -> argparse.ArgumentParser:
     Expected inputs: ``--checkpoint``, ``--checkpoint-file``,
     ``--workspace``, ``--output-dir``, ``--seed``, ``--clone-size``
     (sequences per clone-set), ``--n-permutations`` (10000 per
-    DEC-M2-026).
+    DEC-026).
     """
     raise NotImplementedError("body in Phase 2")
 
