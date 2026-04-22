@@ -65,6 +65,15 @@ def parse_args(base_parser, args, namespace):
                         help='When True, CausalSelfAttention divides attention logits by '
                              '(layer_idx + 1) before softmax. Default False preserves prior '
                              'behaviour; enabled only in Pilot 1 (Chang and Bisk-exact regime).')
+    parser.add_argument('--disable_decay_grouping', default=False,
+                        type=lambda v: str(v).lower() == 'true',
+                        help='When True, the AdamW optimiser receives a flat '
+                             'model.parameters() iterable rather than the per-group decay '
+                             'specs from get_parameter_group_specs(). Matches Chang and Bisk '
+                             '2024 trainer.py:70 (flat AdamW(model.parameters(), lr=...)). '
+                             'Default False preserves the project behaviour that filters '
+                             'biases / norm scales / embeddings out of the decay set. '
+                             'Only the Pilot 1 Arm A strict-reproduction cell sets this True.')
     parser.add_argument('--n_head', default=12, type=int)
     parser.add_argument('--n_layer', default=24, type=int) # depths in att + ff blocks
     parser.add_argument('--n_embd', default=768, type=int) # embedding size / hidden size ... 

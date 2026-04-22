@@ -75,28 +75,45 @@ def main(args):
 
     model = distributed_backend.transform_model(model)
     
-    group_specs = distributed_backend.get_raw_model(model).get_parameter_group_specs()
-    param_name_mapping = {p_name: p for p_name, p in model.named_parameters()}
-    optimized_params_cnt = 0
-    for g in group_specs:
-        params = []
-        for p_name in g["params"]:
-            translated_p_names = distributed_backend.translate_model_parameter_name_for_node(p_name)
-            params += [param_name_mapping[p_name] for p_name in translated_p_names]
-        g["params"] = params
-        optimized_params_cnt += sum([p.numel() for p in g["params"]])
-    print("number of optimized parameters: %.2fM" % (optimized_params_cnt/1e6,))
+    # When --disable_decay_grouping is set (Arm A strict-reproduction of
+    # Chang and Bisk 2024 trainer.py:70), the optimiser receives a flat
+    # model.parameters() iterable. Otherwise the project-standard
+    # per-parameter-group decay is applied (biases / norm scales /
+    # embeddings excluded from the decay set).
+    if getattr(args, 'disable_decay_grouping', False):
+        group_specs = None
+        flat_params = list(distributed_backend.get_raw_model(model).parameters())
+        optimized_params_cnt = sum(p.numel() for p in flat_params)
+        print("number of optimized parameters: %.2fM (flat; decay grouping disabled)" % (optimized_params_cnt/1e6,))
+    else:
+        group_specs = distributed_backend.get_raw_model(model).get_parameter_group_specs()
+        param_name_mapping = {p_name: p for p_name, p in model.named_parameters()}
+        optimized_params_cnt = 0
+        for g in group_specs:
+            params = []
+            for p_name in g["params"]:
+                translated_p_names = distributed_backend.translate_model_parameter_name_for_node(p_name)
+                params += [param_name_mapping[p_name] for p_name in translated_p_names]
+            g["params"] = params
+            optimized_params_cnt += sum([p.numel() for p in g["params"]])
+        flat_params = None
+        print("number of optimized parameters: %.2fM" % (optimized_params_cnt/1e6,))
     if args.opt == 'adamw':
         use_fused = (device_type == 'cuda') and ('fused' in inspect.signature(torch.optim.AdamW).parameters)
         print(f"using fused AdamW: {use_fused}")
         extra_args = dict(fused=True) if use_fused else dict()
-        opt = torch.optim.AdamW(group_specs, lr=args.lr, betas=(args.beta1, args.beta2),
+        # Pass flat_params when grouping is disabled; else the group_specs
+        # with their per-group weight_decay overrides.
+        adamw_params = flat_params if group_specs is None else group_specs
+        opt = torch.optim.AdamW(adamw_params, lr=args.lr, betas=(args.beta1, args.beta2),
                                 weight_decay=args.weight_decay, **extra_args)
     elif args.opt == 'adafactor':
         from optim.adafactor import Adafactor
-        opt = Adafactor(group_specs, lr=args.lr)
+        adafactor_params = flat_params if group_specs is None else group_specs
+        opt = Adafactor(adafactor_params, lr=args.lr)
     else:
-        opt = torch.optim.SGD(group_specs, lr=args.lr, momentum=0.9, weight_decay=args.weight_decay)
+        sgd_params = flat_params if group_specs is None else group_specs
+        opt = torch.optim.SGD(sgd_params, lr=args.lr, momentum=0.9, weight_decay=args.weight_decay)
     
     if args.scheduler != 'none':
         if args.scheduler in ['cos', 'linear']:

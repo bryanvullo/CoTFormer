@@ -97,7 +97,11 @@ class CausalSelfAttention(nn.Module):
         self._lazy_init_cache_length = None
         
 
-    def forward(self, x, pos_emb_closure, cache_context, start_index, indices):
+    def forward(self, x, pos_emb_closure, cache_context, start_index, indices=None, attention_mask=None):
+        # BLOCKER 6: attention_mask kwarg (shape [B, T_active] with 1=valid,
+        # 0=pad; T_active may be < T when ADM routing has dropped tokens) adds
+        # an additive pad-key bias tiled across the cross-repeat cache. When
+        # None, forward is bit-identical to pre-change.
         B, T, C = x.size() # batch size, sequence length, embedding dimensionality (n_embd)
         C = self.n_embd
         # calculate query, key, values for all heads in batch and move head forward to be the batch dim
@@ -154,11 +158,67 @@ class CausalSelfAttention(nn.Module):
                 attn_mask = None
                 is_causal = True
         
+        # BLOCKER 6: build pad-key additive bias when attention_mask is
+        # provided. In the ADM variant the input's T dim may already have
+        # been shrunk by token-dropping routing, and the cross-repeat K
+        # cache grows at varying active lengths. We tile the
+        # per-sequence pad bits along k per-row by concatenation rather
+        # than repeat(), because the cache's T_k is NOT necessarily a
+        # multiple of the current T when prior repeats' active lengths
+        # differ from this one. For Arm B V4 with routing disabled
+        # (min_repeat = n_repeat = 4), all prior repeats have the same
+        # active length and the tiling reduces to a plain repeat.
+        pad_bias = None
+        if attention_mask is not None:
+            T_k = k.shape[2]
+            T_q = q.shape[2]
+            attn_mask_f = attention_mask.to(q.dtype)  # (B, T_active) where T_active == T_q
+            per_rep = (1.0 - attn_mask_f).view(B, 1, 1, T_q) * -1e9  # (B, 1, 1, T_q)
+            if T_k == T_q:
+                pad_bias = per_rep
+            else:
+                # Uniform-active-length tiling: T_k = T_q * reps_so_far.
+                # Applies to Arm B V4 routing-disabled case.
+                reps_so_far = max(1, T_k // T_q)
+                if reps_so_far * T_q == T_k:
+                    pad_bias = per_rep.repeat(1, 1, 1, reps_so_far)
+                else:
+                    # Mixed-active-length case (routing enabled) not supported
+                    # by this fix: surface explicitly rather than silently
+                    # mis-mask keys from prior repeats. The RQ9 Arm B V4
+                    # cell uses routing-disabled so this branch is unreachable
+                    # under the current experimental matrix.
+                    raise NotImplementedError(
+                        "BLOCKER 6 pad-key bias does not yet support ADM "
+                        "token-dropping routing with heterogeneous per-repeat "
+                        "active lengths (T_k not a multiple of T_q). This fix "
+                        "targets the RQ9 Arm B V4 routing-disabled "
+                        "configuration (min_repeat = n_repeat)."
+                    )
+
         if self.flash:
             if att_prefix is not None:
                 raise NotImplementedError
-            # efficient attention using Flash Attention CUDA kernels
-            y = torch.nn.functional.scaled_dot_product_attention(q, k, v, attn_mask=attn_mask, dropout_p=self.dropout, is_causal=is_causal)
+            if pad_bias is None:
+                # Unchanged fast path.
+                y = torch.nn.functional.scaled_dot_product_attention(q, k, v, attn_mask=attn_mask, dropout_p=self.dropout, is_causal=is_causal)
+            else:
+                # BLOCKER 6: fall back to math SDPA with combined
+                # causal+pad additive bias.
+                if attn_mask is not None:
+                    causal_bias = torch.where(
+                        attn_mask, q.new_tensor(0.0), q.new_tensor(-1e9)
+                    )
+                else:
+                    T_q = q.shape[2]
+                    causal_bias = torch.triu(
+                        torch.full((T_q, k.shape[2]), -1e9, device=q.device, dtype=q.dtype),
+                        diagonal=1,
+                    ).view(1, 1, T_q, k.shape[2])
+                combined_bias = causal_bias + pad_bias
+                y = torch.nn.functional.scaled_dot_product_attention(
+                    q, k, v, attn_mask=combined_bias, dropout_p=self.dropout, is_causal=False
+                )
         else:
             # manual implementation of attention
             att = (q @ k.transpose(-2, -1)) * (1.0 / math.sqrt(k.size(-1)))
@@ -166,6 +226,8 @@ class CausalSelfAttention(nn.Module):
             if attn_mask is None:
                 attn_mask = self.bias[:,:,:T,:T] == 1
             att = att.masked_fill(~attn_mask, float('-inf'))
+            if pad_bias is not None:
+                att = att + pad_bias
             if att_prefix is not None:
                 prefix_size = att_prefix.shape[-1]
                 current_size = att.shape[-1]
@@ -222,8 +284,11 @@ class Block(nn.Module):
         self.ln_2 = LayerNorm(config.n_embd, bias=config.bias)
         self.mlp = MLP(config)
 
-    def forward(self, x, pos_emb_closure, cache_context, start_index, indices=None, router_weights=None):
-        x = x + self.attn(self.ln_1(x), pos_emb_closure, cache_context, start_index, indices)
+    def forward(self, x, pos_emb_closure, cache_context, start_index, indices=None, router_weights=None, attention_mask=None):
+        # BLOCKER 6: attention_mask=None kwarg threads the pad mask (shape
+        # [B, T_active], tracking with the possibly-shrunk active-token
+        # dimension) through into CausalSelfAttention.
+        x = x + self.attn(self.ln_1(x), pos_emb_closure, cache_context, start_index, indices, attention_mask=attention_mask)
         x = x + self.mlp(self.ln_2(x))
         return x
 
@@ -366,7 +431,14 @@ class GPTBase(nn.Module):
         elif isinstance(module, nn.Embedding):
             torch.nn.init.normal_(module.weight, mean=0.0, std=0.02)
 
-    def forward(self, idx, targets=None, get_logits=False, use_cache=False, iter=None):
+    def forward(self, idx, targets=None, get_logits=False, use_cache=False, iter=None, attention_mask=None):
+        # BLOCKER 6: attention_mask=None kwarg (shape [B, T], 1=valid, 0=pad).
+        # Threaded through h_begin (full mask), the h_mid repeat loop (tracked
+        # alongside active_indices as tokens drop under MoD routing), and
+        # h_end (full mask again because x is reconstructed to (B, T, D)
+        # before h_end). For Arm B V4 with routing disabled
+        # (min_repeat = n_repeat), active_indices never shrinks so the
+        # tracked mask remains the full mask across all repeats.
         device = idx.device
         b, t = idx.size()
         assert t <= self.config.sequence_length, f"Cannot forward sequence of length {t}, block size is only {self.config.sequence_length}"
@@ -387,11 +459,16 @@ class GPTBase(nn.Module):
         x = pos_emb_closure.adapt_model_input(x, start_index=index_shift)
        
         for block in self.transformer.h_begin:
-            x = block(x, pos_emb_closure, cache_context, start_index=index_shift)
-        
+            x = block(x, pos_emb_closure, cache_context, start_index=index_shift, attention_mask=attention_mask)
+
         B, T, D = x.shape
 
         active_indices = (index_shift + torch.arange(T, device=x.device)).unsqueeze(0).repeat(B, 1).view(B, T)
+
+        # BLOCKER 6: track active_attention_mask alongside active_indices. When
+        # MoDBlock drops tokens via selected_indices below, both shrink in
+        # parallel. Under routing-disabled configurations this is identity.
+        active_attention_mask = attention_mask
 
         router_weights = None
 
@@ -462,7 +539,7 @@ class GPTBase(nn.Module):
             if self.depth_emb is not None:
                 x = self.depth_emb(x, indices=torch.full_like(active_indices, self.n_repeat - rep_idx))
             for block in self.transformer.h_mid:
-                x = block(x, pos_emb_closure, cache_context, start_index=None, indices=active_indices)
+                x = block(x, pos_emb_closure, cache_context, start_index=None, indices=active_indices, attention_mask=active_attention_mask)
             x = self.transformer.ln_mid(x)
             if router_weights is not None:
                 x = x_in * (1 - router_weights) + x * router_weights
@@ -474,14 +551,19 @@ class GPTBase(nn.Module):
                 is_final = x.new_ones((B, x.shape[1])) == 1.
                 selected_indices = x.new_ones((B, 0, 1)).long()
                 router_weights = None # Not gonna be used anymore
-            
+
             final_mask.append(is_final)
             all_outputs.append(x)
             all_indices.append(active_indices) # no need to clone, as we don't do inplace operations
 
             x = x.take_along_dim(selected_indices, dim=1)
-            active_indices = active_indices.take_along_dim(selected_indices.squeeze(2), dim=1)            
-            
+            active_indices = active_indices.take_along_dim(selected_indices.squeeze(2), dim=1)
+            if active_attention_mask is not None:
+                # BLOCKER 6: keep the tracked mask in sync with active_indices.
+                active_attention_mask = active_attention_mask.take_along_dim(
+                    selected_indices.squeeze(2), dim=1
+                )
+
         for block in self.transformer.h_mid:
             block.attn.drop_cache()
 
@@ -498,9 +580,13 @@ class GPTBase(nn.Module):
         x = x.take_along_dim(final_indices.unsqueeze(-1).expand(-1, -1, D), dim=1).view(B, T, D)
 
         for block in self.transformer.h_end:
-            x = block(x, pos_emb_closure, cache_context, start_index=index_shift)
-        
-            
+            # BLOCKER 6: h_end sees x reconstructed to (B, T, D) per the
+            # take_along_dim chain at lines 493-498 above, so the FULL
+            # attention_mask (not active_attention_mask) is the correct
+            # per-position validity for this stage.
+            x = block(x, pos_emb_closure, cache_context, start_index=index_shift, attention_mask=attention_mask)
+
+
         x = self.transformer.ln_f(x)
 
         if use_cache:

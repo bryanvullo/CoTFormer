@@ -97,7 +97,10 @@ class CausalSelfAttention(nn.Module):
         self._lazy_init_cache_length = None
         
 
-    def forward(self, x, pos_emb_closure, cache_context, start_index, indices):
+    def forward(self, x, pos_emb_closure, cache_context, start_index, indices=None, attention_mask=None):
+        # BLOCKER 6: attention_mask kwarg (shape [B, T] with 1=valid, 0=pad)
+        # adds an additive pad-key bias tiled across the cross-repeat cache.
+        # When None, forward is bit-identical to pre-change.
         B, T, C = x.size() # batch size, sequence length, embedding dimensionality (n_embd)
         C = self.n_embd
         # calculate query, key, values for all heads in batch and move head forward to be the batch dim
@@ -145,11 +148,40 @@ class CausalSelfAttention(nn.Module):
             attn_mask = None
             is_causal = True
         
+        # BLOCKER 6: build pad-key additive bias when attention_mask is
+        # provided. Tile per-sequence pad bits along k dim so the cached
+        # cross-repeat K broadcasts correctly over every stored-repeat slot.
+        pad_bias = None
+        if attention_mask is not None:
+            T_k = k.shape[2]
+            reps_so_far = max(1, T_k // T)
+            pad_bias = (1.0 - attention_mask.to(q.dtype)).view(B, 1, 1, T).repeat(
+                1, 1, 1, reps_so_far
+            ) * -1e9  # shape (B, 1, 1, T_k)
+
         if self.flash:
             if att_prefix is not None:
                 raise NotImplementedError
-            # efficient attention using Flash Attention CUDA kernels
-            y = torch.nn.functional.scaled_dot_product_attention(q, k, v, attn_mask=attn_mask, dropout_p=self.dropout, is_causal=is_causal)
+            if pad_bias is None:
+                # Unchanged fast path.
+                y = torch.nn.functional.scaled_dot_product_attention(q, k, v, attn_mask=attn_mask, dropout_p=self.dropout, is_causal=is_causal)
+            else:
+                # BLOCKER 6: fall back to math SDPA with combined causal+pad
+                # additive bias (Flash rejects variable-length attn_mask).
+                if attn_mask is not None:
+                    causal_bias = torch.where(
+                        attn_mask, q.new_tensor(0.0), q.new_tensor(-1e9)
+                    )
+                else:
+                    T_q = q.shape[2]
+                    causal_bias = torch.triu(
+                        torch.full((T_q, k.shape[2]), -1e9, device=q.device, dtype=q.dtype),
+                        diagonal=1,
+                    ).view(1, 1, T_q, k.shape[2])
+                combined_bias = causal_bias + pad_bias
+                y = torch.nn.functional.scaled_dot_product_attention(
+                    q, k, v, attn_mask=combined_bias, dropout_p=self.dropout, is_causal=False
+                )
         else:
             # manual implementation of attention
             att = (q @ k.transpose(-2, -1)) * (1.0 / math.sqrt(k.size(-1)))
@@ -157,6 +189,8 @@ class CausalSelfAttention(nn.Module):
             if attn_mask is None:
                 attn_mask = self.bias[:,:,:T,:T] == 1
             att = att.masked_fill(~attn_mask, float('-inf'))
+            if pad_bias is not None:
+                att = att + pad_bias
             if att_prefix is not None:
                 prefix_size = att_prefix.shape[-1]
                 current_size = att.shape[-1]
@@ -213,8 +247,10 @@ class Block(nn.Module):
         self.ln_2 = LayerNorm(config.n_embd, bias=config.bias)
         self.mlp = MLP(config)
 
-    def forward(self, x, pos_emb_closure, cache_context, start_index, indices=None):
-        x = x + self.attn(self.ln_1(x), pos_emb_closure, cache_context, start_index, indices)
+    def forward(self, x, pos_emb_closure, cache_context, start_index, indices=None, attention_mask=None):
+        # BLOCKER 6: attention_mask=None kwarg threads the counting-task
+        # pad mask (shape [B, T], 1=valid, 0=pad) into CausalSelfAttention.
+        x = x + self.attn(self.ln_1(x), pos_emb_closure, cache_context, start_index, indices, attention_mask=attention_mask)
         x = x + self.mlp(self.ln_2(x))
         return x
 
@@ -322,12 +358,16 @@ class GPTBase(nn.Module):
         elif isinstance(module, nn.Embedding):
             torch.nn.init.normal_(module.weight, mean=0.0, std=0.02)
 
-    def forward(self, idx, targets=None, get_logits=False, use_cache=False, iter=None):
+    def forward(self, idx, targets=None, get_logits=False, use_cache=False, iter=None, attention_mask=None):
+        # BLOCKER 6: attention_mask=None kwarg (shape [B, T], 1=valid, 0=pad)
+        # is plumbed through h_begin, every h_mid repeat, and h_end. Sequence
+        # length stays constant across repeats in this variant (no token
+        # dropping), so the same mask is reused per block call.
         device = idx.device
         b, t = idx.size()
         assert t <= self.config.sequence_length, f"Cannot forward sequence of length {t}, block size is only {self.config.sequence_length}"
-        
-        
+
+
         # forward the GPT model itself
         if use_cache:
             idx, index_shift, cache_context = self.lm_cache(idx)
@@ -341,10 +381,10 @@ class GPTBase(nn.Module):
         x = self.transformer.wte(idx) # token embeddings of shape (b, t, n_embd)
         x = self.transformer.drop(x)
         x = pos_emb_closure.adapt_model_input(x, start_index=index_shift)
-       
+
         for block in self.transformer.h_begin:
-            x = block(x, pos_emb_closure, cache_context, start_index=index_shift)
-        
+            x = block(x, pos_emb_closure, cache_context, start_index=index_shift, attention_mask=attention_mask)
+
         B, T, D = x.shape
 
         total_expected_length = self.n_repeat * T
@@ -355,14 +395,14 @@ class GPTBase(nn.Module):
             if self.depth_emb is not None:
                 x = self.depth_emb(x, indices=x.new_full((B, T), self.n_repeat - rep_idx, dtype=torch.long))
             for block in self.transformer.h_mid:
-                x = block(x, pos_emb_closure, cache_context, start_index=index_shift)
+                x = block(x, pos_emb_closure, cache_context, start_index=index_shift, attention_mask=attention_mask)
             x = self.transformer.ln_mid(x)
-        
+
         for block in self.transformer.h_mid:
             block.attn.drop_cache()
 
         for block in self.transformer.h_end:
-            x = block(x, pos_emb_closure, cache_context, start_index=index_shift)
+            x = block(x, pos_emb_closure, cache_context, start_index=index_shift, attention_mask=attention_mask)
         
         x = self.transformer.ln_f(x)
 
