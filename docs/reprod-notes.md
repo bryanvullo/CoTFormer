@@ -8,9 +8,9 @@
 - [Reproducibility Notes](#reproducibility-notes)
   - [Table of Contents](#table-of-contents)
 - [Methodology](#methodology)
-  - [Reproduction scope](#reproduction-scope)
-  - [Evaluation protocol](#evaluation-protocol)
-  - [Confidence intervals and the paper's SEM](#confidence-intervals-and-the-papers-sem)
+  - [M1. Reproduction scope](#m1-reproduction-scope)
+  - [M2. Evaluation protocol](#m2-evaluation-protocol)
+  - [M3. Confidence intervals and the paper's SEM](#m3-confidence-intervals-and-the-papers-sem)
   - [M4. Training configuration shared across variants](#m4-training-configuration-shared-across-variants)
   - [M5. What "delta" means in this document](#m5-what-delta-means-in-this-document)
   - [M6. Reproduction-fidelity vs fair-comparison regime distinction](#m6-reproduction-fidelity-vs-fair-comparison-regime-distinction)
@@ -113,7 +113,7 @@ Reproduction methodology shared across all
 A-subsections cite back to this section for scope, evaluation
 protocol, and uncertainty interpretation rather than restating it.
 
-## Reproduction scope
+## M1. Reproduction scope
 
 We reproduce the chain of variants that drives the paper's Section 5
 comparison (LN-CoTFormer vs ADM at full compute, 60k steps) plus the
@@ -135,7 +135,7 @@ uses, so reproducing it would not advance the Section 5 comparison chain
 that [§A1](#a1-cotformer--reserved-layers-perplexity-table-2-40k-steps)
 "Ordering rationale" prioritises.
 
-## Evaluation protocol
+## M2. Evaluation protocol
 
 All metrics reported in [Part A](#part-a-successful-replications) come
 from standalone `eval.py` runs launched with `--distributed_backend
@@ -159,7 +159,7 @@ fail on single-GPU evaluation resources. The point estimate, 95%
 perplexity CI, and raw per-batch losses for each run are persisted to
 `eval_summary_ckpt_<step>.json` for downstream consumption.
 
-## Confidence intervals and the paper's SEM
+## M3. Confidence intervals and the paper's SEM
 
 [Part A](#part-a-successful-replications)'s result tables report two
 distinct uncertainty quantities — our 95% confidence interval and the
@@ -356,9 +356,9 @@ sub-stream to the extension per the
 # Part A: Successful Replications
 
 See [Methodology](#methodology) for the reproduction scope
-([§Scope](#reproduction-scope)), evaluation protocol
-([§Protocol](#evaluation-protocol)), uncertainty interpretation
-([§CIs](#confidence-intervals-and-the-papers-sem)), shared training
+([§M1](#m1-reproduction-scope)), evaluation protocol
+([§M2](#m2-evaluation-protocol)), uncertainty interpretation
+([§M3](#m3-confidence-intervals-and-the-papers-sem)), shared training
 configuration ([§M4](#m4-training-configuration-shared-across-variants)),
 and delta vocabulary ([§M5](#m5-what-delta-means-in-this-document)) that
 every subsection below inherits.
@@ -395,7 +395,7 @@ combined effect of [§B1](#b1-trainval-split-divergence) (train/val
 split), [§B3](#b3-micro-batch-size-hardware-constrained) (micro-batch
 decomposition under bfloat16), and single-seed variance; the paper's
 0.01 parenthetical is an inter-seed SEM and is not directly comparable
-— see [§CIs](#confidence-intervals-and-the-papers-sem) for the
+— see [§M3](#m3-confidence-intervals-and-the-papers-sem) for the
 uncertainty-quantity distinction.
 
 Unlike [§A2a](#a2a-ln-cotformer-perplexity-section-5-60k-steps) and
@@ -416,7 +416,7 @@ Trained for 40,000 steps using the shared setup of
 
 ### Evaluation configuration
 
-Standalone `eval.py` per [§Protocol](#evaluation-protocol). Evaluated from
+Standalone `eval.py` per [§M2](#m2-evaluation-protocol). Evaluated from
 the final `ckpt_40000.pt` snapshot of the `cotformer_full_depth` class
 via `--checkpoint`/`--checkpoint_filename ckpt_40000.pt`. Evaluation
 package: `iridis/eval-cot-res/`; artefacts in
@@ -456,7 +456,7 @@ scheme on the same `2→21×5→1` backbone.
 Our point estimate (24.13) sits inside our intra-run 95% CI
 [23.75, 24.51] which also contains the paper's 24.11; the result is
 therefore reproduced within intra-run noise
-(see [§CIs](#confidence-intervals-and-the-papers-sem) and
+(see [§M3](#m3-confidence-intervals-and-the-papers-sem) and
 [§M5](#m5-what-delta-means-in-this-document)). The paper's 0.03
 parenthetical is an inter-seed SEM across three seeds and is not
 directly comparable to our single-seed intra-run CI. Trained for
@@ -499,7 +499,7 @@ by [§B10](#b10-lr-schedule-discontinuity-on-40k-to-60k-extension) as it
 was trained for 60k steps from scratch. See
 [§M5](#m5-what-delta-means-in-this-document) for how this +0.40 PPL
 delta is compared against the 95% CI in
-[§CIs](#confidence-intervals-and-the-papers-sem).
+[§M3](#m3-confidence-intervals-and-the-papers-sem).
 
 ---
 
@@ -641,7 +641,7 @@ under identical conditions:
 The 60k v1-vs-v2 delta of 0.014 PPL is well below either 95% CI width
 (~0.76 PPL) and well below the per-batch loss-level intra-run SEM of
 0.0081 in loss space (~0.25 PPL in perplexity space; see
-[§CIs](#confidence-intervals-and-the-papers-sem)).
+[§M3](#m3-confidence-intervals-and-the-papers-sem)).
 [§B4](#b4-rng-state-restoration-on-ddp-resume-adm--resolved) is
 therefore methodologically correct but its practical impact on the
 final ADM perplexity is below the intra-run noise floor on our
@@ -1286,7 +1286,7 @@ the total, producing < 0.001 PPL divergence.
 We deliberately use the training `batch_size` from `summary.json`
 rather than overriding it, to eliminate this micro-divergence entirely.
 Single-GPU evaluation with `--distributed_backend None` (see
-[§Protocol](#evaluation-protocol)) also matches the paper's evaluation
+[§M2](#m2-evaluation-protocol)) also matches the paper's evaluation
 conditions (no DDP data sharding during eval).
 
 ## B12. RQ9 counting sub-stream is not a Chang and Bisk reproduction
@@ -1581,7 +1581,7 @@ pipeline, hyperparameters, and hardware — were held constant.
 At 60k the delta is 0.014 PPL — well below either 95 % CI width
 (~0.76 PPL each), well below the per-batch loss-level intra-run SEM of
 0.0081 in loss space (~0.25 PPL in perplexity space; see
-[§CIs](#confidence-intervals-and-the-papers-sem)), and well below
+[§M3](#m3-confidence-intervals-and-the-papers-sem)), and well below
 the paper's inter-seed SEM of 0.03 for LN-CoTFormer 40k. The 40k delta
 (+0.006, sign reversed) is consistent with intermediate-checkpoint
 noise from the mid-cosine-decay training state and does not contradict
