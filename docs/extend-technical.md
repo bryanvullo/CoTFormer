@@ -46,6 +46,7 @@
 - [5. Branch discipline](#5-branch-discipline)
 - [6. Testing protocol](#6-testing-protocol)
 - [7. Debugging and orch directive index](#7-debugging-and-orch-directive-index)
+- [8. Analysis engineering consequences](#8-analysis-engineering-consequences)
 
 ---
 
@@ -63,6 +64,7 @@ authoritative mapping; future edits must preserve it.
 | §5 Branch discipline | §1.7 Branch strategy | §5 codifies the abeprobes-specific workflow; §1.7 codifies the main-vs-tak strategy decided earlier |
 | §6 Testing protocol | §1.6 Reliability Discipline, §1.3 Protocol D-calibration validation ladder | §6 records the smoke-test and gate-check procedures; §1.6/§1.3 specify the scientific content |
 | §7 Orch directive index | §1.8 Sequencing, §1.9 Decision Log | §7 records which orch completed which wave; §1.8/§1.9 specify the plan and decisions |
+| §8 Analysis engineering consequences | §1.3 Protocol B / C / D implementation notes, §1.4 Prediction 1 + Prediction 2, §1.8 Compute Budget | §8 records the Wave-2 / Wave-2c engineering consequences surfaced during protocol implementation; §1.3 / §1.4 / §1.8 specify the scientific constraint each engineering note serves. §8.6 (attention-taxonomy flash fallback) + §8.7 (router-analysis ADM-only execution) cover the Protocol C and Protocol D engineering consequences respectively. |
 
 Every cross-reference is bidirectional: a `docs/extend-notes.md`
 anchor cited here must cite back to this file from the corresponding
@@ -552,6 +554,8 @@ the index below. The index is append-only; entries are never removed.
 | Orch | Directive | Status | Completed on | Summary |
 |---|---|---|---|---|
 | o-cotformer-skel-1 | DIR-001 | DONE (uncommitted) | 2026-04-22 | Phase 1 skeleton + 6 BLOCKERs + environment + pre-registration freeze |
+| o-cotformer-mvp-a | DIR-001 | COMPLETE (uncommitted) | 2026-04-22 | Phase 2a common/ infrastructure + Protocols A, A-ext, E + HPC packaging |
+| o-cotformer-mvp-b | DIR-001 | COMPLETE (uncommitted) | 2026-04-22 | Phase 2b Protocols B (debiased CKA), F (effective dim), G (KV rank + KV-CoRE NER) + HPC script extensions; analyze_kv_compression.py monolith removed |
 
 ### 7.2 Debugging log
 
@@ -561,6 +565,347 @@ what git history captures) are recorded below. Each entry carries:
 (d) the audit trail (commit hash or file change).
 
 *(no entries yet)*
+
+---
+
+## 8. Analysis engineering consequences
+
+Engineering-side notes surfaced during the Wave-2 analysis-protocol
+implementation. Each subsection records a consequence whose scope is
+operational (compute budget, cache-layout coupling, module interface
+details) rather than scientific (the scientific statements stay in
+`docs/extend-notes.md`).
+
+### 8.1 Debiased HSIC U-statistic compute budget
+
+Protocol B (`analysis/cka.py`) implements the Song et al. 2012 /
+Murphy et al. 2024 unbiased HSIC U-statistic estimator, NOT the
+biased estimator. The unbiased form is required because biased CKA
+inflates similarity at the low-``N`` high-``d`` regime that applies
+here (2048 tokens sampled from OWT2, 105 sites at ``n_embd=768``).
+
+Compute-cost accounting for a single C3 checkpoint:
+
+- 105 residual sites -> ``C(105, 2) = 5460`` unordered pairs.
+- Per pair: one observed debiased CKA evaluation plus
+  ``n_permutations`` permutation-null evaluations.
+- At ``n_permutations = 1000``, 5460 x 1000 = 5.46 M debiased CKA
+  evaluations per checkpoint.
+- Each evaluation is O(``n_tokens^2``) in the element-wise
+  Gram-product path; at ``n_tokens = 2048`` this is ~4 M FLOPs per
+  evaluation, giving a single-core workload of ~ 2.2e13 FLOPs.
+- On the SLURM CPU node with 16 cores the wall time is ~15 h
+  worst case at the native NumPy BLAS throughput, falling to
+  ~2 h with ``multiprocessing.Pool(processes=12)``. The
+  ``CKA_WORKERS`` knob in `iridis/analyze-lncot+adm/job-cpu.sh`
+  selects the parallelism; the default of 12 leaves a modest
+  reserve against BLAS-thread oversubscription.
+
+Implementation strategy:
+
+- Gram matrices ``K_tilde = X X^T`` (diagonal zeroed) are
+  pre-computed once per site before the pair loop. Memory cost is
+  105 x 32 MB = ~3.3 GB at ``float64``, well within the 64 GB
+  SBATCH allocation.
+- ``HSIC_u(Y, Y)`` is permutation-invariant because the trace,
+  row-sum dot product, and total-sum terms are all unchanged when
+  Y's row/column indices are permuted by the same permutation
+  (``P K_tilde_Y P^T`` has the same trace as ``K_tilde_Y``, and
+  ``1^T P K_tilde_Y P^T 1 = 1^T K_tilde_Y 1``). Only
+  ``HSIC_u(X, Y_perm)`` varies across null samples; the CKA
+  denominator is therefore precomputed once per pair, saving two
+  thirds of the in-loop cost.
+- Permutation is implemented as a two-axis fancy index
+  ``K_tilde_Y[p[:, None], p[None, :]]`` rather than regenerating
+  the Gram matrix from a permuted data matrix. The former is
+  ~``n_tokens^2`` memory traffic per draw; the latter would be
+  ``n_tokens^2 * n_embd`` per draw (400x more work).
+
+Escalation path: if profiling on the target node shows > 30 h CPU
+per checkpoint the compute budget is blown up (§1.8 subtotal is
+~2 h CPU across B / F / G). Halve ``n_permutations`` only as a
+last resort and document the zone-threshold widening in the RPT.
+
+### 8.2 KV capture inside `kv_rank.py` (documented exception to §8.5)
+
+Protocol A (`analysis/logit_lens.py`) captures residual sites
+only; the fused ``c_attn`` site required by Protocol G Type B is
+not part of its collector configuration. Rather than extending
+Protocol A's scope (which would entangle its CV-gate accounting
+with an unrelated site), Protocol G carries a ``--capture-kv``
+flag that runs a second minimal collector pass at the
+``ActivationSite.KV_C_ATTN`` site when the workspace lacks
+``kv_mid_l<L>_r<R>.npy``. The pass reuses
+`analysis/common/data.py`'s ``iterate_owt2_val``, the shared
+autocast context, and the `analysis.common.collector` state-
+management contract, so the per-repeat counter hooks remain the
+single source of truth.
+
+This is a **documented exception** to the collector-only principle
+stated in §8.5: the CV-gate accounting constraint makes combining
+the two captures costly. Any future exception must be raised the
+same way -- a script-local collector pass using the shared
+``ActivationCollector`` class, NOT a bespoke capture path.
+
+Re-runs are idempotent: `kv_rank.py` checks
+``workspace_dir`` for any ``kv_mid_l*_r*.npy`` file before
+triggering the capture. When files are present, `--capture-kv`
+is a no-op and only Type A (weight-level) and Type B
+(activation-level from the existing cache) run.
+
+### 8.3 Workspace file-naming contract
+
+The canonical file names produced by `analysis.common.collector`
+for every site consumed by Protocols A, B, C, D, E, F, G are:
+
+| Site | File name | Shape |
+|---|---|---|
+| `RESIDUAL_POST_MID` at layer ``L``, repeat ``R`` | `residual_mid_l<L>_r<R>.npy` | `(N_tokens, n_embd)` |
+| `RESIDUAL_POST_LN_MID` at repeat ``R`` | `residual_ln_mid_r<R>.npy` | `(N_tokens, n_embd)` |
+| `RESIDUAL_PRE_LN_F` (one per forward; input to ``ln_f``) | `residual_pre_ln_f.npy` | `(N_tokens, n_embd)` |
+| `KV_C_ATTN` at layer ``L``, repeat ``R`` | `kv_mid_l<L>_r<R>.npy` | `(N_tokens, 3 * n_embd)` |
+| `ATTN_WEIGHTS` at layer ``L``, repeat ``R`` (Protocol C) | `attn_weights_mid_l<L>_r<R>.npy` | `(N_tokens, n_head, T_k)` |
+| `ROUTER_LOGITS` at router index ``K`` (Protocol D; ADM only) | `router_mod<K>.npy` | `(N_tokens, 1)` |
+
+The `kv_mid_*.npy` files store the fused ``[Q, K, V]`` output of
+``c_attn``; downstream consumers slice K as
+``[:, n_embd : 2 * n_embd]`` and V as ``[:, 2 * n_embd : 3 * n_embd]``.
+`kv_rank.py` honours this layout in its
+``_analyse_activation_one`` helper.
+
+The `attn_weights_mid_*.npy` files store the post-softmax
+per-head causal attention distribution, one row per (batch, query)
+position. ``N_tokens = B * T_q`` matches the token budget; ``T_k``
+is the sequence length (keys live at positions ``0..T_k - 1``).
+Rows are ordered as the flattened ``(B, T_q)`` indexing of the
+raw attention matrix ``(B, n_head, T_q, T_k)`` after
+``permute(0, 2, 1, 3).contiguous().reshape(B * T_q, n_head, T_k)``;
+query positions within a single batch occupy consecutive rows,
+allowing the Protocol C previous-token detector to derive query
+indices as ``row_index mod T_k``. The files are written ONLY
+when the caller passes ``non_flash=True`` to the collector; see
+[§8.6](#86-attention-taxonomy-flash-fallback) for the flash-backend
+limitation rationale and the monkey-patch implementation.
+
+The `router_mod<K>.npy` files store the raw per-token router
+logit from ``mod[K].mod_router`` (one per router, ``K`` in
+``0..n_repeat - 2``). No sigmoid is applied at capture time;
+downstream consumers in `router_analysis.py` apply
+``sigmoid(logit)`` and threshold at ``0.5`` to recover the
+continue / halt decision. Non-ADM checkpoints (C1 / C2 / C3) do
+not instantiate ``transformer.mod`` and the files are never
+written on those tags; Protocol D short-circuits with a
+``not_applicable`` verdict; see
+[§8.7](#87-router-analysis-adm-only-execution).
+
+The key-naming is produced deterministically by the collector's
+``_make_site_hook`` via
+``key.replace('[', '_l').replace(']', '')`` on the site key
+produced by `enumerate_sites`. The §4.3 workspace-layout diagram
+in this document was written against an earlier stub convention
+(``residual_h_mid_r<R>_l<L>.npy``) and does not match the
+collector's live output; treat the actual collector key format
+as canonical until a future doc-wave resolves the text.
+
+### 8.4 Spectral module dependency chain
+
+The Protocols B / F / G bodies all import from
+`analysis/common/spectral.py`:
+
+- Protocol B (cka.py) uses the HSIC U-statistic machinery
+  defined in its own module; it does NOT consume spectral.py.
+- Protocol F (effective_dim.py) imports
+  ``participation_ratio`` and ``kv_core_rank`` for the Chun
+  gamma_row estimator and the Chen NER cross-check, plus
+  `analysis/common/plotting.py` helpers.
+- Protocol G (kv_rank.py) imports ``compute_effective_rank``
+  (cumulative-variance rank search) and ``kv_core_rank`` (NER).
+
+The `spectral.py` module stays NumPy-only; none of its helpers
+take a ``torch.Tensor``. When a protocol needs to apply a
+spectral helper to a GPU-resident tensor, it detaches to CPU and
+passes the ``numpy`` view -- matching the collector's per-site
+hook contract (CPU-resident float32 by default).
+
+### 8.5 Collector-only principle
+
+``analysis/common/collector.py`` is the single place that OWNS
+activation capture. Protocol scripts extract from the workspace
+cache the collector produces; they do NOT install their own
+forward hooks, monkey-patch ``CausalSelfAttention``, or materialise
+activations via a bespoke forward pass.
+
+Rationale:
+
+- **DRY**: one hook-management contract, one per-repeat counter,
+  one CPU-resident-float32 capture convention, one workspace
+  file-naming scheme. Protocol scripts need only know the
+  workspace file-naming table (§8.3).
+- **Reproducibility**: all captures share the same ``torch.no_grad``
+  envelope, the same ``type_ctx`` autocast, the same
+  ``_flatten_bt`` convention. A second capture path would drift
+  from these guarantees and contaminate cross-protocol
+  triangulation rows in §1.6.
+- **Test surface**: a single collector is testable against
+  ``sites_per_forward_count``; bespoke capture paths fragment the
+  test surface and make per-repeat bookkeeping bugs
+  protocol-specific rather than reproducible via smoke tests.
+
+**Exceptions** are only permissible when an EVIDENT computational
+constraint makes combining captures infeasible (e.g. the Protocol
+A CV-gate accounting in §8.2). Every exception must:
+
+1. be documented in this section with a pointer to the justifying
+   constraint,
+2. use the shared ``ActivationCollector`` class (no bespoke
+   hooks), and
+3. check the workspace for existing outputs before triggering a
+   re-capture (idempotency).
+
+Future protocol scripts that wish to derogate from this rule must
+raise the exception via the same mechanism and document it here;
+silent one-off capture paths are a defect even when they work.
+
+### 8.6 Attention-taxonomy flash fallback
+
+Protocol C requires per-(query, head) attention weights; the
+flash-kernel SDPA backend
+(``torch.nn.functional.scaled_dot_product_attention`` with
+``is_causal=True``) does NOT return them. `ActivationCollector`
+therefore treats ``ATTN_WEIGHTS`` as a site-requiring-non-flash
+capture and enforces two coupled toggles on the run:
+
+1. ``non_flash=True`` is a constructor precondition. Requesting
+   ``ATTN_WEIGHTS`` without ``non_flash=True`` raises
+   ``ValueError`` with an explicit pointer back to this section.
+   The flag is validated in ``__init__`` so the mis-config fails
+   before any forward pass.
+2. ``_apply_non_flash`` (called from ``register_hooks`` when
+   ``non_flash=True``) flips ``attn.flash = False`` on every
+   ``CausalSelfAttention`` module in ``transformer.h_begin``,
+   ``h_mid``, ``h_end``, and ``h``. This routes the
+   ``CausalSelfAttention.forward`` math path at
+   ``models/base.py:85-119`` to the non-flash branch.
+
+Checkpoint interaction: ``CausalSelfAttention.__init__`` only
+registers the ``bias`` causal-mask buffer in its non-flash branch
+(``models/base.py:52-62``); checkpoints trained under PyTorch 2.0+
+(i.e. every checkpoint in the Analysis Matrix) have ``flash=True``
+at init and carry no ``bias`` buffer. The non-flash forward path at
+``models/base.py:94`` uses ``self.bias[:, :, :T, :T]``; without a
+buffer this crashes with AttributeError when the collector later
+flips ``flash=False``. `_apply_non_flash` detects the missing
+buffer and installs a causal mask on the fly via plain-attribute
+assignment (NOT ``register_buffer``, so the collector-installed
+mask cannot pollute any subsequent ``state_dict``). A sibling flag
+``_analysis_nonflash_bias = True`` records which modules the
+collector patched; ``_restore_flash`` removes only those (leaving
+any checkpoint-native ``bias`` buffer intact).
+
+Attention-weights capture mechanism: because
+``CausalSelfAttention.forward`` returns only ``y`` (the residual-
+projected output) and not ``(y, att)``, a standard
+``register_forward_hook`` on the attention module cannot observe
+``att``. `ActivationCollector._install_attn_monkey_patch` replaces
+``attn.forward`` per-module with a wrapper that:
+
+1. Calls the original forward to produce ``y`` (no change to the
+   residual stream; downstream modules remain unaffected).
+2. Re-runs the Q/K math path on the same input to recompute
+   ``att`` post-softmax. The re-computation mirrors the
+   ``models/base.py:92-99`` math, intentionally omitting the
+   attention-dropout and cache-prefix branches because the
+   collector runs in ``torch.no_grad() + model.eval()`` where
+   ``attn_dropout`` is an identity and ``cache_context`` is None.
+3. Stashes ``att`` on the module as ``_analysis_att_stash``
+   (detached, float32, CPU) so the forward-post-hook can read it.
+
+Restoration is symmetric: `_restore_attn_monkey_patch` deletes
+the instance-level ``forward`` override so
+``CausalSelfAttention.forward`` (the class-level descriptor) is
+visible again. Both the monkey-patch and the on-the-fly bias
+buffer are cleaned up inside the ``with collector:`` context
+manager exit. Users who invoke ``register_hooks`` / ``remove_hooks``
+manually must pair the calls inside a ``try / finally`` so a
+mid-run crash cannot leave the model in a modified state.
+
+Compute cost: the non-flash math path is roughly 4x the flash-
+kernel per-block cost; the monkey-patch's Q/K re-computation adds
+another 2x on top. Combined, Protocol C forwards run at ~8x the
+flash-backend baseline. ``docs/extend-notes.md`` §1.3 Protocol C
+compute row quotes ~9 min on L4 per checkpoint at
+``max_tokens = 2048``, ``seq_length = 256``; this matches the ~8x
+multiplier over the ~1 min flash-backend forward on the same
+budget.
+
+This is the second pre-approved derogation of the collector-only
+principle ([§8.5](#85-collector-only-principle)) -- the first is
+the [§8.2](#82-kv-capture-inside-kv_rankpy-documented-exception-to-85)
+KV-capture-inside-kv_rank.py exception. Unlike §8.2 (which
+installs a bespoke hook path outside the collector), the
+attention-taxonomy exception lives INSIDE ``collector.py``; the
+monkey-patch is scoped to ``register_hooks`` / ``remove_hooks``
+and cannot leak past a properly-used context manager.
+
+### 8.7 Router-analysis ADM-only execution
+
+Protocol D consumes the ``ROUTER_LOGITS`` site which hooks
+``model.transformer.mod[K].mod_router`` for ``K`` in
+``0..n_repeat - 2``. Non-ADM variants (C1
+``cotformer_full_depth``, C2 / C3 ``cotformer_full_depth_lnmid_depthemb``)
+do not instantiate ``transformer.mod`` -- ``getattr(transformer,
+"mod", None)`` returns ``None`` on those checkpoints.
+`router_analysis.py` short-circuits in two places:
+
+1. The capture stage (``_run_capture_stage``) checks
+   ``getattr(model.transformer, "mod", None)`` before constructing
+   the collector. When the attribute is absent or empty it returns
+   ``{"short_circuit": True, "reason": "non-ADM checkpoint, no
+   mod[] router layers"}`` and skips both the collector and the
+   analysis stages.
+2. The analysis stage (``_analyse_routers``) scans the workspace
+   for ``router_mod<K>.npy`` entries and returns ``{"verdict":
+   "not_applicable"}`` when none are found. This guard handles the
+   case where a prior run saved a workspace meta.json with the
+   short-circuit flag but no router files (i.e. the GPU stage
+   short-circuited and the CPU stage re-invoked on the same
+   workspace).
+
+Short-circuit semantics preserve the per-tag output directory
+contract: even on non-ADM checkpoints a
+``router_analysis_results.json`` is written, carrying the
+``verdict: not_applicable`` payload. The HPC `job-cpu.sh` stage
+thereby produces a per-tag JSON for every checkpoint, keeping the
+run_N/<tag>/ tree uniform and making cross-checkpoint synthesis
+scripts (``analysis.synthesis`` in a later wave) simpler to
+write.
+
+Cross-version comparison semantics: Protocol D's
+``--compare-against`` flag accepts a prior
+``router_analysis_results.json`` and rebuilds the per-router
+continue masks when the prior workspace path is recorded in the
+JSON meta block (enable via ``--record-workspace-path`` on the
+prior run; the `job-cpu.sh` template sets the flag by default).
+When the prior workspace is unavailable the fallback
+``fingerprint_only`` probe compares SHA-1 fingerprints of the
+continue masks for strict equality (no partial-overlap resolution
+possible). The DIR-001 T3 cross-version H0 "router decisions
+identical at the same repeat index" rejects at
+``min(jaccard) < 0.7`` across routers; the ``rejects_identical_null``
+flag in the ``cross_version`` sub-block records the verdict. C5
+v2 against C4 v1 at matched 60k steps is the primary comparison
+in the Analysis Matrix.
+
+Why Protocol D lives on the CPU stage (job-cpu.sh): the forward
+pass on a 24L x 5 model at ``max_tokens = 2048, seq_length = 256``
+takes ~5 min on a 16-core CPU, an acceptable cost relative to
+the Tuned Lens ~5 h CPU budget per checkpoint that dominates the
+CPU stage. Running Protocol D on the GPU would compete with
+Protocol C's ~9 min GPU slot per checkpoint and the Protocol G
+Type B ~25 min per checkpoint; the CPU placement keeps the GPU
+job tighter and still honours the §1.8 compute budget's "~10 min
+GPU" row (Protocol D's per-checkpoint budget is accepted as CPU-
+resident without loss of scientific fidelity).
 
 ---
 

@@ -15,8 +15,8 @@ reproduction gate (`docs/extend-notes.md` §1.2 RQ9 "Twin-pilot
 design" and §1.8 "Empirical step-time validation gate"). Every
 threshold below is immutable after the skeleton commit; any post-hoc
 adjustment requires a dated amendment in `docs/extend-notes.md` §1.9
-M2 Decision Log AND an explicit reference in the commit message to
-the amending DEC-M2-NNN identifier.
+Decision Log AND an explicit reference in the commit message to
+the amending DEC-NNN identifier.
 
 ## Section 1 -- Protocol D-calibration four-gate thresholds
 
@@ -86,7 +86,7 @@ the fallback in the corresponding row rather than continuation.
   - **AMBIGUOUS** (Spearman rho in (-0.5, -0.3)): rerun with
     N = 4000 per condition to resolve. If ambiguity persists, DV-2
     is downgraded to single-measurement-preliminary per the §1.9
-    scope-shedding DEC-M2-030 trigger.
+    scope-shedding DEC-030 trigger.
   - **FAIL** (Spearman rho > -0.3 OR linear classifier on entropy
     alone >= 0.85): monotone interpretation refuted. Apply the
     REPLACE-WITH-TOP-K-MASS fallback: DV-2 is replaced by "fraction
@@ -96,8 +96,8 @@ the fallback in the corresponding row rather than continuation.
 ## Section 2 -- Pilot 1 reproduction gate (counting)
 
 The Pilot 1 arm (Chang and Bisk 4L standard Transformer at
-n_embd=1024, Chang and Bisk-exact regime per DEC-M2-019 and the
-seven-divergence reconciliation DEC-M2-020) carries two hard gates
+n_embd=1024, Chang and Bisk-exact regime per DEC-019 and the
+seven-divergence reconciliation DEC-020) carries two hard gates
 that the main sweep cannot proceed without.
 
 ### Gate P1-A -- IND accuracy gate
@@ -109,9 +109,9 @@ that the main sweep cannot proceed without.
   transformer reaches near-perfect accuracy on length 50 under this
   regime; failing to reproduce that baseline invalidates the
   reference point for every cross-architecture comparison in RQ9.
-- **Fallback on fail**: RQ9 sub-stream sheds to Milestone 3 per the
-  §0 scope-shedding trigger 1. The M2 analytic sub-stream proceeds
-  unaffected.
+- **Fallback on fail**: RQ9 sub-stream sheds to the extension stream
+  per the §0 scope-shedding trigger 1. The mechanistic-analysis
+  sub-stream proceeds unaffected.
 
 ### Gate P1-B -- Per-step wall time gate
 
@@ -132,7 +132,7 @@ that the main sweep cannot proceed without.
 ## Section 3 -- Audit trail
 
 Any change to a threshold in Section 1 or Section 2 after the
-skeleton commit requires (a) a dated DEC-M2-NNN entry in
+skeleton commit requires (a) a dated DEC-NNN entry in
 `docs/extend-notes.md` §1.9 describing the change and its rationale,
 (b) a reference to that identifier in the amending commit message,
 and (c) a cross-reference line appended to the appropriate gate
