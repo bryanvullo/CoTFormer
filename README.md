@@ -1,4 +1,26 @@
-# COMP 6258 Differentiable Programming and Deep Learning
+# CoTFormer -- paper reproduction branch (`main`)
+
+This branch reproduces the CoTFormer paper (Mohtashami et al., ICLR 2025)
+from Table 2 onwards (Section 4.3 Results and Section 5 Discussion):
+the 24-layer reserved-layers CoTFormer, the LN-CoTFormer with depth
+embedding, the Adaptive LN-CoTFormer (ADM) with Mixture-of-Repeats
+routing, and the Figure 4 perplexity-vs-MACs Pareto curves. Table 1
+baselines (12-layer models) are included for completeness but are not
+the primary reproduction target. Standard and Block Universal
+Transformer baselines are cited from the paper and not reproduced.
+
+For mechanistic-analysis code, counting-experiment substream, and
+architectural-extension scaffolding, switch to the `abeprobes` branch:
+
+```bash
+git checkout abeprobes
+```
+
+The two branches are intentionally separated so this reproduction
+surface stays readable and review-friendly. See the `abeprobes`
+branch README for the experimentation context and the
+`docs/extend-notes.md` and `docs/extend-technical.md` files that live
+there.
 
 ## Table of Contents
 
@@ -16,17 +38,16 @@
   - [SLURM Job Configuration](#slurm-job-configuration)
   - [Parameter Reference](#parameter-reference)
   - [Model Variants](#model-variants)
+- [Evaluation](#evaluation)
 - [Acknowledgements](#acknowledgements)
 
 ## References
 
-| Paper | We use | Link |
-|-------|--------|------|
-| **CoTFormer** (Mohtashami et al., ICLR 2025) | Base architecture, Variant B adaptive depth router | [OpenReview](https://openreview.net/forum?id=7igPXQFupX), [GitHub](https://github.com/epfml/CoTFormer) |
-| **DeepSeek-V2** (DeepSeek-AI, 2024) | Multi-Head Latent Attention (MLA) | [arXiv:2405.04434](https://arxiv.org/abs/2405.04434) |
+| Paper | Used for | Link |
+|-------|----------|------|
+| **CoTFormer** (Mohtashami et al., ICLR 2025) | Base architecture reproduced in this branch | [OpenReview](https://openreview.net/forum?id=7igPXQFupX), [GitHub](https://github.com/epfml/CoTFormer) |
 | **RoFormer** (Su et al., 2024) | Rotary Position Embeddings (RoPE) | [arXiv:2104.09864](https://arxiv.org/abs/2104.09864) |
 | **The Pile / OpenWebText2** (Gao et al., 2020) | Training dataset | [arXiv:2101.00027](https://arxiv.org/abs/2101.00027) |
-| **Pause Tokens** (Goyal et al., 2023) | Stretch goal -- explicit pause tokens | [arXiv:2310.02226](https://arxiv.org/abs/2310.02226) |
 | **Pre-LN Transformer** (Xiong et al., 2020) | LN-CoTFormer variant uses pre-layer-norm placement | [arXiv:2002.04745](https://arxiv.org/abs/2002.04745) |
 
 ## Repo Structure
@@ -37,7 +58,8 @@
 ├── eval.py                      ← Evaluation
 ├── get_ppl_per_mac.py           ← MACs-aware PPL evaluation (Figure 4)
 ├── get_router_weights.py        ← Extract ADM router weights from checkpoint
-├── analyze_kv_compression.py    ← KV cache SVD analysis for MLA design
+├── plot_fig4.py                 ← Figure 4 Pareto plot (Perplexity vs MACs)
+├── plot_fig5.py                 ← Figure 5 router weight histogram (Section 5)
 ├── config/                      ← Argument parsing and defaults
 ├── data/                        ← Dataset loaders (OpenWebText2)
 ├── models/                      ← All model definitions
@@ -248,17 +270,21 @@ All training runs execute `main.py` from the repo root. On Iridis, use the self-
 
 | Package | Model | Steps | Purpose |
 |---------|-------|-------|---------|
-| `iridis/lncot-train/` | LN-CoTFormer (24L, 5 repeats) | 40k | Table 2 perplexity baseline |
-| `iridis/adm-train/` | Adaptive LN-CoTFormer + Router | 60k | Figure 4 (MACs vs perplexity) |
-| `iridis/lncot-exp4/` | Evaluation only | -- | Reproduce Figure 4 curves |
+| `iridis/cot-res-train/` | CoTFormer + Reserved Layers (24L, 5 repeats) | 40k | Table 2, row 1 |
+| `iridis/lncot-train/` | LN-CoTFormer (24L, 5 repeats) | 40k / 60k | Table 2 row 2 + Section 5 PPL |
+| `iridis/adm-train/` | Adaptive LN-CoTFormer + Router (24L, 5 repeats) | 60k | Section 5 ADM + Figure 4 |
+| `iridis/eval-adm/` | ADM + LN-CoTFormer evaluation | -- | Table 2 PPL + Figure 4 + Figure 5 |
+| `iridis/eval-cot-res/` | CoTFormer + Reserved evaluation | -- | Table 2 row 1 PPL |
 
 Submit from the repo root on Iridis:
 
 ```bash
 cd ~/CoTFormer
-bash iridis/lncot-train/job.sh     # LN-CoTFormer (Table 2)
-bash iridis/adm-train/job.sh       # Adaptive model (Figure 4)
-bash iridis/lncot-exp4/job.sh      # Evaluate Figure 4 (after adm-train completes)
+bash iridis/cot-res-train/job.sh   # CoTFormer + Reserved (Table 2 row 1)
+bash iridis/lncot-train/job.sh     # LN-CoTFormer (Table 2 row 2 + Section 5)
+bash iridis/adm-train/job.sh       # Adaptive LN-CoTFormer (Section 5 + Figure 4)
+bash iridis/eval-adm/job.sh        # Evaluate ADM + LN-CoT (after training completes)
+bash iridis/eval-cot-res/job.sh    # Evaluate CoT+Reserved (after training completes)
 ```
 
 Both training packages use 2x L4 GPUs with DDP. Adjust `N_GPUS` and `#SBATCH --gres=gpu:N` at the top of each `job.sh` if needed.
@@ -269,12 +295,12 @@ Training on L4 GPUs may not finish in a single 24-hour job. The packages are des
 
 1. **Automatic checkpoints** every 2000 steps to `/scratch/ab3u21/exps/` (off home quota)
 2. **Auto-resume**: `--use_pretrained auto` finds the latest `ckpt_N.pt` on restart
-3. **To continue**: just resubmit the same job — `bash iridis/<package>/job.sh`
+3. **To continue**: just resubmit the same job -- `bash iridis/<package>/job.sh`
 4. **Completion signal**: when training finishes, `summary.json` is written to the checkpoint directory
 
 Checkpoint path: `/scratch/ab3u21/exps/owt2/<model_name>_<hyperparams>/`
 
-Each checkpoint is ~1.5 GB (model + AdamW states + RNG states). With `save_checkpoint_freq=2000` over 40k steps, expect ~30 GB of checkpoints per run. Old intermediary checkpoints can be deleted manually after training completes — only `ckpt.pt` (the final checkpoint) is needed for evaluation.
+Each checkpoint is ~1.5 GB (model + AdamW states + RNG states). With `save_checkpoint_freq=2000` over 40k steps, expect ~30 GB of checkpoints per run. Old intermediary checkpoints can be deleted manually after training completes -- only `ckpt.pt` (the final checkpoint) is needed for evaluation.
 
 ### SLURM Job Configuration
 
@@ -290,9 +316,9 @@ ACC_STEPS=16      # Gradient accumulation steps (DDP halves this)
 CKPT_FREQ=2000    # Checkpoint frequency
 ```
 
-Effective batch size = `BATCH_SIZE * ACC_STEPS` = 128 (matching the paper). DDP divides `ACC_STEPS` by the world size, not `BATCH_SIZE` — each GPU processes the full micro-batch.
+Effective batch size = `BATCH_SIZE * ACC_STEPS` = 128 (matching the paper). DDP divides `ACC_STEPS` by the world size, not `BATCH_SIZE` -- each GPU processes the full micro-batch.
 
-> **GPU memory allocator:** `PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True` is set in `iridis/env.sh` and applies to all GPU jobs. It reduces VRAM fragmentation on L4 24 GB GPUs. No action needed — it is sourced automatically.
+> **GPU memory allocator:** `PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True` is set in `iridis/env.sh` and applies to all GPU jobs. It reduces VRAM fragmentation on L4 24 GB GPUs. No action needed -- it is sourced automatically.
 
 ### Manual Training (without job packages)
 
@@ -319,7 +345,7 @@ All parameters are defined in `config/base.py` and passed to `main.py` via comma
 
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
-| `--batch_size` | int | 32 | Per-GPU micro-batch size. DDP does NOT divide this — each GPU forward-passes the full batch. On L4 (24 GB), max 8 for 24-layer × 5-repeat models; max 16 for 12-layer models. |
+| `--batch_size` | int | 32 | Per-GPU micro-batch size. DDP does NOT divide this -- each GPU forward-passes the full batch. On L4 (24 GB), max 8 for 24-layer × 5-repeat models; max 16 for 12-layer models. |
 | `--acc_steps` | int | 4 | Gradient accumulation steps. DDP halves this (divides by `gcd(acc_steps, world_size)`). Effective batch size = `batch_size × acc_steps` (before DDP adjustment). |
 | `--iterations` | int | 25000 | Total optimizer steps (not epochs). Paper uses 40k for LN-CoTFormer (Table 2), 60k for ADM (Section 4.2). |
 | `--seed` | int | 2 | Random seed for PyTorch, numpy, and Python `random`. Each DDP rank adds `local_rank` to this. |
@@ -377,7 +403,7 @@ These parameters control the block-repeat (Chain-of-Thought) mechanism that is t
 | `--n_layer_end` | int | 0 | Number of suffix layers (not repeated). Paper uses 1. These run once after all repeats. |
 | `--min_repeat` | int | 1 | Minimum repeat depth during training (for stochastic depth). Used with `--depth_random_method`. For non-adaptive models, set to `n_repeat` (fixed depth). |
 | `--depth_random_method` | str | `uniform` | How to sample per-token repeat depth during training. Choices: `uniform` (each token gets a random depth in [`min_repeat`, `n_repeat`]), `uniform_random_range` (sample a random range [a, b] and all tokens use depths in that range), `more_chance_for_zero_too`, `exponential_decay`, `pick_mid_and_recurse`. Paper uses `uniform_random_range` for LN-CoTFormer. |
-| `--depth_embedding` | str | None | Depth-aware positional embedding added at each repeat. Choices: `linear_learned` (single learned vector scaled by repeat index — paper default for LN-CoTFormer), `learned` (separate learned embedding per repeat index), None (no depth embedding). |
+| `--depth_embedding` | str | None | Depth-aware positional embedding added at each repeat. Choices: `linear_learned` (single learned vector scaled by repeat index -- paper default for LN-CoTFormer), `learned` (separate learned embedding per repeat index), None (no depth embedding). |
 | `--disable_ln_mid` | flag | off | Replace the inter-repeat LayerNorm (`ln_mid`) with an identity. The "LN" in "LN-CoTFormer" refers to this LayerNorm being **enabled**. Disabling it gives the vanilla CoTFormer variant. |
 | `--mod_capacity_factor` | float | 0.6 | Router capacity factor for adaptive (Mixture-of-Depths) models. Controls what fraction of tokens are allowed to continue to the next repeat. Only used by `but_mod_*` model variants. |
 
@@ -396,10 +422,10 @@ These parameters only apply to specific model variants (PonderNet, adaptive CoTF
 
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
-| `--positional_encoder` | str | `rotary` | Position embedding type. Choices: `rotary` (RoPE — default, used by all models), `none`. |
+| `--positional_encoder` | str | `rotary` | Position embedding type. Choices: `rotary` (RoPE -- default, used by all models), `none`. |
 | `--lm_cache` | str | `none` | KV cache type for inference. Currently only `none` is implemented. The cache infrastructure exists but is unused during training. |
 | `--attention_window_length` | int | None | Sliding window attention size. None = full causal attention (default). Incompatible with Flash Attention. |
-| `--mem_cache_size` | int | None | Size of the external memory cache (unused — `lm_cache=none`). |
+| `--mem_cache_size` | int | None | Size of the external memory cache (unused -- `lm_cache=none`). |
 | `--cache_topk` | int | 1 | Top-k retrieval for cache (unused). |
 | `--cache_selection_method` | str | `per_token_and_head` | Cache selection strategy (unused). |
 | `--cache_indexing_scheme` | str | `by_total` | Cache indexing strategy (unused). |
@@ -411,7 +437,7 @@ These parameters only apply to specific model variants (PonderNet, adaptive CoTF
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
 | `--eval_freq` | int | 200 | Evaluate every N optimizer steps. Logs loss, perplexity, accuracy, and gradient norms. Uses 24 val batches for intermediate evals, full val set at the final iteration. |
-| `--eval_seq_prefix` | str | `Once upon a time` | Prompt prefix for text generation samples logged to WandB (currently disabled in code — the `if False:` guard at `optim/base.py:183`). |
+| `--eval_seq_prefix` | str | `Once upon a time` | Prompt prefix for text generation samples logged to WandB (currently disabled in code -- the `if False:` guard at `optim/base.py:183`). |
 | `--eval_seq_length` | int | None | Override sequence length at evaluation time (used by `eval.py`). Defaults to `--sequence_length`. |
 | `--eval_sample_size` | int | None | Total number of tokens to evaluate (used by `eval.py`). None = use entire val set. |
 
@@ -479,21 +505,41 @@ The training loop logs gradient norms alongside loss/perplexity metrics. These h
 wandb sync /scratch/ab3u21/.cache/wandb/<offline-run-*>
 ```
 
-### KV Compression Analysis (for MLA Extension)
+## Evaluation
 
-After training the LN-CoTFormer, run the KV compression analysis to inform MLA design:
+The evaluation packages reproduce the paper's Table 2 perplexities, the
+Section 5 router-weight analysis, and the Figure 4 perplexity-vs-MACs
+Pareto curves. They consume checkpoints produced by the training
+packages and write PNG figures plus JSON summaries into the package's
+`run_N/` directory.
 
-```bash
-# Weight-level analysis (fast, no GPU needed):
-python analyze_kv_compression.py --checkpoint /scratch/ab3u21/exps/owt2/<model_dir>/ \
-    --target-rank 192
+### Table 2 perplexities
 
-# Full analysis with activation-level SVD (needs GPU + data):
-python analyze_kv_compression.py --checkpoint /scratch/ab3u21/exps/owt2/<model_dir>/ \
-    --compute-activations --data_dir /scratch/ab3u21/datasets --target-rank 192
-```
+The `iridis/eval-adm/` and `iridis/eval-cot-res/` packages evaluate the
+trained checkpoints against the full OpenWebText2 validation set
+(~3,973 batches at sequence length 256, matching the paper's protocol).
+Output: `eval_<step>k.txt` per checkpoint plus a machine-readable
+`eval_summary_ckpt_<step>.json` with mean perplexity, 95% confidence
+intervals, loss SEM, and validation accuracy.
 
-Outputs per-layer effective rank plots and determines whether the planned `kv_lora_rank=192` is sufficient for each layer.
+### Figure 4 (Perplexity vs MACs)
+
+`iridis/eval-adm/` computes Perplexity at multiple inference-time
+compute budgets for the adaptive model by sweeping the Mixture-of-Repeats
+router threshold and the Fixed-Depth prefix length, then plots the
+Pareto frontier. Output: `run_N/adm_{v1,v2}/exp4/figure4_pareto.png`.
+
+### Figure 5 (router weights, Section 5)
+
+`iridis/eval-adm/` extracts per-token router weights from the Adaptive
+LN-CoTFormer checkpoints at 40,000 and 60,000 steps and plots the
+per-repeat weight histograms showing the distribution shift with
+training. Output:
+`run_N/adm_{v1,v2}/exp5-*/figure5_{raw,picascade,ptcascade}.png`.
+
+See `iridis/eval-adm/README.md` for the experimental matrix design,
+the per-run result tables, and the discussion of the per-repeat cascade
+interpretation.
 
 ## Acknowledgements
 
