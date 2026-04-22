@@ -5,7 +5,7 @@ import torch
 import torch.distributed
 import torch.nn.functional as F
 import wandb
-import time 
+import time
 import itertools
 import copy
 import traceback
@@ -13,16 +13,28 @@ import traceback
 import random
 import os
 import numpy as np
-from .utils import eval, get_batch, save_checkpoint
+from .utils import (
+    eval,
+    eval_counting,
+    get_batch,
+    get_counting_batch,
+    save_checkpoint,
+)
 
 
-def train_base(model, opt, data, data_seed, scheduler, iterations, acc_steps, batch_size, sequence_length, eval_freq, ckpt_path, 
+def train_base(model, opt, data, data_seed, scheduler, iterations, acc_steps, batch_size, sequence_length, eval_freq, ckpt_path,
         distributed_backend,extra_args, itr=0,rng_state_dict=None):
-    
+
+    # BLOCKER 4: counting branch flag. OWT2 (and other corpora) continue to use
+    # the 2-tuple (x, y) path via get_batch / eval; counting uses the 4-tuple
+    # (x, y, pad_mask, loss_mask) path via get_counting_batch / eval_counting
+    # and pipes pad_mask into the model as attention_mask (BLOCKER 6).
+    is_counting = getattr(extra_args, 'dataset', None) == "counting"
+
     device_type = 'cuda' if 'cuda' in str(extra_args.device) else 'cpu'
     type_ctx = nullcontext() if device_type == 'cpu' else torch.amp.autocast(
         device_type=device_type, dtype=extra_args.dtype)  # extra_args.dtype)
-    best_val_loss, text_table = float('inf'), None # best_val_loss not used atm, early stopping not recommended but possible 
+    best_val_loss, text_table = float('inf'), None # best_val_loss not used atm, early stopping not recommended but possible
     substep = itr * acc_steps
     data_train, train_sampler = data["train"]
     
@@ -79,16 +91,46 @@ def train_base(model, opt, data, data_seed, scheduler, iterations, acc_steps, ba
             if not torch.distributed.is_initialized() or torch.distributed.get_rank() == 0:
                 torch.cuda.set_rng_state(rng_state_dict["gpu_rng_state"])
     for _ in range(substep % num_substeps_per_epoch):
-        get_batch(data_train_iter, device=extra_args.device)
+        # Match the per-step fetch shape during replay so pointers advance consistently.
+        if is_counting:
+            get_counting_batch(data_train_iter, device=extra_args.device)
+        else:
+            get_batch(data_train_iter, device=extra_args.device)
 
     while itr < iterations:
-            
+
         for microstep_idx in range(acc_steps):  # gradient accumulation
-            x, y = get_batch(data_train_iter, device=extra_args.device)
-            
+            if is_counting:
+                # BLOCKER 4 + BLOCKER 6: counting consumes a 4-tuple and
+                # forwards pad_mask as the model's attention_mask. Loss is
+                # scattered over loss_mask (control-row 3 label-side masking
+                # hook: the mask selects which target positions contribute
+                # to the training objective and is the single override point
+                # for the cumulative-product-of-counts control baseline).
+                x, y, pad_mask, loss_mask = get_counting_batch(
+                    data_train_iter, device=extra_args.device
+                )
+            else:
+                x, y = get_batch(data_train_iter, device=extra_args.device)
+
             with type_ctx:
                 with distributed_backend.get_context_for_microstep_forward(model=model, microstep_idx=microstep_idx, gradient_accumulation_steps=acc_steps):
-                    if getattr(distributed_backend.get_raw_model(model), "needs_iter", False):
+                    if is_counting:
+                        outputs = model(
+                            x, targets=y, attention_mask=pad_mask, get_logits=True
+                        )
+                        logits = outputs['logits']
+                        B_cnt, T_cnt, V_cnt = logits.shape
+                        per_pos_ce = F.cross_entropy(
+                            logits.reshape(-1, V_cnt),
+                            y.reshape(-1),
+                            reduction='none',
+                            ignore_index=-1,
+                        ).reshape(B_cnt, T_cnt)
+                        masked = per_pos_ce * loss_mask
+                        n_valid = loss_mask.sum().clamp(min=1.0)
+                        outputs['loss'] = masked.sum() / n_valid
+                    elif getattr(distributed_backend.get_raw_model(model), "needs_iter", False):
                         outputs = model(x, targets=y, iter=itr)
                     else:
                         outputs = model(x, targets=y)
@@ -144,7 +186,10 @@ def train_base(model, opt, data, data_seed, scheduler, iterations, acc_steps, ba
                 if itr == iterations:
                     data_val_iter = iter(data_val)
 
-                val_acc, val_loss, val_perplexity, avg_depth = eval(
+                # BLOCKER 4: counting eval uses the 4-tuple batch + masked loss
+                # helper; OWT2 (default) uses the 2-tuple path unchanged.
+                _eval_fn = eval_counting if is_counting else eval
+                val_acc, val_loss, val_perplexity, avg_depth = _eval_fn(
                     distributed_backend.get_raw_model(model),
                     data_val_iter,
                     extra_args.device,

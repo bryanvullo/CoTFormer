@@ -123,9 +123,9 @@ source "$REPO_DIR/iridis/env.sh"
 # --- Scratch-based output dirs (off home quota) ---
 # See the "CHECKPOINT PATH CONVENTION" block at the top of this file. main.py
 # constructs and creates the ckpt_path itself from --results_base_folder,
-# --model, --exp_name (and --dataset). We only create EXPS_DIR here (and
-# the data/cache/wandb siblings) — NOT the full ckpt path.
-EXPS_DIR="/scratch/$USER/exps"
+# --model, --exp_name (and --dataset). The checkpoint root (exported by
+# iridis/env.sh as the canonical shared variable) is pre-created here
+# alongside the data/cache/wandb siblings -- NOT the full ckpt path.
 # EXP_NAME is the LEAF dir name (last segment of ckpt_path). Used only in
 # --exp_name below and in echoes. MUST be stable across resubmissions for
 # --use_pretrained auto to resume correctly.
@@ -153,12 +153,10 @@ module load conda
 eval "$(conda shell.bash hook)"
 conda activate "$CONDA_ENV_PREFIX"
 
-# WandB offline (compute nodes have no internet)
-export WANDB_MODE=offline
-
-# NCCL: force Simple protocol to avoid LL-protocol hangs during DDP
-# checkpoint coordination (see reprod-notes B9)
-export NCCL_PROTO=Simple
+# Wandb offline-mode and the NCCL Simple protocol are exported by
+# iridis/env.sh (single source of truth); compute nodes have no internet
+# and NCCL Simple avoids the LL-protocol hang during DDP checkpoint
+# coordination (see docs/reprod-notes.md §B9).
 
 cd "$REPO_DIR"
 

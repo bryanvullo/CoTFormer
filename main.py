@@ -100,9 +100,23 @@ def main(args):
     
     if args.scheduler != 'none':
         if args.scheduler in ['cos', 'linear']:
-            scheduler = torch.optim.lr_scheduler.OneCycleLR(optimizer=opt, max_lr=args.lr, total_steps=args.iterations, 
-                                                            pct_start=args.warmup_percent, anneal_strategy=args.scheduler, 
+            scheduler = torch.optim.lr_scheduler.OneCycleLR(optimizer=opt, max_lr=args.lr, total_steps=args.iterations,
+                                                            pct_start=args.warmup_percent, anneal_strategy=args.scheduler,
                                                             cycle_momentum=False, div_factor=1e2, final_div_factor=args.final_div_factor)
+        elif args.scheduler == 'constant_with_warmup':
+            # BLOCKER 4: constant-after-warmup schedule matching Chang and Bisk
+            # 2024 trainer.py:72 (paper prose said cosine; their code uses
+            # get_constant_schedule_with_warmup). Linear warmup to args.lr
+            # across the first pct_start fraction of iterations, then
+            # constant at args.lr.
+            num_warmup_steps = max(1, int(args.warmup_percent * args.iterations))
+
+            def _lr_lambda(current_step: int) -> float:
+                if current_step < num_warmup_steps:
+                    return float(current_step) / float(max(1, num_warmup_steps))
+                return 1.0
+
+            scheduler = torch.optim.lr_scheduler.LambdaLR(opt, _lr_lambda)
         else:
             raise NotImplementedError(f"Unknown scheduler type: {args.scheduler}.")
     else:

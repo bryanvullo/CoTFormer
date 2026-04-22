@@ -23,8 +23,8 @@ module load conda
 eval "$(conda shell.bash hook)"
 conda activate /scratch/ab3u21/cotformer-env 
 
-# WandB offline (compute nodes have no internet)
-export WANDB_MODE=offline
+# Wandb offline-mode is exported by iridis/env.sh (single source of
+# truth); compute nodes have no internet.
 
 # --- Sanity checks (first run) ---
 # --- Package Configuration ---

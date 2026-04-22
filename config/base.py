@@ -34,13 +34,17 @@ def parse_args(base_parser, args, namespace):
     parser.add_argument('--weight_decay', default=0.1, type=float)
     parser.add_argument('--beta1', default=0.9, type=float)
     parser.add_argument('--beta2', default=0.95, type=float)
-    parser.add_argument('--scheduler', default='cos', choices=['linear', 'cos', 'none'])
+    # BLOCKER 4: constant_with_warmup is the schedule Chang and Bisk 2024
+    # actually use (their paper prose says cosine but the code does not).
+    parser.add_argument('--scheduler', default='cos', choices=['linear', 'cos', 'none', 'constant_with_warmup'])
     parser.add_argument('--opt', default='adamw', choices=['adamw', 'sgd', 'adafactor'])
     parser.add_argument('--eval_freq', default=200, type=int) # in iterations
     parser.add_argument('--results_base_folder', default="./exps", type=str)
     parser.add_argument('--grad_clip', default=0.0, type=float) # default value is 1.0 in NanoGPT
     # Dataset params
-    parser.add_argument('--dataset', default='slimpajama', choices=['slimpajama', 'wikitext', 'pg19', "shakespeare-char", 'arxivmath', 'owt2', "arxiv2000", "arxiv+wiki", 'openwebtext2'])
+    # BLOCKER 4: "counting" added for the RQ9 inductive-counting task
+    # (see data/counting.py and docs/extend-notes.md §1.2 RQ9).
+    parser.add_argument('--dataset', default='slimpajama', choices=['slimpajama', 'wikitext', 'pg19', "shakespeare-char", 'arxivmath', 'owt2', "arxiv2000", "arxiv+wiki", 'openwebtext2', 'counting'])
     parser.add_argument('--vocab_size', default=50304, type=int)
     parser.add_argument('--add_additional_space', default=False, action='store_true', required=False)
     parser.add_argument('--data_dir', default=None, type=none_or_str,
@@ -50,6 +54,17 @@ def parse_args(base_parser, args, namespace):
     parser.add_argument('--model', default='base', choices=models.registered_models())
     parser.add_argument('--use_pretrained', default="auto", type=none_or_str) # 'none', 'gpt-2' or a path to the pretraind model
     parser.add_argument('--dropout', default=0.0, type=float)
+    parser.add_argument('--activation', default='gelu', choices=['gelu', 'relu'],
+                        help='MLP activation. Default gelu preserves prior behaviour; '
+                             'counting jobs pass relu to match Chang and Bisk codebase.')
+    parser.add_argument('--tie_word_embeddings', default=True, type=lambda v: str(v).lower() == 'true',
+                        help='Tie wte.weight and lm_head.weight (True/False). Default True '
+                             'preserves prior behaviour; counting 4L baseline passes False.')
+    parser.add_argument('--scale_attn_by_inverse_layer_idx', default=False,
+                        type=lambda v: str(v).lower() == 'true',
+                        help='When True, CausalSelfAttention divides attention logits by '
+                             '(layer_idx + 1) before softmax. Default False preserves prior '
+                             'behaviour; enabled only in Pilot 1 (Chang and Bisk-exact regime).')
     parser.add_argument('--n_head', default=12, type=int)
     parser.add_argument('--n_layer', default=24, type=int) # depths in att + ff blocks
     parser.add_argument('--n_embd', default=768, type=int) # embedding size / hidden size ... 

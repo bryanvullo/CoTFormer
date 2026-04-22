@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# iridis/env.sh — Iridis X environment config (shared team setup)
+# iridis/env.sh -- Iridis X environment config (shared team setup)
 # Source this file; do not execute it directly.
 #
 # Usage (from job.sh scripts):
@@ -17,6 +17,11 @@ CONDA_ENV_PREFIX="$SHARED_SCRATCH/cotformer-env"
 # --- Shared data and output paths ---
 export DATA_DIR="$SHARED_SCRATCH/datasets"
 export RESULTS_DIR="$SHARED_SCRATCH/job-outputs"
+# Single source of truth for the training/eval checkpoint root (main.py
+# constructs ckpt_path = EXPS_DIR / dataset / model / exp_name via
+# os.makedirs on rank 0). Every iridis/*/job.sh must consume this value
+# rather than re-defining it locally.
+export EXPS_DIR="$SHARED_SCRATCH/exps"
 
 # --- Caches (shared, keep off home quota) ---
 export TIKTOKEN_CACHE_DIR="$SHARED_SCRATCH/.cache/tiktoken"
@@ -27,8 +32,17 @@ export CONDA_PKGS_DIRS="$SHARED_SCRATCH/.conda/pkgs"
 
 # --- GPU memory allocator (PyTorch) ---
 # Reduces VRAM fragmentation on L4 24 GB (1.78 GiB reserved-but-unallocated
-# without it). Harmless on CPU-only jobs — PyTorch ignores it without CUDA.
+# without it). Harmless on CPU-only jobs: PyTorch ignores it without CUDA.
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+
+# --- Weights and Biases ---
+# Offline on compute nodes (no internet); sync from login nodes.
+export WANDB_MODE=offline
+
+# --- NCCL transport protocol ---
+# Simple protocol avoids the LL-protocol hang observed after ~52K AllReduces
+# on NCCL 2.15-2.17 / CUDA 11.8 (see docs/reprod-notes.md §B9).
+export NCCL_PROTO=Simple
 
 # --- SLURM email notifications ---
 # Uses Southampton email derived from $USER. Override in ~/.bash_aliases if needed.

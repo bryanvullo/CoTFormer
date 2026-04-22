@@ -54,7 +54,7 @@ def apply_inplace_set(x_acc, x_val, dim):
 
 class CausalSelfAttention(nn.Module):
 
-    def __init__(self, config, lm_cache):
+    def __init__(self, config, lm_cache, layer_idx=None):
         super().__init__()
         assert config.n_embd % config.n_head == 0
         # key, query, value projections for all heads, but in a batch
@@ -71,6 +71,15 @@ class CausalSelfAttention(nn.Module):
         self.cache_storage = lm_cache.get_storage_for_layer(self)
         self.config = config
         self.allow_cache_during_training = getattr(config, "allow_cache_during_training", False)
+        # BLOCKER 3: layer_idx threaded from Block -> CausalSelfAttention so the
+        # optional --scale_attn_by_inverse_layer_idx flag can scale attention
+        # logits by 1/(layer_idx + 1). See forward() for application and
+        # docs/extend-technical.md §3.3 for the weight-tied-CoTFormer ambiguity
+        # note (this flag is enabled only in Pilot 1).
+        self.layer_idx = layer_idx
+        self.scale_attn_by_inverse_layer_idx = getattr(
+            config, "scale_attn_by_inverse_layer_idx", False
+        )
 
         # causal mask to ensure that attention is only applied to the left in the input sequence
         self.flash = hasattr(torch.nn.functional, 'scaled_dot_product_attention')
@@ -85,7 +94,16 @@ class CausalSelfAttention(nn.Module):
             self.register_buffer("bias", bias.view(1, 1, config.sequence_length, config.sequence_length))
         
 
-    def forward(self, x, pos_emb_closure, cache_context, start_index):
+    def forward(self, x, pos_emb_closure, cache_context, start_index, indices=None, attention_mask=None):
+        # BLOCKER 5: indices kwarg forwarded to pos_emb_closure.adapt_queries /
+        # adapt_keys; when None the closure falls back to arange(start_index,
+        # start_index + T) (backward-compatible default). When provided,
+        # indices overrides the per-position RoPE rotation basis so the
+        # counting task's shifted-PE experiments can run at arbitrary offsets
+        # without retokenising.
+        # BLOCKER 6: attention_mask kwarg (shape [B, T] with 1=valid, 0=pad)
+        # is consumed below to construct the SDPA additive bias for padded
+        # keys; when None the forward path is bit-identical to pre-change.
         B, T, C = x.size() # batch size, sequence length, embedding dimensionality (n_embd)
 
         # calculate query, key, values for all heads in batch and move head forward to be the batch dim
@@ -95,7 +113,19 @@ class CausalSelfAttention(nn.Module):
         q = q.view(B, T, self.n_head, C // self.n_head).transpose(1, 2) # (B, nh, T, hs)
         v = v.view(B, T, self.n_head, C // self.n_head).transpose(1, 2) # (B, nh, T, hs)
 
-        q = pos_emb_closure.adapt_queries(q, start_index=start_index)
+        q = pos_emb_closure.adapt_queries(q, start_index=start_index, indices=indices)
+        # BLOCKER 3: optional inverse-layer-idx scaling. Applied by pre-multiplying q
+        # (algebraically identical to scaling post-matmul attention logits, and works
+        # for both the SDPA Flash backend -- which does not accept a scale kwarg --
+        # and the manual non-flash path). See docs/extend-technical.md §3.3 for the
+        # weight-tied-CoTFormer ambiguity; this flag is enabled only in Pilot 1.
+        if self.scale_attn_by_inverse_layer_idx:
+            if self.layer_idx is None:
+                raise ValueError(
+                    "scale_attn_by_inverse_layer_idx=True requires layer_idx to be set "
+                    "at Block/CausalSelfAttention construction time."
+                )
+            q = q / float(self.layer_idx + 1)
         if cache_context is not None and self.cache_storage is not None:
             att_prefix, cache_values_dict = \
                 self.cache_storage.retrieve_for_query(q, cache_context, pos_emb_closure, start_index)
@@ -104,18 +134,41 @@ class CausalSelfAttention(nn.Module):
         else:
             att_prefix = None
         k_before_pos = k
-        k = pos_emb_closure.adapt_keys(k, start_index=start_index)
+        k = pos_emb_closure.adapt_keys(k, start_index=start_index, indices=indices)
         
         if self.flash:
             if att_prefix is not None:
                 raise NotImplementedError
-            # efficient attention using Flash Attention CUDA kernels
-            y = torch.nn.functional.scaled_dot_product_attention(q, k, v, attn_mask=None, dropout_p=self.dropout, is_causal=True)
+            if attention_mask is None:
+                # Unchanged fast path: flash kernel with is_causal=True and no per-batch mask.
+                y = torch.nn.functional.scaled_dot_product_attention(q, k, v, attn_mask=None, dropout_p=self.dropout, is_causal=True)
+            else:
+                # BLOCKER 6: fall back to the math SDPA backend (Flash does not
+                # accept a variable-length attn_mask). Build a combined
+                # causal + pad additive bias of shape (B, 1, T, T):
+                #   key_mask   = -1e9 on pad KEY positions, broadcast over (B, 1, 1, T).
+                #   causal_bias = -1e9 above the diagonal, shape (1, 1, T, T).
+                # The sum is passed as attn_mask with is_causal=False; SDPA's
+                # math backend handles it without triggering Flash.
+                key_mask = (1.0 - attention_mask.to(q.dtype)).view(B, 1, 1, T) * -1e9
+                causal_bias = torch.triu(
+                    torch.full((T, T), -1e9, device=q.device, dtype=q.dtype),
+                    diagonal=1,
+                ).view(1, 1, T, T)
+                combined_bias = key_mask + causal_bias
+                y = torch.nn.functional.scaled_dot_product_attention(
+                    q, k, v, attn_mask=combined_bias, dropout_p=self.dropout, is_causal=False
+                )
         else:
             # manual implementation of attention
             att = (q @ k.transpose(-2, -1)) * (1.0 / math.sqrt(k.size(-1)))
             att = pos_emb_closure.adapt_attention_before_softmax(att, start_query_index=start_index, start_key_index=start_index)
             att = att.masked_fill(self.bias[:,:,:T,:T] == 0, float('-inf'))
+            if attention_mask is not None:
+                # BLOCKER 6: pad-key masking in the manual path. Same semantics
+                # as the Flash-fallback branch above: broadcast over heads.
+                pad_bias = (1.0 - attention_mask.to(att.dtype)).view(B, 1, 1, T) * -1e9
+                att = att + pad_bias
             if att_prefix is not None:
                 prefix_size = att_prefix.shape[-1]
                 current_size = att.shape[-1]
@@ -151,7 +204,9 @@ class MLP(nn.Module):
         self.c_fc    = nn.Linear(config.n_embd, 4 * config.n_embd, bias=config.bias)
         self.c_proj  = nn.Linear(4 * config.n_embd, config.n_embd, bias=config.bias)
         self.dropout = nn.Dropout(config.dropout)
-        self.activation = nn.GELU()
+        # BLOCKER 1: --activation selects MLP non-linearity. Default "gelu"
+        # preserves prior behaviour on configs that predate the flag.
+        self.activation = nn.ReLU() if getattr(config, "activation", "gelu") == "relu" else nn.GELU()
 
     def forward(self, x):
         x = self.c_fc(x)
@@ -163,16 +218,26 @@ class MLP(nn.Module):
 
 class Block(nn.Module):
 
-    def __init__(self, config, lm_cache):
+    def __init__(self, config, lm_cache, layer_idx=None):
         super().__init__()
         self.config = config
+        # BLOCKER 3: layer_idx forwarded to CausalSelfAttention so the
+        # --scale_attn_by_inverse_layer_idx flag has a well-defined layer index.
+        # Safe to leave as None for code paths where the flag is False.
+        self.layer_idx = layer_idx
         self.ln_1 = LayerNorm(config.n_embd, bias=config.bias)
-        self.attn = CausalSelfAttention(config, lm_cache)
+        self.attn = CausalSelfAttention(config, lm_cache, layer_idx=layer_idx)
         self.ln_2 = LayerNorm(config.n_embd, bias=config.bias)
         self.mlp = MLP(config)
 
-    def forward(self, x, pos_emb_closure, cache_context, start_index, indices=None):
-        x = x + self.attn(self.ln_1(x), pos_emb_closure, cache_context, start_index)
+    def forward(self, x, pos_emb_closure, cache_context, start_index, indices=None, attention_mask=None):
+        # BLOCKER 5: indices is forwarded to self.attn (previously accepted but
+        # discarded). BLOCKER 6: attention_mask is forwarded too; both default
+        # to None so the pre-patch call sites remain bit-identical.
+        x = x + self.attn(
+            self.ln_1(x), pos_emb_closure, cache_context, start_index,
+            indices=indices, attention_mask=attention_mask,
+        )
         x = x + self.mlp(self.ln_2(x))
         return x
 
@@ -191,20 +256,28 @@ class GPTBase(nn.Module):
 
         
         self.lm_cache = caches.get_cache(config.lm_cache)(config)
+        # BLOCKER 3: layer_idx is the global 0-based block index used by
+        # --scale_attn_by_inverse_layer_idx. h_begin covers [0, n_layer_begin),
+        # h_mid covers [n_layer_begin, n_layer - n_layer_end), h_end covers
+        # [n_layer - n_layer_end, n_layer). For the Pilot 1 4L standard
+        # baseline (n_layer_begin=0, n_layer_end=0), all four blocks live in
+        # h_mid with layer_idx in {0, 1, 2, 3}. See docs/extend-technical.md
+        # §3.3 for the weight-tied-CoTFormer ambiguity note.
         self.transformer = nn.ModuleDict(dict(
             wte = nn.Embedding(config.vocab_size, config.n_embd),
             wpe = positional_encoders.get_encoder(config.positional_encoder)(config),
             drop = nn.Dropout(config.dropout),
-            h_begin = nn.ModuleList( 
-                [Block(config, self.lm_cache) for _ in range(config.n_layer_begin)]
+            h_begin = nn.ModuleList(
+                [Block(config, self.lm_cache, layer_idx=li)
+                 for li in range(config.n_layer_begin)]
             ),
             h_mid = nn.ModuleList(
-                [Block(config, self.lm_cache) 
-                for _ in range(config.n_layer_begin, config.n_layer - config.n_layer_end)],
+                [Block(config, self.lm_cache, layer_idx=li)
+                 for li in range(config.n_layer_begin, config.n_layer - config.n_layer_end)],
             ),
-            h_end = nn.ModuleList( 
-                [Block(config, self.lm_cache) 
-                for _ in range(config.n_layer - config.n_layer_end, config.n_layer)]),
+            h_end = nn.ModuleList(
+                [Block(config, self.lm_cache, layer_idx=li)
+                 for li in range(config.n_layer - config.n_layer_end, config.n_layer)]),
             ln_f = LayerNorm(config.n_embd, bias=config.bias),
         ))
 
@@ -213,7 +286,12 @@ class GPTBase(nn.Module):
         # "UserWarning: functional_call was passed multiple values for tied weights.
         # This behavior is deprecated and will be an error in future versions"
         # not 100% sure what this is, so far seems to be harmless. TODO investigate
-        self.transformer.wte.weight = self.lm_head.weight # https://paperswithcode.com/method/weight-tying
+        # BLOCKER 2: --tie_word_embeddings conditionalises weight tying.
+        # Default True preserves prior behaviour; counting 4L baseline passes False
+        # to match Chang and Bisk codebase.
+        self._tie_word_embeddings = getattr(config, "tie_word_embeddings", True)
+        if self._tie_word_embeddings:
+            self.transformer.wte.weight = self.lm_head.weight # https://paperswithcode.com/method/weight-tying
 
         # init all weights
         self.apply(self._init_weights)
@@ -258,12 +336,19 @@ class GPTBase(nn.Module):
             raise NotImplementedError
         return token_depths
 
-    def forward(self, idx, targets=None, get_logits=False, use_cache=False, iter=None):
+    def forward(self, idx, targets=None, get_logits=False, use_cache=False, iter=None,
+                position_ids=None, attention_mask=None):
+        # BLOCKER 5: position_ids=None kwarg overrides the default
+        # arange(seq_len) position generation when provided, threading per-sample
+        # shifted RoPE indices through every Block.
+        # BLOCKER 6: attention_mask=None kwarg (shape [B, T] with 1=valid,
+        # 0=pad) is plumbed through every Block into CausalSelfAttention to
+        # build the SDPA additive bias for padded keys.
         device = idx.device
         b, t = idx.size()
         assert t <= self.config.sequence_length, f"Cannot forward sequence of length {t}, block size is only {self.config.sequence_length}"
-        
-        
+
+
         # forward the GPT model itself
         if use_cache:
             idx, index_shift, cache_context = self.lm_cache(idx)
@@ -277,20 +362,23 @@ class GPTBase(nn.Module):
         x = self.transformer.wte(idx) # token embeddings of shape (b, t, n_embd)
         x = self.transformer.drop(x)
         x = pos_emb_closure.adapt_model_input(x, start_index=index_shift)
-       
+
         for block in self.transformer.h_begin:
-            x = block(x, pos_emb_closure, cache_context, start_index=index_shift)
-        
+            x = block(x, pos_emb_closure, cache_context, start_index=index_shift,
+                      indices=position_ids, attention_mask=attention_mask)
+
         B, T, D = x.shape
         # fix_x = torch.zeros_like(x)
         # continue_prob = x.new_ones((B, T))
         for rep_idx in range(1, self.n_repeat+1):
             for block in self.transformer.h_mid:
-                x = block(x, pos_emb_closure, cache_context, start_index=index_shift)
-            
-            
+                x = block(x, pos_emb_closure, cache_context, start_index=index_shift,
+                          indices=position_ids, attention_mask=attention_mask)
+
+
         for block in self.transformer.h_end:
-            x = block(x, pos_emb_closure, cache_context, start_index=index_shift)
+            x = block(x, pos_emb_closure, cache_context, start_index=index_shift,
+                      indices=position_ids, attention_mask=attention_mask)
             
         x = self.transformer.ln_f(x)
 
@@ -359,7 +447,11 @@ class GPTBase(nn.Module):
         # will only return the first occurence, key'd by 'transformer.wte.weight', below.
         # so let's manually remove 'lm_head.weight' from decay set. This will include
         # this tensor into optimization via transformer.wte.weight only, and not decayed.
-        decay.remove('lm_head.weight')
+        # BLOCKER 2: only remove when tying is enabled. When --tie_word_embeddings
+        # is False, lm_head.weight is an independent parameter and must remain in
+        # the decay set (behaves as a standard nn.Linear weight).
+        if getattr(self, "_tie_word_embeddings", True):
+            decay.remove('lm_head.weight')
 
         # validate that we considered every parameter
         param_dict = {pn: p for pn, p in self.named_parameters()}

@@ -174,12 +174,10 @@ module load conda
 eval "$(conda shell.bash hook)"
 conda activate "$CONDA_ENV_PREFIX"
 
-# WandB offline (compute nodes have no internet)
-export WANDB_MODE=offline
-
-# NCCL: force Simple protocol to avoid LL-protocol hangs during DDP
-# checkpoint coordination (see reprod-notes B9 for the full debugging story)
-export NCCL_PROTO=Simple
+# Wandb offline-mode and the NCCL Simple protocol are exported by
+# iridis/env.sh (single source of truth); compute nodes have no internet
+# and NCCL Simple avoids the LL-protocol hang on NCCL 2.15-2.17 / CUDA
+# 11.8 during DDP checkpoint coordination (see docs/reprod-notes.md §B9).
 
 cd "$REPO_DIR"
 

@@ -3,9 +3,16 @@ from typing import Dict
 import torch
 
 from . import  openwebtext2
+from . import counting as counting_module
 
+# BLOCKER 4: "counting" added to the dispatcher for the RQ9 inductive-counting
+# task (see data/counting.py and docs/extend-notes.md §1.2 RQ9). Unlike OWT2
+# the counting "get" returns {"train": CountingDataset, "val": CountingDataset}
+# (already-wrapped torch Dataset instances); get_dataloader below detects the
+# already-wrapped case and skips the 1-D-stream Dataset wrap.
 PREPARE_GET_DATASET_MAP = {
-    "owt2": (openwebtext2.prepare_openwebtext2_data, openwebtext2.get_openwebtext2_data)
+    "owt2": (openwebtext2.prepare_openwebtext2_data, openwebtext2.get_openwebtext2_data),
+    "counting": (counting_module.prepare_counting_dataset, counting_module.get_counting_data),
 }
 
 
@@ -51,8 +58,16 @@ def get_dataloader(data, sequence_length, batch_size, seed=0, distributed_backen
     Otherwise, use a RandomSampler with the specified seed.
 
     Returns both the dataloader and the sampler.
+
+    BLOCKER 4: when ``data`` is already a ``torch.utils.data.Dataset`` (the
+    counting task's CountingDataset exits the dispatcher in that shape), the
+    1-D stream ``Dataset`` wrap below is skipped and the incoming dataset is
+    used directly; OWT2 retains its numpy-memmap slicing path unchanged.
     """
-    dataset = Dataset(data, sequence_length=sequence_length)
+    if isinstance(data, torch.utils.data.Dataset):
+        dataset = data
+    else:
+        dataset = Dataset(data, sequence_length=sequence_length)
     if distributed_backend and distributed_backend.get_world_size() > 1:
         sampler = torch.utils.data.DistributedSampler(
             dataset,

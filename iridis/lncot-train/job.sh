@@ -99,7 +99,7 @@ fi
 source "$REPO_DIR/iridis/env.sh"
 
 # --- Scratch-based output dirs (off home quota) ---
-EXPS_DIR="/scratch/ab3u21/exps"
+# EXPS_DIR is owned by iridis/env.sh (single source of truth).
 mkdir -p "$EXPS_DIR" "$DATA_DIR" "$HF_HOME" "$TIKTOKEN_CACHE_DIR" "$WANDB_DIR"
 
 echo "========================================="
@@ -123,11 +123,10 @@ module load conda
 eval "$(conda shell.bash hook)"
 conda activate "$CONDA_ENV_PREFIX"
 
-# WandB offline (compute nodes have no internet)
-export WANDB_MODE=offline
-
-# NCCL: force Simple protocol to avoid LL-protocol hangs (see reprod-notes B9)
-export NCCL_PROTO=Simple
+# Wandb offline-mode and the NCCL Simple protocol are exported by
+# iridis/env.sh (single source of truth); compute nodes have no internet
+# and NCCL Simple avoids the LL-protocol hang on NCCL 2.15-2.17 / CUDA
+# 11.8 (see docs/reprod-notes.md §B9).
 
 cd "$REPO_DIR"
 

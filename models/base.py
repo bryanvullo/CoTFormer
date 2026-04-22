@@ -126,7 +126,9 @@ class MLP(nn.Module):
         self.c_fc    = nn.Linear(config.n_embd, 4 * config.n_embd, bias=config.bias)
         self.c_proj  = nn.Linear(4 * config.n_embd, config.n_embd, bias=config.bias)
         self.dropout = nn.Dropout(config.dropout)
-        self.activation = nn.GELU()
+        # BLOCKER 1: --activation selects MLP non-linearity. Default "gelu"
+        # preserves prior behaviour on configs that predate the flag.
+        self.activation = nn.ReLU() if getattr(config, "activation", "gelu") == "relu" else nn.GELU()
 
     def forward(self, x):
         x = self.c_fc(x)

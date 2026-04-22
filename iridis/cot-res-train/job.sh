@@ -84,11 +84,11 @@ fi
 source "$REPO_DIR/iridis/env.sh"
 
 # --- Scratch-based output dirs (off home quota) ---
-# main.py constructs ckpt_path = EXPS_DIR / dataset / model / exp_name
-# and creates it via os.makedirs. Do NOT mirror that formula in bash —
-# see docs/reprod-notes.md §C4 for the 52 GB-of-silently-misplaced-
-# checkpoints case study.
-EXPS_DIR="/scratch/$USER/exps"
+# main.py constructs ckpt_path = EXPS_DIR / dataset / model / exp_name and
+# creates it via os.makedirs. EXPS_DIR is owned by iridis/env.sh (single
+# source of truth); do NOT mirror the path formula in bash (see
+# docs/reprod-notes.md §C4 for the 52 GB-of-silently-misplaced-checkpoints
+# case study).
 mkdir -p "$EXPS_DIR" "$DATA_DIR" "$HF_HOME" "$TIKTOKEN_CACHE_DIR" "$WANDB_DIR"
 
 echo "========================================="
@@ -112,7 +112,7 @@ module load conda
 eval "$(conda shell.bash hook)"
 conda activate "$CONDA_ENV_PREFIX"
 
-export WANDB_MODE=offline
+# Wandb offline-mode is exported by iridis/env.sh (single source of truth).
 
 cd "$REPO_DIR"
 
