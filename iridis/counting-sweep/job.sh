@@ -176,7 +176,11 @@ if [ -n "$SLURM_JOB_ID" ]; then
         echo "WARNING: REPO_DIR not set -- falling back to $REPO_DIR"
     fi
     source "$REPO_DIR/iridis/env.sh"
-    mkdir -p "$EXPS_DIR" "$WANDB_DIR"
+    # Defensive cache + scratch mkdirs: env.sh exports the path vars but
+    # does not create directories on the compute node. The counting task
+    # uses the trivial w2i tokeniser (no tiktoken), so TIKTOKEN_CACHE_DIR
+    # is included for forward-compat / cross-pkg consistency only.
+    mkdir -p "$EXPS_DIR" "$WANDB_DIR" "$DATA_DIR" "$HF_HOME" "$TIKTOKEN_CACHE_DIR"
 fi
 
 if [ "$DRY_RUN" -eq 1 ] && [ -z "$SLURM_JOB_ID" ]; then
@@ -299,8 +303,11 @@ case "$VARIANT" in
         # layers. DEC-033 Option (c): compare against 4L standard and
         # acknowledge the depth asymmetry as a secondary finding about
         # reserved layers plus recurrence jointly.
+        # n_layer = n_begin + n_mid + n_end = 2 + 1 + 1 = 4 (model class
+        # builds h_mid via range(n_layer_begin, n_layer - n_layer_end);
+        # NLAYER=1 with begin=2/end=1 collapses to range(2, 0) = empty).
         MODEL="cotformer_full_depth"
-        NLAYER=1
+        NLAYER=4
         NREPEAT=4
         MINREPEAT=4
         NLAYER_BEGIN=2

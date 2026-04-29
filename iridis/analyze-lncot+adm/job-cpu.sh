@@ -55,13 +55,26 @@
 # run_residual_diag is "yes" or "no" per §1.5 Matrix: Protocol E runs on
 # C1/C2/C3 only (the observational CoTFormer + LN-CoTFormer checkpoints);
 # C4/C5 are ADM / MoD and not in the Protocol E matrix row.
-VERSIONS=(
-    "c1_cotres_40k|$EXPS_DIR/owt2/cotformer_full_depth/cotformer_full_depth_res_only_lr0.001_bs8x16_seqlen256|ckpt_40000.pt|yes"
-    "c2_lncot_40k|$EXPS_DIR/owt2/cotformer_full_depth_lnmid_depthemb/cotformer_full_depth_lnmid_depthemb_lr0.001_bs8x16_seqlen256|ckpt_40000.pt|yes"
-    "c3_lncot_60k|$EXPS_DIR/owt2/cotformer_full_depth_lnmid_depthemb/cotformer_full_depth_lnmid_depthemb_lr0.001_bs8x16_seqlen256|ckpt_60000.pt|yes"
-    "c4_mod_40k|$EXPS_DIR/owt2/but_mod_efficient_sigmoid_lnmid_depthemb_random_factor/but_mod_efficient_sigmoid_lnmid_depthemb_random_factor_lr0.001_bs8x16_seqlen256|ckpt_40000.pt|no"
-    "c5_adm_v2_60k|$EXPS_DIR/owt2/adaptive_cotformer_mod_efficient_sigmoid_crw_lnmid_de_random_factor_single_final/adm_v2_lr0.001_bs8x16_seqlen256|ckpt_60000.pt|no"
-)
+#
+# IMPORTANT: VERSIONS uses $EXPS_DIR which is exported by env.sh. The array
+# values are evaluated at assignment time, so the assignment must run AFTER
+# `source env.sh`. We therefore wrap the assignment in _build_versions(),
+# called from both the login-node wrapper and the compute-node section.
+# Top-level reference matrix (commented for at-a-glance reading):
+#   c1_cotres_40k   .../cotformer_full_depth/.../ckpt_40000.pt           run_residual_diag=yes
+#   c2_lncot_40k    .../cotformer_full_depth_lnmid_depthemb/.../ckpt_40000.pt  run_residual_diag=yes
+#   c3_lncot_60k    .../cotformer_full_depth_lnmid_depthemb/.../ckpt_60000.pt  run_residual_diag=yes
+#   c4_mod_40k      .../but_mod_efficient_sigmoid_lnmid_depthemb_random_factor/.../ckpt_40000.pt  run_residual_diag=no
+#   c5_adm_v2_60k   .../adaptive_cotformer_mod_efficient_sigmoid_crw_lnmid_de_random_factor_single_final/.../ckpt_60000.pt  run_residual_diag=no
+_build_versions() {
+    VERSIONS=(
+        "c1_cotres_40k|$EXPS_DIR/owt2/cotformer_full_depth/cotformer_full_depth_res_only_lr0.001_bs8x16_seqlen256|ckpt_40000.pt|yes"
+        "c2_lncot_40k|$EXPS_DIR/owt2/cotformer_full_depth_lnmid_depthemb/cotformer_full_depth_lnmid_depthemb_lr0.001_bs8x16_seqlen256|ckpt_40000.pt|yes"
+        "c3_lncot_60k|$EXPS_DIR/owt2/cotformer_full_depth_lnmid_depthemb/cotformer_full_depth_lnmid_depthemb_lr0.001_bs8x16_seqlen256|ckpt_60000.pt|yes"
+        "c4_mod_40k|$EXPS_DIR/owt2/but_mod_efficient_sigmoid_lnmid_depthemb_random_factor/but_mod_efficient_sigmoid_lnmid_depthemb_random_factor_lr0.001_bs8x16_seqlen256|ckpt_40000.pt|no"
+        "c5_adm_v2_60k|$EXPS_DIR/owt2/adaptive_cotformer_mod_efficient_sigmoid_crw_lnmid_de_random_factor_single_final/adm_v2_lr0.001_bs8x16_seqlen256|ckpt_60000.pt|no"
+    )
+}
 
 TRANSLATOR_EPOCHS=250
 TRANSLATOR_BATCH_SIZE=64
@@ -104,6 +117,7 @@ if [ -z "$SLURM_JOB_ID" ]; then
     PACKAGE_DIR="$(cd "$(dirname "$0")" && pwd)"
     REPO_DIR="$(cd "$PACKAGE_DIR/../.." && pwd)"
     source "$REPO_DIR/iridis/env.sh"
+    _build_versions  # $EXPS_DIR now populated; build VERSIONS for login-node use.
 
     # Pre-flight: verify workspaces exist on /scratch.
     MISSING=0
@@ -154,6 +168,13 @@ if [ -z "$REPO_DIR" ]; then
 fi
 
 source "$REPO_DIR/iridis/env.sh"
+_build_versions  # $EXPS_DIR now populated on the compute node; rebuild VERSIONS.
+
+# Defensive cache + scratch mkdirs: env.sh exports the path vars but
+# does not create directories. Same rationale as job-gpu.sh; this CPU
+# stage may also load tiktoken via Protocol D's CPU forward pass on
+# OWT2 ckpts.
+mkdir -p "$DATA_DIR" "$HF_HOME" "$TIKTOKEN_CACHE_DIR" "$WANDB_DIR"
 
 echo "========================================="
 echo " analyze-lncot+adm CPU stage"

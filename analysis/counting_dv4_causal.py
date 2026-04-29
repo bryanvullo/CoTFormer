@@ -211,18 +211,27 @@ def ablation_hooks(model: "Any", target_repeat: int, module_path: str) -> Iterat
     # 1. Reset counter at the start of each forward pass.
     handles.append(model.register_forward_pre_hook(_reset_counter))
 
-    # 2. Increment counter at the end of each repeat. Try ln_mid first;
-    # fall back to the last h_mid block (same pattern as the collector).
+    # 2. Install the ablation hook on every h_mid block.
+    for block in h_mid:
+        handles.append(block.register_forward_hook(_make_ablation_hook()))
+
+    # 3. Register the counter increment hook AFTER all per-block ablation
+    # hooks. PyTorch fires forward post-hooks in registration order; for
+    # V1/V2 (no ln_mid) the increment lands on h_mid[-1] which is also an
+    # ablation-hook target. Registering increment FIRST would shift the
+    # last-block ablation activation by one repeat (the n_repeat clamp at
+    # the ablation gate then masks the off-by-one only at the FINAL
+    # repeat, leaving every earlier repeat's ablation silently scrambled).
+    # With ablation hooks first, they read the pre-bump counter and
+    # activate at the correct target_repeat. For V3/V4 (ln_mid present)
+    # the increment lands on a different module so registration order
+    # is irrelevant; the swap is safe for both code paths.
     ln_mid = getattr(transformer, "ln_mid", None)
     if ln_mid is not None:
         handles.append(ln_mid.register_forward_hook(_increment_counter))
     else:
         last_mid = h_mid[len(h_mid) - 1]
         handles.append(last_mid.register_forward_hook(_increment_counter))
-
-    # 3. Install the ablation hook on every h_mid block.
-    for block in h_mid:
-        handles.append(block.register_forward_hook(_make_ablation_hook()))
 
     setattr(model, _COUNTER_ATTR, 1)
     try:
@@ -383,8 +392,15 @@ def analyse_checkpoint(args: argparse.Namespace) -> dict[str, Any]:
     )
     model.eval()
     n_repeat = int(getattr(model, "n_repeat", 1) or 1)
+    # Detect attention-mask pathway via signature introspection (same fix
+    # as DV-3 line 338): all four counting model classes accept
+    # ``attention_mask=None`` post the Phase-1 BLOCKER 6 patch; the
+    # previous hardcoded check skipped V1-V4 and silently re-introduced
+    # pad-key contamination during ablation passes.
+    import inspect
     model_name = getattr(config, "model", "unknown")
-    accepts_attention_mask = model_name == "but_full_depth"
+    forward_sig = inspect.signature(model.forward)
+    accepts_attention_mask = "attention_mask" in forward_sig.parameters
 
     dataset = CountingDataset(
         split="ood",

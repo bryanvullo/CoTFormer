@@ -556,6 +556,7 @@ the index below. The index is append-only; entries are never removed.
 | o-cotformer-skel-1 | DIR-001 | DONE (uncommitted) | 2026-04-22 | Phase 1 skeleton + 6 BLOCKERs + environment + pre-registration freeze |
 | o-cotformer-mvp-a | DIR-001 | COMPLETE (uncommitted) | 2026-04-22 | Phase 2a common/ infrastructure + Protocols A, A-ext, E + HPC packaging |
 | o-cotformer-mvp-b | DIR-001 | COMPLETE (uncommitted) | 2026-04-22 | Phase 2b Protocols B (debiased CKA), F (effective dim), G (KV rank + KV-CoRE NER) + HPC script extensions; analyze_kv_compression.py monolith removed |
+| Phase-2D meta-direct + 5 w-refactorers | -- | COMPLETE (uncommitted) | 2026-04-28 | 23-fix hostile-review pass: Type II SS via statsmodels + bootstrap CI on η²_AB (DEC-028); cosine subsidiary local-centring (Protocol B); verdict triple-gate composition with direction-aware Spearman + fit-error guard + raw-vs-sink-corrected gate1 split (Protocol C); FP32 lens path with deepcopy + n_tokens guard + epoch-shuffled sampler (Protocol A / A-ext); per-layer monotonicity n_measured denominator (Protocol A); cosine-IO boundary-cell NaN + JSON-safe NaN→None (Protocol E); DV-4 ablation hook registration order; VERSIONS array `_build_versions()` deferred to post-`source env.sh`; `_workspace_has_kv` DRY refactor; `discover_workspace_sites` SoT helper (Items 4 + 8). All 13 Python parses + 3 bash syntaxes + 3 built-in smoke tests + 8 custom unit tests pass; 0 firewall hits. |
 
 ### 7.2 Debugging log
 
@@ -906,6 +907,74 @@ Type B ~25 min per checkpoint; the CPU placement keeps the GPU
 job tighter and still honours the §1.8 compute budget's "~10 min
 GPU" row (Protocol D's per-checkpoint budget is accepted as CPU-
 resident without loss of scientific fidelity).
+
+### 8.8 Counter-registration order in collector + DV-4 ablation
+
+PyTorch fires forward post-hooks in registration order. Two scripts
+install per-repeat counter-increment hooks alongside per-block site
+or ablation hooks: ``analysis.common.collector`` (Protocols A through
+G observational caches) and ``analysis.counting_dv4_causal``
+(DV-4 zero-ablation). Both have a "last block doubles as the
+counter target" failure mode for variants without ``ln_mid``
+(Arm A's ``but_full_depth`` and the bare ``cotformer_full_depth``
+class C1 + counting V1 / V2): the increment hook lands on
+``h_mid[-1]`` which is also a site / ablation target. With the
+increment registered FIRST (the legacy order), the per-block hook
+on ``h_mid[-1]`` reads the BUMPED counter at every repeat;
+the n_repeat clamp masks the off-by-one only at the FINAL repeat,
+so every earlier repeat's capture / ablation activates one repeat
+late.
+
+Resolution: in both files the counter-increment hook is registered
+AFTER all per-block site / ablation hooks. The per-block hooks
+fire first, read the pre-bump counter, label the capture or
+activate the ablation at the correct repeat; the bump then runs
+once per repeat as designed. V3 / V4 (with ``ln_mid``) are
+unaffected by the order because the counter increment lands on a
+different module (``ln_mid``) than the h_mid blocks; either order
+yields the same captured indexing.
+
+The fix is mirror-applied: the same registration-order rule lives
+in both ``analysis.common.collector`` (`register_hooks`) and
+``analysis.counting_dv4_causal`` (`ablation_hooks` context
+manager); a future site-or-ablation script with the same shape
+must follow the same convention or document a deliberate
+deviation.
+
+### 8.9 Workspace key-prefix module-path awareness
+
+The collector emits per-site cache files keyed by the trailing
+group name in ``module_path``: for ``model.transformer.h_mid``
+the prefix is ``residual_mid_l<L>_r<R>.npy``; for the
+Protocol D-calibration Tier 1 GPT-2-large substrate at
+``model.transformer.h`` the prefix is ``residual_flat_l<L>_r<R>.npy``.
+Five protocol scripts (`logit_lens`, `tuned_lens`, `cka`,
+`effective_dim`, `residual_diagnostics`) consume the residual
+cache and were originally hardcoded to ``residual_mid_l*``,
+silently missing every key when the calibration tier-1 substrate
+runs.
+
+Resolution: ``analysis.common.sites.residual_key_prefix(module_path)``
+is the single source of truth for the prefix string (returns
+``"residual_mid"`` for ``*.h_mid``, ``"residual_flat"`` otherwise).
+Every consumer derives ``residual_prefix = residual_key_prefix(args.module_path)``
+near the top of ``main()`` and substitutes it into both the
+buffer-key f-strings AND the file-scan ``startswith`` / slice
+logic. The DRY consolidation extends further:
+``analysis.common.sites.discover_workspace_sites(workspace_dir, prefix)``
+is the SoT for the workspace site-discovery routine; CKA,
+effective-dim, KV-rank, and the kv-existence pre-flight check
+all delegate to it (the per-protocol ``_discover_*_sites``
+functions are now thin wrappers that adapt the canonical
+3-tuple ``(layer, repeat, path)`` return shape to each
+caller's expected shape).
+
+The workspace file-naming table in [§8.3](#83-workspace-file-naming-contract)
+shows the ``residual_mid_l<L>_r<R>.npy`` form because the OWT2
+analyse-lncot+adm pipeline always uses ``module_path = h_mid``;
+when the calibration substrate runs at ``module_path = h`` the
+files written are named ``residual_flat_l<L>_r<R>.npy`` and
+all consumers read them transparently via the prefix helper.
 
 ---
 

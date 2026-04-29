@@ -55,6 +55,7 @@ docs/extend-notes.md §1.2 RQ1 "Tuned Lens training specification"):
 from __future__ import annotations
 
 import argparse
+import copy as _copy_mod
 import json
 import os
 from typing import Any
@@ -66,6 +67,25 @@ import torch.nn.functional as F
 
 from analysis.common.loader import load_model_from_checkpoint
 from analysis.common.plotting import savefig, setup_figure
+from analysis.common.sites import residual_key_prefix
+
+
+def _array_to_json_safe_list(a: np.ndarray) -> list:
+    """Convert array to nested list with NaN -> None for RFC 8259 conformance.
+
+    ``np.float64(NaN).tolist()`` returns Python ``float('nan')`` which
+    ``json.dumps`` emits as the literal ``NaN`` token (not RFC 8259
+    conformant; strict parsers reject). This helper substitutes
+    ``None`` (-> JSON ``null``) for any non-finite entry while
+    preserving the array's nested shape.
+    """
+    arr = np.asarray(a, dtype=np.float64)
+    if arr.ndim == 0:
+        v = float(arr)
+        return None if not np.isfinite(v) else v
+    obj = arr.astype(object)
+    obj[~np.isfinite(arr)] = None
+    return obj.tolist()
 
 
 def build_argparser() -> argparse.ArgumentParser:
@@ -241,11 +261,35 @@ def _train_one_translator(
     loss_curve: list[float] = []
 
     n_tokens = h_site.shape[0]
+    if n_tokens == 0:
+        raise ValueError(
+            f"_train_one_translator: empty h_site (n_tokens=0) cannot train "
+            f"a Belrose translator; check residual capture for this site."
+        )
+    effective_batch = min(batch_size, n_tokens)
+    # Epoch-shuffled iteration per Belrose 2023 §3.1: maintain a random
+    # permutation of n_tokens; advance a cursor by ``effective_batch``
+    # each step; reshuffle when the next batch would overflow. Replaces
+    # the previous ``rng.choice(replace=False)`` per-step regime, which
+    # was bootstrap-WITHOUT-replacement-WITHIN-step but
+    # bootstrap-WITH-replacement-ACROSS-steps; that drew non-uniformly
+    # across tokens (~31x oversampling per token at n_tokens=2048,
+    # batch=256, n_steps=250) and diverged from the canonical
+    # epoch-iteration regime on which Tuned Lens convergence guarantees
+    # rest. The reshuffle-on-overflow recipe matches PyTorch
+    # DataLoader(shuffle=True, drop_last=True) semantics, ensuring every
+    # token receives equal coverage modulo a partial-trailing-batch.
+    shuffled_indices = rng.permutation(n_tokens)
+    cursor = 0
     for step in range(n_steps):
         for group in optim.param_groups:
             group["lr"] = lr * _linear_decay_lambda(step, n_steps)
 
-        idx = rng.choice(n_tokens, size=min(batch_size, n_tokens), replace=False)
+        if cursor + effective_batch > n_tokens:
+            shuffled_indices = rng.permutation(n_tokens)
+            cursor = 0
+        idx = shuffled_indices[cursor : cursor + effective_batch]
+        cursor += effective_batch
         idx_torch = torch.from_numpy(idx).long().to(device=device)
 
         h_batch = h_site.index_select(0, idx_torch)
@@ -293,15 +337,18 @@ def _identity_diagnostic(translator: nn.Linear) -> tuple[float, float, str]:
     return frob, bias_norm, band
 
 
-def _sv_spectrum(translator: nn.Linear) -> list[float]:
+def _sv_spectrum(translator: nn.Linear) -> list:
     """Return the singular-value spectrum of the translator's weight.
 
     Used for the §1.2 RQ1 "Post-training diagnostic" cross-validation
-    with RQ6 effective dimensionality.
+    with RQ6 effective dimensionality. The list is JSON-bound (lands
+    inside the per-site record of ``tuned_lens_diagnostic.json``), so
+    routes through ``_array_to_json_safe_list`` for RFC 8259
+    NaN -> ``null`` conversion.
     """
     weight = translator.weight.detach().to(dtype=torch.float32).cpu()
     sv = torch.linalg.svdvals(weight)
-    return sv.numpy().tolist()
+    return _array_to_json_safe_list(sv.numpy())
 
 
 def _final_lens_kl_unweighted(
@@ -358,6 +405,7 @@ def _load_residuals_from_workspace(
     n_repeat: int,
     device: str,
     dtype: torch.dtype,
+    residual_prefix: str,
 ) -> tuple[torch.Tensor, dict[tuple[int, int], torch.Tensor]]:
     """Load the final-layer residual and the 105 per-site residuals.
 
@@ -366,6 +414,12 @@ def _load_residuals_from_workspace(
     captured via ``ActivationSite.RESIDUAL_PRE_LN_F``, and
     ``residuals[(l, r)]`` is the ``(N_tokens, n_embd)`` pre-``ln_mid``
     residual at mid-block ``l`` of repeat ``r`` (1-indexed).
+
+    ``residual_prefix`` is the buffer-key group prefix that the
+    collector wrote, derived from ``--module-path`` via
+    ``residual_key_prefix``. ``"residual_mid"`` for CoTFormer's
+    ``h_mid``; ``"residual_flat"`` for the standard ``transformer.h``
+    used by the Protocol-D Tier 1 GPT-2-large substrate.
 
     The pre-``ln_f`` capture matches the canonical Belrose 2023 [24]
     Tuned Lens convention: the translator is trained to predict the
@@ -388,7 +442,7 @@ def _load_residuals_from_workspace(
     for layer_idx in range(n_layer_mid):
         for repeat_idx in range(1, n_repeat + 1):
             path = os.path.join(
-                workspace, f"residual_mid_l{layer_idx}_r{repeat_idx}.npy"
+                workspace, f"{residual_prefix}_l{layer_idx}_r{repeat_idx}.npy"
             )
             if not os.path.exists(path):
                 continue
@@ -399,7 +453,7 @@ def _load_residuals_from_workspace(
     if not residuals:
         raise FileNotFoundError(
             f"load_residuals: workspace {workspace} has no "
-            f"residual_mid_l{{L}}_r{{R}}.npy files; did analysis.logit_lens "
+            f"{residual_prefix}_l{{L}}_r{{R}}.npy files; did analysis.logit_lens "
             f"run with the RESIDUAL_POST_MID site?"
         )
     return h_final, residuals
@@ -475,8 +529,31 @@ def main() -> None:
         cursor = getattr(cursor, name)
     n_layer_mid = len(cursor)
 
-    lm_head = model.lm_head.to(device=args.device).eval()
-    ln_f = model.transformer.ln_f.to(device=args.device).eval()
+    # Buffer-key prefix follows the collector's group-from-module-path
+    # convention; see ``analysis.common.sites.residual_key_prefix``.
+    residual_prefix = residual_key_prefix(args.module_path)
+
+    # Cast to FP32 to match the residuals loaded below (line 485 dtype
+    # contract per DEC-017). On bf16 ckpts (OWT2 default), leaving
+    # lm_head / ln_f at the checkpoint-native dtype causes a dtype
+    # mismatch RuntimeError at lm_head's matmul during translator
+    # training: residuals are fp32, lm_head weight is bf16, and torch
+    # refuses the mixed-precision matmul without an explicit autocast
+    # context. The translator path runs on CPU (per --device default)
+    # where bf16 matmul is also slow, so fp32 is correct on both axes.
+    #
+    # Deep-copy BEFORE casting: ``nn.Module.to(dtype=...)`` mutates the
+    # module in place AND returns self. Without the deep-copy, the
+    # original ``model.lm_head`` and ``model.transformer.ln_f`` modules
+    # would be silently flipped to fp32, violating the "model
+    # unmodified" contract that downstream consumers (e.g., re-running
+    # the model forward at its native dtype) rely on.
+    lm_head = _copy_mod.deepcopy(model.lm_head).to(
+        device=args.device, dtype=torch.float32
+    ).eval()
+    ln_f = _copy_mod.deepcopy(model.transformer.ln_f).to(
+        device=args.device, dtype=torch.float32
+    ).eval()
     for param in lm_head.parameters():
         param.requires_grad_(False)
     for param in ln_f.parameters():
@@ -484,7 +561,9 @@ def main() -> None:
 
     dtype = torch.float32  # translators train in FP32 on CPU per DEC-017
     h_final, residuals = _load_residuals_from_workspace(
-        args.workspace, n_layer_mid, n_repeat, device=args.device, dtype=dtype
+        args.workspace, n_layer_mid, n_repeat,
+        device=args.device, dtype=dtype,
+        residual_prefix=residual_prefix,
     )
     p_final, log_p_final = _compute_p_final(h_final, ln_f, lm_head)
 
@@ -649,8 +728,8 @@ def main() -> None:
                 ) / max(1, trim)
 
         triangulation["tuned_top1_shape"] = list(tuned_top1.shape)
-        triangulation["tuned_top1"] = tuned_top1.tolist()
-        triangulation["cross_lens_kl_grid"] = cross_lens_kl.tolist()
+        triangulation["tuned_top1"] = _array_to_json_safe_list(tuned_top1)
+        triangulation["cross_lens_kl_grid"] = _array_to_json_safe_list(cross_lens_kl)
         triangulation["cross_lens_kl_mean"] = float(np.nanmean(cross_lens_kl))
         triangulation["cross_lens_kl_threshold_agree"] = 0.5
         triangulation["cross_lens_kl_threshold_disagree"] = 1.0
@@ -703,8 +782,8 @@ def main() -> None:
         "n_converged": int(n_converged),
         "muon_retry_attempted": muon_retry_attempted,
         "verdict": verdict,
-        "frob_identity_grid": frob_grid.tolist(),
-        "bias_norm_grid": bias_grid.tolist(),
+        "frob_identity_grid": _array_to_json_safe_list(frob_grid),
+        "bias_norm_grid": _array_to_json_safe_list(bias_grid),
         "per_site": {
             f"l{layer_idx}_r{repeat_idx}": record
             for (layer_idx, repeat_idx), record in per_site_records.items()

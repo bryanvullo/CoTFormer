@@ -1784,8 +1784,17 @@ expectation, based on Kobayashi et al. [11]'s direct measurements
 at `wd = 0.1` on a 125M model with identical `d_head = 64`. If
 rank < 40 is observed, this constitutes evidence for an additional
 compounding effect from 5x weight tying not studied in the
-original work; we report the result as "consistent with" or
-"divergent from" Kobayashi's findings, not as a "causal proof".
+original work; we report the result as one of three
+mutually-exclusive labels emitted by `analysis.kv_rank._prediction_1_verdict`,
+not as a "causal proof":
+
+- `evidence-of-compounding` -- every mid-layer rank_95 is below 40
+  (Kobayashi-bracket strictly improved upon, evidence for the
+  5x-weight-tying compounding).
+- `consistent-with-literature` -- no mid-layer rank_95 exceeds 48
+  (Kobayashi-bracket respected, but compounding not yet evident).
+- `inconsistent-with-literature` -- at least one mid-layer rank_95
+  exceeds 48 (literature threshold crossed).
 
 *Scope limitation*: Prediction 1 tests the CONSEQUENCE of weight
 decay (rank of frozen checkpoints trained with `wd = 0.1`) but

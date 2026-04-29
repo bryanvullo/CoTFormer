@@ -297,7 +297,7 @@ def _run_capture_stage(args: argparse.Namespace) -> dict[str, Any]:
 
     model, config = load_model_from_checkpoint(
         checkpoint_dir=args.checkpoint,
-        checkpoint_filename=args.checkpoint_file,
+        checkpoint_file=args.checkpoint_file,
         device=args.device,
         config_mode=args.config_mode,
         module_path=args.module_path,

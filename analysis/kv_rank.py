@@ -23,8 +23,14 @@ Prediction 1 "weight decay drives QK/OV to low rank" is rejected
 observationally: we compare the frozen-checkpoint rank profile at
 ``wd = 0.1`` against Kobayashi et al. 2024 [11]'s rank reductions
 at the same weight-decay value on a 125M model with identical
-``d_head = 64``. The verdict is one of
-"consistent-with-literature" / "divergent" / "inconsistent".
+``d_head = 64``. The verdict is exactly one of three
+mutually-exclusive labels emitted by ``_prediction_1_verdict``:
+"evidence-of-compounding" (every mid-layer rank_95 below 40,
+Kobayashi-bracket strictly improved upon),
+"consistent-with-literature" (no mid-layer rank_95 exceeds 48,
+Kobayashi-bracket respected),
+"inconsistent-with-literature" (any mid-layer rank_95 exceeds 48,
+literature threshold crossed).
 
 RQ6 cross-validation (`docs/extend-notes.md` §1.2 RQ6 "Rogue
 dimensions and three-way cross-validation"): Type B rank at later
@@ -80,6 +86,7 @@ from analysis.common.plotting import (
     setup_figure,
     site_label,
 )
+from analysis.common.sites import discover_workspace_sites
 from analysis.common.spectral import compute_effective_rank, kv_core_rank
 
 
@@ -183,25 +190,16 @@ def _discover_kv_sites(workspace_dir: str) -> list[tuple[str, int, int]]:
 
     Returns sorted ``(path, layer, repeat)`` tuples. The collector
     writes the fused Q||K||V matrix to each file; the caller splits
-    per-slice.
+    per-slice. Thin wrapper around
+    ``analysis.common.sites.discover_workspace_sites`` with the
+    ``"kv_mid"`` capture prefix.
     """
-    files: list[tuple[str, int, int]] = []
-    for name in sorted(os.listdir(workspace_dir)):
-        if not name.startswith("kv_mid_l") or not name.endswith(".npy"):
-            continue
-        stem = name[: -len(".npy")]
-        body = stem[len("kv_mid_l") :]
-        if "_r" not in body:
-            continue
-        layer_str, repeat_str = body.split("_r", 1)
-        try:
-            layer = int(layer_str)
-            repeat = int(repeat_str)
-        except ValueError:
-            continue
-        files.append((os.path.join(workspace_dir, name), layer, repeat))
-    files.sort(key=lambda t: (t[1], t[2]))
-    return files
+    return [
+        (path, layer, repeat)
+        for layer, repeat, path in discover_workspace_sites(
+            workspace_dir, "kv_mid"
+        )
+    ]
 
 
 def _analyse_activation_one(
@@ -305,13 +303,22 @@ def _prediction_1_verdict(
 ) -> dict:
     """Two-tier threshold verdict per `docs/extend-notes.md` §1.4.
 
-    - "consistent-with-literature": all mid-layer rank_95 <= 48
-    - "evidence-of-compounding": all mid-layer rank_95 < 40
-    - "inconsistent-with-literature": any mid-layer rank_95 > 40
-      translates to "inconsistent" when the threshold (> 40) is
-      crossed; a stricter literature threshold (> 48) crosses
-      "divergent". The report records the counts at both tiers and
-      leaves the human reader to apply the verdict label.
+    Emits exactly one of three mutually-exclusive labels (matching the
+    module-level docstring's three-case framing):
+
+    - "evidence-of-compounding": ``n_above_48 == 0`` AND
+      ``n_below_40 == n_total``. Strongest reading -- every mid-layer
+      KV rank lies BELOW Kobayashi 2024's 125M observation, indicating
+      cross-repeat compounding has driven the rank profile down.
+    - "consistent-with-literature": ``n_above_48 == 0`` AND at least
+      one mid-layer rank_95 in [40, 48]. The Kobayashi-bracket is
+      respected (no rank exceeds 48) but compounding is not yet evident.
+    - "inconsistent-with-literature": ``n_above_48 > 0``. At least one
+      mid-layer rank_95 crosses the strict literature threshold.
+
+    The collapse to three cases is intentional: ``n_above_48 > 0``
+    implies ``n_above_40 > 0``, so the previously-defensive
+    ``n_above_40 == 0 and n_above_48 > 0`` branch is unreachable.
     """
     mid_entries = [e for e in weight_results if e["group"] == "mid"]
     if not mid_entries:
@@ -626,13 +633,12 @@ def _capture_kv_activations(
 
 
 def _workspace_has_kv(workspace_dir: str) -> bool:
-    """Return True when the workspace already contains kv_mid_l*_r*.npy."""
-    if not os.path.isdir(workspace_dir):
+    """Return True if any ``kv_mid_l<L>_r<R>.npy`` exists in workspace_dir."""
+    from analysis.common.sites import discover_workspace_sites
+    try:
+        return bool(discover_workspace_sites(workspace_dir, "kv_mid"))
+    except FileNotFoundError:
         return False
-    for name in os.listdir(workspace_dir):
-        if name.startswith("kv_mid_l") and name.endswith(".npy"):
-            return True
-    return False
 
 
 def main() -> None:

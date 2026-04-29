@@ -331,12 +331,17 @@ def analyse_checkpoint(args: argparse.Namespace) -> dict[str, Any]:
     n_repeat = int(getattr(model, "n_repeat", 1) or 1)
     penultimate_r = _resolve_penultimate_repeat_label(n_repeat)
 
-    # Detect the Arm A / Arm B attention-mask pathway. ``but_full_depth``
-    # accepts ``attention_mask``; the four CoTFormer variants (V1-V4)
-    # do NOT as of DIR-001. Downstream we skip the kwarg for the
-    # latter and fall back to post-capture key truncation.
+    # Detect the attention-mask pathway via signature introspection.
+    # All four counting model classes (but_full_depth and the three
+    # cotformer_full_depth* variants + adaptive_cotformer..._single_final)
+    # accept ``attention_mask=None`` post the Phase-1 BLOCKER 6 patch;
+    # the previous hardcoded ``model_name == "but_full_depth"`` check
+    # was stale and skipped the kwarg for V1-V4, silently re-introducing
+    # pad-key contamination. Robust to future model classes.
+    import inspect
     model_name = getattr(config, "model", "unknown")
-    accepts_attention_mask = model_name == "but_full_depth"
+    forward_sig = inspect.signature(model.forward)
+    accepts_attention_mask = "attention_mask" in forward_sig.parameters
 
     # Build the OOD iterator directly (``analysis.common.data`` is
     # OWT2-shaped and not compatible with the counting 4-tuple).
@@ -438,6 +443,7 @@ def analyse_checkpoint(args: argparse.Namespace) -> dict[str, Any]:
         "checkpoint_file": args.checkpoint_file,
         "model": model_name,
         "n_repeat": n_repeat,
+        "penultimate_undefined": bool(n_repeat < 2),
         "penultimate_repeat_label": penultimate_r,
         "n_samples": total_samples,
         "accepts_attention_mask": accepts_attention_mask,

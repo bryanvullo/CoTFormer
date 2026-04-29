@@ -43,10 +43,23 @@ concrete module address.
 
 from __future__ import annotations
 
+import os
 from enum import Enum
-from typing import Iterable
+from typing import TYPE_CHECKING, Iterable
 
-import torch.nn as nn
+# Defer the torch import so the pure-Python helpers
+# (``residual_key_prefix``, ``discover_workspace_sites``,
+# ``_group_label``, ``site_label``) can be imported in CPU-only
+# smoke-test environments without ``torch`` installed -- mirrors the
+# deferred-import pattern in ``analysis.counting_dv3_attention`` and
+# ``analysis.counting_dv4_causal``. Functions that traverse a live
+# ``nn.Module`` (``_mid_block_list``, ``enumerate_sites``) re-import
+# ``torch.nn`` inside their bodies; an ImportError there surfaces a
+# clear cause if torch is missing AND a model-traversal path is
+# invoked. Type hints stay as strings under
+# ``from __future__ import annotations``.
+if TYPE_CHECKING:
+    import torch.nn as nn
 
 
 class ActivationSite(Enum):
@@ -83,7 +96,7 @@ def _resolve_attr_path(root: object, dotted_path: str) -> object:
     return cursor
 
 
-def _mid_block_list(model: nn.Module, module_path: str) -> nn.ModuleList:
+def _mid_block_list(model: "nn.Module", module_path: str) -> "nn.ModuleList":
     """Return the list-of-blocks at ``module_path`` (auto-rooted at model).
 
     The ``module_path`` argument is dotted from the model root
@@ -92,6 +105,7 @@ def _mid_block_list(model: nn.Module, module_path: str) -> nn.ModuleList:
     form), the prefix is stripped before resolution because the root
     is already the ``nn.Module``.
     """
+    import torch.nn as nn  # deferred: model-traversal path requires torch
     path = module_path
     if path.startswith("model."):
         path = path[len("model.") :]
@@ -119,11 +133,77 @@ def _group_label(module_path: str) -> str:
     return leaf
 
 
+def discover_workspace_sites(
+    workspace_dir: str, prefix: str
+) -> list[tuple[int, int, str]]:
+    """Scan ``workspace_dir`` for ``<prefix>_l<L>_r<R>.npy`` capture files.
+
+    Single source of truth for the per-protocol workspace site-discovery
+    routine. CKA, effective-dim, and kv-rank all materialise per-(layer,
+    repeat) ``.npy`` activations using a common naming convention; this
+    helper enumerates them so each protocol does not reimplement the
+    listdir + filter + parse + sort dance independently.
+
+    Parameters
+    ----------
+    workspace_dir : str
+        Absolute or relative path to the directory the collector wrote
+        ``.npy`` captures into. Must exist; otherwise ``FileNotFoundError``
+        is raised (matches ``os.listdir`` semantics).
+    prefix : str
+        The bare key prefix BEFORE the ``"_l<L>_r<R>"`` suffix --- e.g.
+        ``"residual_mid"``, ``"residual_flat"`` (see ``residual_key_prefix``)
+        or ``"kv_mid"`` for fused Q||K||V activation captures.
+
+    Returns
+    -------
+    list[tuple[int, int, str]]
+        ``[(layer, repeat, abs_path), ...]`` sorted ascending by
+        ``(layer, repeat)``. Files whose stem does not parse as
+        ``<prefix>_l<int>_r<int>.npy`` are silently skipped.
+    """
+    scan_prefix = f"{prefix}_l"
+    suffix = ".npy"
+    out: list[tuple[int, int, str]] = []
+    for name in os.listdir(workspace_dir):
+        if not name.startswith(scan_prefix) or not name.endswith(suffix):
+            continue
+        stem = name[: -len(suffix)]
+        body = stem[len(scan_prefix) :]
+        if "_r" not in body:
+            continue
+        layer_str, repeat_str = body.split("_r", 1)
+        try:
+            layer = int(layer_str)
+            repeat = int(repeat_str)
+        except ValueError:
+            continue
+        out.append((layer, repeat, os.path.join(workspace_dir, name)))
+    out.sort(key=lambda t: (t[0], t[1]))
+    return out
+
+
+def residual_key_prefix(module_path: str) -> str:
+    """Return the group prefix the collector uses for residual buffer keys.
+
+    The collector's _make_site_hook composes buf_key as
+    ``f"residual_{group}_l<L>_r<R>"`` where ``<group>`` is the trailing
+    module name resolved by ``_group_label``. CoTFormer's ``h_mid``
+    yields ``"residual_mid"``; standard ``transformer.h`` (used by
+    Protocol D-calibration Tier 1 GPT-2-large substrate) yields
+    ``"residual_flat"``.
+
+    This helper is the single source of truth for the prefix string;
+    protocols must call it rather than hardcoding ``"residual_mid"``.
+    """
+    return f"residual_{_group_label(module_path)}"
+
+
 def enumerate_sites(
-    model: nn.Module,
+    model: "nn.Module",
     site: ActivationSite,
     module_path: str = "model.transformer.h_mid",
-) -> list[tuple[str, nn.Module]]:
+) -> list[tuple[str, "nn.Module"]]:
     """Resolve a site name to concrete ``(key, module)`` pairs.
 
     The ``module_path`` argument selects between the standard
@@ -142,7 +222,7 @@ def enumerate_sites(
     """
     transformer = _resolve_attr_path(model, "transformer")
     group = _group_label(module_path)
-    pairs: list[tuple[str, nn.Module]] = []
+    pairs: list[tuple[str, "nn.Module"]] = []
 
     if site is ActivationSite.RESIDUAL_POST_BEGIN:
         h_begin = getattr(transformer, "h_begin", None)

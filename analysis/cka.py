@@ -96,6 +96,7 @@ from typing import Iterable
 import numpy as np
 
 from analysis.common.plotting import savefig, setup_figure
+from analysis.common.sites import discover_workspace_sites, residual_key_prefix
 
 
 # -----------------------------------------------------------------------------
@@ -142,13 +143,27 @@ def _zero_diag(G: np.ndarray) -> np.ndarray:
 
 
 def _linear_cka_debiased_from_grams(K_tilde: np.ndarray, L_tilde: np.ndarray) -> float:
-    """Debiased linear CKA from already-centred zero-diagonal Grams."""
+    """Debiased linear CKA from already-zero-diagonal Grams.
+
+    Allows the full signed range CKA in [-1, 1]: HSIC_u admits negative
+    values under finite-sample estimator noise (and for genuinely
+    anti-correlated kernel pairs); clipping ``h_XY <= 0`` to zero
+    destroys the symmetry of the downstream null distribution and
+    biases right-tailed quantile thresholds. ``denom`` (the product
+    of two HSIC-self-similarity estimators) is population-non-negative;
+    if it slips below 0 due to estimator noise the ratio is undefined
+    and we signal NaN so callers can exclude the cell from aggregates.
+
+    Consistent with the inline regime in ``_compute_pair``: the RBF
+    debiased-CKA path (``_rbf_cka_debiased``) consumes this helper
+    and therefore inherits the unclipped semantics.
+    """
     h_XY = _hsic_u_from_zero_diag_gram(K_tilde, L_tilde)
     h_XX = _hsic_u_from_zero_diag_gram(K_tilde, K_tilde)
     h_YY = _hsic_u_from_zero_diag_gram(L_tilde, L_tilde)
     denom = h_XX * h_YY
-    if denom <= 0.0 or h_XY <= 0.0:
-        return 0.0
+    if denom <= 0.0:
+        return float("nan")
     return float(h_XY / np.sqrt(denom))
 
 
@@ -218,6 +233,13 @@ def _per_token_cosine_stats(X: np.ndarray, Y: np.ndarray) -> dict[str, float]:
     Y = np.asarray(Y, dtype=np.float64)
     if X.shape != Y.shape:
         raise ValueError("per_token_cosine_stats: X and Y shapes must match")
+    # Local centring keeps the cosine-side cosine_mean / cosine_std
+    # comparable across pairs irrespective of the residual-stream mean
+    # drift across the layer stack. The CKA U-statistic upstream operates
+    # on the RAW row matrix because it absorbs centring algebraically;
+    # cosine has no equivalent absorption, so we centre here.
+    X = X - X.mean(axis=0, keepdims=True)
+    Y = Y - Y.mean(axis=0, keepdims=True)
     nx = np.linalg.norm(X, axis=1)
     ny = np.linalg.norm(Y, axis=1)
     denom = nx * ny
@@ -231,43 +253,57 @@ def _per_token_cosine_stats(X: np.ndarray, Y: np.ndarray) -> dict[str, float]:
 # Workspace loading
 # -----------------------------------------------------------------------------
 
-def _discover_residual_sites(workspace_dir: str) -> list[tuple[str, str, int, int]]:
-    """Scan the workspace for residual_mid_l<L>_r<R>.npy files.
+def _discover_residual_sites(
+    workspace_dir: str,
+    residual_prefix: str,
+) -> list[tuple[str, str, int, int]]:
+    """Scan the workspace for ``<residual_prefix>_l<L>_r<R>.npy`` files.
+
+    ``residual_prefix`` is one of ``"residual_mid"`` (CoTFormer
+    ``h_mid`` sub-stream) or ``"residual_flat"`` (standard
+    ``transformer.h``, e.g. Protocol-D Tier 1 GPT-2-large), as
+    returned by ``analysis.common.sites.residual_key_prefix``.
 
     Returns a list of ``(site_key, path, layer, repeat)`` tuples
-    sorted by ``(layer, repeat)``. The canonical site_key is
-    ``"mid[L] r=R"`` to match
-    ``analysis.common.plotting.site_label("mid", L, R)``.
+    sorted by ``(layer, repeat)``. The canonical ``site_key`` mirrors
+    ``analysis.common.plotting.site_label`` with the same group
+    string the prefix encodes (``"mid[L] r=R"`` or
+    ``"flat[L] r=R"``). Wraps the architecture-agnostic
+    ``analysis.common.sites.discover_workspace_sites`` and decorates
+    each row with the CKA-specific display key.
     """
-    files: list[tuple[str, str, int, int]] = []
-    for name in os.listdir(workspace_dir):
-        if not name.startswith("residual_mid_l") or not name.endswith(".npy"):
-            continue
-        stem = name[: -len(".npy")]
-        body = stem[len("residual_mid_l") :]
-        if "_r" not in body:
-            continue
-        layer_str, repeat_str = body.split("_r", 1)
-        try:
-            layer = int(layer_str)
-            repeat = int(repeat_str)
-        except ValueError:
-            continue
-        key = f"mid[{layer}] r={repeat}"
-        files.append((key, os.path.join(workspace_dir, name), layer, repeat))
-    files.sort(key=lambda t: (t[2], t[3]))
-    return files
+    # ``residual_prefix`` is always ``"residual_<group>"`` (mid/flat);
+    # strip the literal ``"residual_"`` head to recover the bare group.
+    group = residual_prefix[len("residual_") :]
+    return [
+        (f"{group}[{layer}] r={repeat}", path, layer, repeat)
+        for layer, repeat, path in discover_workspace_sites(
+            workspace_dir, residual_prefix
+        )
+    ]
 
 
-def _load_and_centre(path: str) -> np.ndarray:
-    """Load an ``.npy`` residual capture and column-centre it."""
+def _load_residual(path: str) -> np.ndarray:
+    """Load an ``.npy`` residual capture as float64, RAW (no centring).
+
+    Per Song et al. 2012 / Murphy 2024 PML2 §3.2, the unbiased HSIC
+    U-statistic estimator (``_hsic_u_from_zero_diag_gram``) is derived
+    for the RAW (uncentred) kernel: the three-term correction
+    ``(term_trace + term_sums - term_cross) / (n (n-3))`` absorbs the
+    centring implicitly. Pre-centring the row matrix and then applying
+    the U-statistic over-corrects -- the bias-correction terms presume
+    an uncentred Gram, and applying them after column-centring yields
+    a hybrid that is no longer unbiased for HSIC. The literature-
+    standard recipe is therefore to feed the RAW row matrix and let
+    the U-statistic do the centring work; that is what this loader
+    provides.
+    """
     X = np.load(path)
     if X.ndim != 2:
         raise ValueError(
-            f"_load_and_centre: {path} has shape {X.shape}; expected 2-D"
+            f"_load_residual: {path} has shape {X.shape}; expected 2-D"
         )
     X = X.astype(np.float64, copy=False)
-    X = X - X.mean(axis=0, keepdims=True)
     return X
 
 
@@ -330,31 +366,59 @@ def _compute_pair(
 
     h_ij = _hsic_u_from_zero_diag_gram(K_i, K_j)
     denom = h_ii * h_jj
-    if denom > 0.0 and h_ij > 0.0:
+    # Allow negative debiased CKA in [-1, 1]: HSIC_u is defined to admit
+    # negative values for anti-correlated kernels, and the U-statistic
+    # estimator can dip below zero for any kernel pair under finite n.
+    # Clipping h_ij < 0 to 0 (the previous regime) destroyed the symmetry
+    # of the null distribution and biased right-tailed q90 / q99
+    # thresholds DOWNWARD, producing an artificially permissive null.
+    # ``denom`` is the product of two estimators of HSIC(K_i, K_i) and
+    # HSIC(K_j, K_j) which are population-non-negative; if it slips
+    # below 0 due to estimator noise the ratio is undefined and we
+    # signal NaN to downstream so the cell can be excluded from
+    # aggregates (q90 / q99 use ``nanquantile``; null_mean / null_std
+    # use ``nanmean`` / ``nanstd``).
+    if denom > 0.0:
         cka_linear_obs = float(h_ij / np.sqrt(denom))
     else:
-        cka_linear_obs = 0.0
+        cka_linear_obs = float("nan")
 
     # Permutation null: permute the rows AND columns of K_j by the same
     # index array. Equivalent to shuffling j's token order and recomputing
     # the Gram. h_jj is permutation-invariant so we reuse it.
     n = K_j.shape[0]
-    rng = np.random.default_rng(seed + 1_000_003 * i + 7 * j)
+    # SeedSequence mixes the (seed, i, j) tuple via SplitMix64 + spawn_key
+    # logic, giving high-entropy decorrelation across (i, j) cells. The
+    # previous linear hash ``seed + 1_000_003 * i + 7 * j`` was prone to
+    # near-collisions when two cells differed in (i, j) by a small linear
+    # combination, producing partially-correlated null permutations.
+    rng = np.random.default_rng(np.random.SeedSequence([seed, int(i), int(j)]))
     null_vals = np.empty(n_perms, dtype=np.float64)
     for p in range(n_perms):
         perm = rng.permutation(n)
         K_j_perm = K_j[perm[:, None], perm[None, :]]
         h_ij_p = _hsic_u_from_zero_diag_gram(K_i, K_j_perm)
-        if denom > 0.0 and h_ij_p > 0.0:
+        # Same regime as the observed-value branch: keep the full
+        # signed range so the null retains its symmetry around zero;
+        # mark NaN only when the denominator is non-positive (rare
+        # estimator-noise edge case) and use nanquantile downstream.
+        if denom > 0.0:
             null_vals[p] = float(h_ij_p / np.sqrt(denom))
         else:
-            null_vals[p] = 0.0
+            null_vals[p] = float("nan")
 
-    q90 = float(np.quantile(null_vals, 0.90))
-    q99 = float(np.quantile(null_vals, 0.99))
-    if cka_linear_obs >= q99:
+    q90 = float(np.nanquantile(null_vals, 0.90))
+    q99 = float(np.nanquantile(null_vals, 0.99))
+    if not np.isfinite(cka_linear_obs):
+        zone = "undefined_denom"
+    elif cka_linear_obs >= max(q99, 0.0):
+        # Semantically "redundant" requires high POSITIVE similarity.
+        # Without the max(., 0.0) floor, the >= q99 branch could fire
+        # when both observed and q99 are negative (anti-correlated
+        # kernels under finite-n estimator noise) -- mislabeling
+        # structural anti-correlation as redundancy.
         zone = "redundant"
-    elif cka_linear_obs >= q90:
+    elif cka_linear_obs >= max(q90, 0.0):
         zone = "partially_distinct"
     else:
         zone = "structurally_distinct"
@@ -369,8 +433,8 @@ def _compute_pair(
         "cka_linear_debiased": cka_linear_obs,
         "null_q90": q90,
         "null_q99": q99,
-        "null_mean": float(null_vals.mean()),
-        "null_std": float(null_vals.std(ddof=1)) if n_perms > 1 else 0.0,
+        "null_mean": float(np.nanmean(null_vals)),
+        "null_std": float(np.nanstd(null_vals, ddof=1)) if n_perms > 1 else 0.0,
         "zone": zone,
     }
 
@@ -484,7 +548,17 @@ def build_argparser() -> argparse.ArgumentParser:
         "--workspace",
         type=str,
         required=True,
-        help="Path to the analysis workspace directory (contains residual_mid_l*_r*.npy)",
+        help="Path to the analysis workspace directory (contains "
+             "residual_*_l*_r*.npy; the prefix follows --module-path)",
+    )
+    parser.add_argument(
+        "--module-path",
+        type=str,
+        default="model.transformer.h_mid",
+        help="Dotted module path the upstream collector hooked into; "
+             "selects the residual buffer-key prefix "
+             "(``model.transformer.h_mid`` -> residual_mid_*; "
+             "``model.transformer.h`` -> residual_flat_*).",
     )
     parser.add_argument(
         "--output-dir",
@@ -534,7 +608,7 @@ def _prepare_grams(
     max_tokens: int,
     keep_x_matrices: bool,
 ) -> tuple[list[np.ndarray], list[float], list[np.ndarray] | None, int]:
-    """Load all residual sites, centre, and precompute zero-diagonal Grams.
+    """Load all residual sites and precompute zero-diagonal Grams.
 
     Returns
     -------
@@ -543,15 +617,15 @@ def _prepare_grams(
     h_xx : list[float]
         ``HSIC_u(K_tilde, K_tilde)`` per site (used as CKA denominator).
     x_matrices : list[np.ndarray] | None
-        The centred row matrices themselves (kept only when
+        The raw row matrices themselves (kept only when
         ``keep_x_matrices`` is true; used by RBF CKA and cosine
-        side-metrics).
+        side-metrics, which apply their own local centring as needed).
     n : int
         Common row count.
     """
     matrices: list[np.ndarray] = []
     for _, path, _, _ in sites:
-        X = _load_and_centre(path)
+        X = _load_residual(path)
         if max_tokens > 0 and X.shape[0] > max_tokens:
             X = X[:max_tokens]
         matrices.append(X)
@@ -589,7 +663,8 @@ def main() -> None:
         )
         sys.exit(2)
 
-    sites = _discover_residual_sites(args.workspace)
+    residual_prefix = residual_key_prefix(args.module_path)
+    sites = _discover_residual_sites(args.workspace, residual_prefix)
     if len(sites) < 2:
         print(
             f"cka: discovered {len(sites)} sites in {args.workspace}; need >= 2",

@@ -64,13 +64,26 @@
 # runs on C1-C5). Replace each entry's ckpt_dir leaf as your run history
 # dictates; the leaf names in /scratch/ab3u21/exps/owt2/ follow the
 # pattern exp_name=<model>_lr<lr>_bs<bs>x<acc>_seqlen<seq>__<overrides>_seed=<s>.
-VERSIONS=(
-    "c1_cotres_40k|$EXPS_DIR/owt2/cotformer_full_depth/cotformer_full_depth_res_only_lr0.001_bs8x16_seqlen256|ckpt_40000.pt"
-    "c2_lncot_40k|$EXPS_DIR/owt2/cotformer_full_depth_lnmid_depthemb/cotformer_full_depth_lnmid_depthemb_lr0.001_bs8x16_seqlen256|ckpt_40000.pt"
-    "c3_lncot_60k|$EXPS_DIR/owt2/cotformer_full_depth_lnmid_depthemb/cotformer_full_depth_lnmid_depthemb_lr0.001_bs8x16_seqlen256|ckpt_60000.pt"
-    "c4_mod_40k|$EXPS_DIR/owt2/but_mod_efficient_sigmoid_lnmid_depthemb_random_factor/but_mod_efficient_sigmoid_lnmid_depthemb_random_factor_lr0.001_bs8x16_seqlen256|ckpt_40000.pt"
-    "c5_adm_v2_60k|$EXPS_DIR/owt2/adaptive_cotformer_mod_efficient_sigmoid_crw_lnmid_de_random_factor_single_final/adm_v2_lr0.001_bs8x16_seqlen256|ckpt_60000.pt"
-)
+#
+# IMPORTANT: VERSIONS uses $EXPS_DIR which is exported by env.sh. The array
+# values are evaluated at assignment time, so the assignment must run AFTER
+# `source env.sh`. We therefore wrap the assignment in _build_versions(),
+# called from both the login-node wrapper and the compute-node section.
+# Top-level reference matrix (commented for at-a-glance reading):
+#   c1_cotres_40k   $EXPS_DIR/owt2/cotformer_full_depth/cotformer_full_depth_res_only_lr0.001_bs8x16_seqlen256/ckpt_40000.pt
+#   c2_lncot_40k    $EXPS_DIR/owt2/cotformer_full_depth_lnmid_depthemb/cotformer_full_depth_lnmid_depthemb_lr0.001_bs8x16_seqlen256/ckpt_40000.pt
+#   c3_lncot_60k    $EXPS_DIR/owt2/cotformer_full_depth_lnmid_depthemb/cotformer_full_depth_lnmid_depthemb_lr0.001_bs8x16_seqlen256/ckpt_60000.pt
+#   c4_mod_40k      $EXPS_DIR/owt2/but_mod_efficient_sigmoid_lnmid_depthemb_random_factor/but_mod_efficient_sigmoid_lnmid_depthemb_random_factor_lr0.001_bs8x16_seqlen256/ckpt_40000.pt
+#   c5_adm_v2_60k   $EXPS_DIR/owt2/adaptive_cotformer_mod_efficient_sigmoid_crw_lnmid_de_random_factor_single_final/adm_v2_lr0.001_bs8x16_seqlen256/ckpt_60000.pt
+_build_versions() {
+    VERSIONS=(
+        "c1_cotres_40k|$EXPS_DIR/owt2/cotformer_full_depth/cotformer_full_depth_res_only_lr0.001_bs8x16_seqlen256|ckpt_40000.pt"
+        "c2_lncot_40k|$EXPS_DIR/owt2/cotformer_full_depth_lnmid_depthemb/cotformer_full_depth_lnmid_depthemb_lr0.001_bs8x16_seqlen256|ckpt_40000.pt"
+        "c3_lncot_60k|$EXPS_DIR/owt2/cotformer_full_depth_lnmid_depthemb/cotformer_full_depth_lnmid_depthemb_lr0.001_bs8x16_seqlen256|ckpt_60000.pt"
+        "c4_mod_40k|$EXPS_DIR/owt2/but_mod_efficient_sigmoid_lnmid_depthemb_random_factor/but_mod_efficient_sigmoid_lnmid_depthemb_random_factor_lr0.001_bs8x16_seqlen256|ckpt_40000.pt"
+        "c5_adm_v2_60k|$EXPS_DIR/owt2/adaptive_cotformer_mod_efficient_sigmoid_crw_lnmid_de_random_factor_single_final/adm_v2_lr0.001_bs8x16_seqlen256|ckpt_60000.pt"
+    )
+}
 
 # Inter-batch robustness batch count and per-batch token budget (§1.2 RQ1).
 N_BATCHES=4
@@ -99,6 +112,7 @@ if [ -z "$SLURM_JOB_ID" ]; then
     PACKAGE_DIR="$(cd "$(dirname "$0")" && pwd)"
     REPO_DIR="$(cd "$PACKAGE_DIR/../.." && pwd)"
     source "$REPO_DIR/iridis/env.sh"
+    _build_versions  # $EXPS_DIR now populated; build VERSIONS for login-node use.
 
     # Pre-flight: verify every checkpoint exists. Fail fast before queueing.
     MISSING=0
@@ -152,6 +166,16 @@ if [ -z "$REPO_DIR" ]; then
 fi
 
 source "$REPO_DIR/iridis/env.sh"
+_build_versions  # $EXPS_DIR now populated on the compute node; rebuild VERSIONS.
+
+# Defensive cache + scratch mkdirs: env.sh exports the path vars but
+# does not create directories. Models load tiktoken("gpt2") at construct
+# time (models/base.py); compute nodes have no internet, so the cache
+# must already be populated. If TIKTOKEN_CACHE_DIR is empty the run
+# will fail at first model construction; in that case re-run
+#   python -c "import tiktoken; tiktoken.get_encoding('gpt2')"
+# on a login node with conda activated, then resubmit.
+mkdir -p "$DATA_DIR" "$HF_HOME" "$TIKTOKEN_CACHE_DIR" "$WANDB_DIR"
 
 echo "========================================="
 echo " analyze-lncot+adm GPU stage"

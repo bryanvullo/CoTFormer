@@ -477,6 +477,10 @@ def prediction2_paired_tests(
     directionality across all three sparsity metrics"; the verdict is
     reported per-metric plus a joint concordance flag.
 
+    Note: per DEC-026, this test is one of three gates and pools per-(layer,
+    head) cells as i.i.d.; the formal §1.4 monotonicity test is
+    ``prediction2_mixed_effects``.
+
     Parameters
     ----------
     per_head : dict[str, np.ndarray]
@@ -538,23 +542,45 @@ def prediction2_paired_tests(
         }
 
     out["concordant_rejection"] = bool(concordant_rejected)
+    # Split concordance flags so callers can gate on the raw 3-metric
+    # set without conflating with sink-corrected variants. A run that
+    # rejects on raw entropy/gini/top_k_mass but fails one of the
+    # sink-stripped variants should still pass the §1.4 Prediction-2
+    # primary claim; the sink-corrected concordance is informational.
+    raw_metrics = ["entropy", "gini", "top_k_mass"]
+    sink_metrics = ["entropy_no_sink", "gini_no_sink", "top_k_mass_no_sink"]
+    out["concordant_rejection_raw"] = all(
+        out.get(m, {}).get("reject_flat", False) for m in raw_metrics
+    )
+    out["concordant_rejection_sink"] = all(
+        out.get(m, {}).get("reject_flat", False)
+        for m in sink_metrics
+        if out.get(m, {}).get("present", False)
+    )
     return out
 
 
 def prediction2_per_layer_spearman(
     panel: np.ndarray,
+    direction: float,
     alpha_family: float = MIXED_EFFECTS_ALPHA,
 ) -> dict[str, Any]:
     """Per-layer Spearman rho between repeat index and per-head mean metric.
 
     Holm-Bonferroni across the ``n_layer`` comparisons at ``alpha_family``;
-    a layer rejects H0 if ``rho < -0.5`` (Cohen 1988 [49] "large effect")
-    AND the Holm-adjusted p-value passes.
+    a layer rejects H0 if ``rho * direction <= -0.5`` (Cohen 1988 [49]
+    "large effect" along the predicted direction) AND the Holm-adjusted
+    p-value passes.
 
     Parameters
     ----------
     panel : np.ndarray
         Shape ``(n_layer, n_repeat, n_head)`` per-metric mean values.
+    direction : float
+        +1 for metrics expected to INCREASE with repeat index (gini,
+        top_k_mass), -1 for metrics expected to DECREASE (entropy).
+        Used to direction-orient the large-effect gate so that
+        Spearman rho is judged against ``-0.5 * direction``.
     """
     n_layer, n_repeat, n_head = panel.shape
     per_layer: list[dict[str, Any]] = []
@@ -570,7 +596,9 @@ def prediction2_per_layer_spearman(
             "layer": layer_idx,
             "rho": float(rho),
             "p_value": float(p_val),
-            "large_effect": bool(np.isfinite(rho) and rho <= SPEARMAN_LARGE_EFFECT),
+            "large_effect": bool(
+                np.isfinite(rho) and (rho * direction) <= SPEARMAN_LARGE_EFFECT
+            ),
         })
         p_values.append(p_val)
     rejected = holm_bonferroni(p_values, alpha=alpha_family)
@@ -754,7 +782,7 @@ def _run_capture_stage(args: argparse.Namespace) -> None:
 
     model, config = load_model_from_checkpoint(
         checkpoint_dir=args.checkpoint,
-        checkpoint_filename=args.checkpoint_file,
+        checkpoint_file=args.checkpoint_file,
         device=args.device,
         config_mode=args.config_mode,
         module_path=args.module_path,
@@ -907,21 +935,105 @@ def _build_results_payload(
     paired = prediction2_paired_tests(panel, n_repeat)
     per_layer_spearman: dict[str, Any] = {}
     mixed_effects: dict[str, Any] = {}
+    # Direction map: entropy is expected to DECREASE with repeat (slope < 0),
+    # gini and top_k_mass are expected to INCREASE (slope > 0). Threading
+    # direction through the per-layer Spearman gates the large-effect flag
+    # against the predicted sign rather than always against rho < -0.5.
+    direction_map = {"entropy": -1.0, "gini": +1.0, "top_k_mass": +1.0}
     for metric_key in ("entropy", "gini", "top_k_mass"):
-        per_layer_spearman[metric_key] = prediction2_per_layer_spearman(panel[metric_key])
+        per_layer_spearman[metric_key] = prediction2_per_layer_spearman(
+            panel[metric_key], direction=direction_map[metric_key]
+        )
         mixed_effects[metric_key] = prediction2_mixed_effects(panel[metric_key])
 
-    # Compose a single overall verdict: Prediction 2 is supported only
-    # when the paired t-test concordance flag holds AND the per-layer
-    # Spearman majority-reject holds on entropy OR Gini.
-    verdict = "supported" if (
-        paired.get("concordant_rejection", False)
-        and (
-            per_layer_spearman["entropy"]["majority_reject"]
-            or per_layer_spearman["gini"]["majority_reject"]
-        )
-    ) else ("refuted" if paired.get("gini", {}).get("present", False)
-            and not paired["gini"]["reject_flat"] else "inconclusive")
+    # Triple-gate AND-concordance verdict: a Prediction-2 claim is only
+    # ratified when an aggregate test, a per-layer multiple-comparison
+    # test, and a formal mixed-effects slope test all reject the
+    # flat-null in concordant directions. DEC-026 placed the
+    # mixed-effects model as the formal §1.4 test of monotonicity.
+    #
+    # Gate 1 -- paired-t concordant rejection across the six metrics
+    #           (entropy / gini / top_k_mass + sink-corrected variants).
+    #           Pools per-(layer, head) cells so it has high power but
+    #           treats them as i.i.d.; DEC-026 demoted it from the SOLE
+    #           primary gate to "one of three" because the
+    #           exchangeability assumption is violated by per-layer
+    #           clustering.
+    # Gate 2 -- per-layer Spearman majority-reject on entropy OR Gini
+    #           with Holm-Bonferroni across n_layer comparisons. Trades
+    #           power for per-layer multiple-comparison rigour.
+    # Gate 3 -- mixed-effects slope on `repeat` rejects flat-null on
+    #           entropy OR Gini (random intercepts on layer + nested
+    #           head-in-layer variance component). The formal §1.4 test
+    #           of Prediction 2 monotonicity. Falls open (cannot reject)
+    #           when statsmodels is unavailable; in that environment
+    #           the verdict caps at "inconclusive" until the dependency
+    #           is installed and the run is repeated.
+    gate1_paired_concordant = bool(paired.get("concordant_rejection_raw", False))
+    gate2_spearman_majority = bool(
+        per_layer_spearman.get("entropy", {}).get("majority_reject", False)
+        or per_layer_spearman.get("gini", {}).get("majority_reject", False)
+        or per_layer_spearman.get("top_k_mass", {}).get("majority_reject", False)
+    )
+    statsmodels_available = bool(
+        mixed_effects.get("entropy", {}).get("statsmodels_available", False)
+        or mixed_effects.get("gini", {}).get("statsmodels_available", False)
+    )
+    gate3_mixed_effects = bool(
+        mixed_effects.get("entropy", {}).get("reject_flat", False)
+        or mixed_effects.get("gini", {}).get("reject_flat", False)
+    )
+
+    # A "refuted" verdict requires that the formal mixed-effects fits
+    # actually ran successfully -- a fit_error in either metric means
+    # gate3 is uninformatively False (fit never converged), which must
+    # not be conflated with a genuine null finding. When any fit_error
+    # is present, the verdict caps at "inconclusive".
+    mixed_effects_no_fit_error = not (
+        bool(mixed_effects.get("entropy", {}).get("fit_error"))
+        or bool(mixed_effects.get("gini", {}).get("fit_error"))
+    )
+
+    if (
+        gate1_paired_concordant
+        and gate2_spearman_majority
+        and gate3_mixed_effects
+    ):
+        verdict = "supported"
+    elif (
+        statsmodels_available
+        and mixed_effects_no_fit_error
+        and not gate2_spearman_majority
+        and not gate3_mixed_effects
+    ):
+        # All formal gates fail, statsmodels was available, AND no
+        # mixed-effects fit error fired -> genuine refutation.
+        # Single-metric Gini-paired failure no longer overrides
+        # multi-metric concordance (the previous
+        # ``not paired["gini"]["reject_flat"]`` shortcut is
+        # deprecated; it produced "refuted" verdicts whenever Gini's
+        # paired-t alone failed even when entropy + top_k_mass agreed).
+        verdict = "refuted"
+    else:
+        verdict = "inconclusive"
+
+    verdict_meta = {
+        "gate1_paired_concordant_rejection": gate1_paired_concordant,
+        # Informational: the legacy all-6-metric concordance flag
+        # (raw + sink-corrected). Retained for backward comparison;
+        # gate1 now uses raw-only concordance.
+        "gate1_paired_concordant_rejection_all6": bool(
+            paired.get("concordant_rejection", False)
+        ),
+        "gate1_paired_concordant_rejection_sink": bool(
+            paired.get("concordant_rejection_sink", False)
+        ),
+        "gate2_spearman_majority_reject": gate2_spearman_majority,
+        "gate3_mixed_effects_reject_flat": gate3_mixed_effects,
+        "statsmodels_available": statsmodels_available,
+        "mixed_effects_fit_error": not mixed_effects_no_fit_error,
+        "validation_gate_vacuous": bool(validation_gate.get("vacuous", False)),
+    }
 
     # Per-(layer, repeat, head) results laid out for easy JSON pick-up.
     per_head_records = []
@@ -978,6 +1090,7 @@ def _build_results_payload(
             "per_layer_spearman": per_layer_spearman,
             "mixed_effects": mixed_effects,
             "verdict": verdict,
+            "verdict_meta": verdict_meta,
         },
         "per_head": per_head_records,
         "per_layer_repeat_histogram": histogram,

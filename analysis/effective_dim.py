@@ -64,6 +64,7 @@ from analysis.common.plotting import (
     setup_figure,
     site_label,
 )
+from analysis.common.sites import discover_workspace_sites, residual_key_prefix
 from analysis.common.spectral import kv_core_rank, participation_ratio
 
 
@@ -398,28 +399,27 @@ def _holm_bonferroni(p_values: list[float], alpha: float) -> list[bool]:
 # Workspace scan
 # -----------------------------------------------------------------------------
 
-def _discover_residual_sites(workspace_dir: str) -> list[tuple[str, int, int]]:
-    """Scan for ``residual_mid_l<L>_r<R>.npy`` files.
+def _discover_residual_sites(
+    workspace_dir: str,
+    residual_prefix: str,
+) -> list[tuple[str, int, int]]:
+    """Scan for ``<residual_prefix>_l<L>_r<R>.npy`` files.
 
-    Returns sorted ``(path, layer, repeat)`` tuples.
+    ``residual_prefix`` is one of ``"residual_mid"`` or
+    ``"residual_flat"`` (see
+    ``analysis.common.sites.residual_key_prefix``).
+
+    Returns sorted ``(path, layer, repeat)`` tuples. Thin wrapper around
+    ``analysis.common.sites.discover_workspace_sites``; the column
+    reorder keeps the legacy iteration shape unchanged for callers that
+    unpack via ``for path, layer, repeat in sites:``.
     """
-    files: list[tuple[str, int, int]] = []
-    for name in sorted(os.listdir(workspace_dir)):
-        if not name.startswith("residual_mid_l") or not name.endswith(".npy"):
-            continue
-        stem = name[: -len(".npy")]
-        body = stem[len("residual_mid_l") :]
-        if "_r" not in body:
-            continue
-        layer_str, repeat_str = body.split("_r", 1)
-        try:
-            layer = int(layer_str)
-            repeat = int(repeat_str)
-        except ValueError:
-            continue
-        files.append((os.path.join(workspace_dir, name), layer, repeat))
-    files.sort(key=lambda t: (t[1], t[2]))
-    return files
+    return [
+        (path, layer, repeat)
+        for layer, repeat, path in discover_workspace_sites(
+            workspace_dir, residual_prefix
+        )
+    ]
 
 
 # -----------------------------------------------------------------------------
@@ -431,6 +431,7 @@ def _plot_trajectories(
     layers: list[int],
     repeats: list[int],
     output_path: str,
+    group: str,
 ) -> None:
     fig, ax = setup_figure(1, 1, size=(10.0, 6.5))
     palette = palette_for_repeats(max(len(layers), 1))
@@ -439,7 +440,7 @@ def _plot_trajectories(
         xs = []
         ys = []
         for r in repeats:
-            key = site_label("mid", layer, r)
+            key = site_label(group, layer, r)
             if key in per_site and per_site[key]["participation_ratio"] > 0.0:
                 xs.append(r)
                 ys.append(per_site[key]["participation_ratio"])
@@ -452,12 +453,12 @@ def _plot_trajectories(
                 markersize=3,
                 color=palette[li % len(palette)],
                 alpha=0.7,
-                label=f"mid[{layer}]" if li < 3 or li == len(layers) - 1 else None,
+                label=f"{group}[{layer}]" if li < 3 or li == len(layers) - 1 else None,
             )
 
     ax.set_xlabel("Repeat index")
     ax.set_ylabel("Participation ratio (d_eff)")
-    ax.set_title("Protocol F -- d_eff vs repeat per mid-layer (RQ6)")
+    ax.set_title(f"Protocol F -- d_eff vs repeat per {group}-layer (RQ6)")
     ax.legend(fontsize=7, ncol=2, loc="best")
     savefig(fig, output_path)
 
@@ -510,6 +511,15 @@ def build_argparser() -> argparse.ArgumentParser:
             "supported (default 16/21)."
         ),
     )
+    parser.add_argument(
+        "--module-path",
+        type=str,
+        default="model.transformer.h_mid",
+        help="Dotted module path the upstream collector hooked into; "
+             "selects the residual buffer-key prefix "
+             "(``model.transformer.h_mid`` -> residual_mid_*; "
+             "``model.transformer.h`` -> residual_flat_*).",
+    )
     return parser
 
 
@@ -524,7 +534,12 @@ def main() -> None:
         )
         sys.exit(2)
 
-    sites = _discover_residual_sites(args.workspace)
+    residual_prefix = residual_key_prefix(args.module_path)
+    # Bare group label (``"mid"`` or ``"flat"``) drives plot/site-key
+    # cosmetics; matches the collector's per-key group prefix.
+    group = residual_prefix[len("residual_") :]
+
+    sites = _discover_residual_sites(args.workspace, residual_prefix)
     if len(sites) < 2:
         print(
             f"effective_dim: only {len(sites)} residual sites; need >= 2",
@@ -540,7 +555,7 @@ def main() -> None:
     for path, layer, repeat in sites:
         X = _load_and_centre(path)
         metrics = _site_metrics(X, args.top_k_pc_remove)
-        key = site_label("mid", layer, repeat)
+        key = site_label(group, layer, repeat)
         per_site[key] = metrics
         by_layer.setdefault(layer, {})[repeat] = metrics["participation_ratio"]
         layers_seen.add(layer)
@@ -625,7 +640,7 @@ def main() -> None:
     print(f"effective_dim: wrote {json_path}")
 
     png_path = os.path.join(args.output_dir, "effective_dim_trajectory.png")
-    _plot_trajectories(per_site, layers, repeats, png_path)
+    _plot_trajectories(per_site, layers, repeats, png_path, group)
     print(f"effective_dim: wrote {png_path}")
 
     print(

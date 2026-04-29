@@ -200,8 +200,6 @@ class ActivationCollector:
         reset_handle = self.model.register_forward_pre_hook(self._reset_counter_hook)
         self._handles.append(reset_handle)
 
-        counter_site = self._install_counter_increment_hook()
-
         for site in self.sites:
             pairs = enumerate_sites(self.model, site, module_path=self.module_path)
             for key, module in pairs:
@@ -217,6 +215,17 @@ class ActivationCollector:
                         self._make_site_hook(site, key)
                     )
                 self._handles.append(handle)
+
+        # Install the per-repeat counter increment hook AFTER all site
+        # hooks. PyTorch fires forward post-hooks in registration order;
+        # for V1 / V2 (no ln_mid) the increment lands on h_mid[-1] which
+        # is also a site-hook target. Registering increment FIRST would
+        # shift the last-block site capture by one repeat (the n_repeat
+        # clamp at _make_site_hook then masks the off-by-one only at the
+        # final repeat, leaving an aliased buffer at every earlier
+        # repeat). With site hooks registered first, they read the
+        # pre-bump counter; the bump runs once per repeat as designed.
+        counter_site = self._install_counter_increment_hook()
 
         if self.non_flash:
             self._apply_non_flash()
@@ -639,24 +648,21 @@ class ActivationCollector:
         attribute to avoid surfacing stale tensors on a subsequent
         register / remove cycle.
         """
-        for attn, original_forward in self._attn_forward_saved:
+        for attn, _original_forward in self._attn_forward_saved:
             try:
                 del attn.forward
             except AttributeError:
                 # Defensive fallback: if the instance attribute was
-                # somehow already removed (e.g., double-restore), leave
-                # the class-level descriptor alone.
+                # somehow already removed (e.g., double-restore), the
+                # class-level descriptor remains visible. We do NOT
+                # re-bind the saved bound method as an instance
+                # attribute here -- ``nn.Module.__getattr__`` returns
+                # a fresh bound method on each ``.forward`` access via
+                # the descriptor protocol, so an ``is`` check against
+                # the saved bound method would always fail and rebind
+                # an instance attribute that masks the class method
+                # across subsequent collector cycles.
                 pass
-            # Double-check the restore landed: if someone else (or a
-            # future refactor) mutated the class-level method, re-bind
-            # the saved original as an instance attribute so the
-            # model's downstream use remains consistent.
-            if getattr(attn, "forward", None) is not original_forward:
-                # original_forward is the PRE-patch bound method; it is
-                # already bound to attn, so assigning it as an instance
-                # attribute behaves the same as the class-level
-                # descriptor for the lifetime of the module.
-                attn.forward = original_forward
             if hasattr(attn, "_analysis_att_stash"):
                 attn._analysis_att_stash = None
         self._attn_forward_saved.clear()

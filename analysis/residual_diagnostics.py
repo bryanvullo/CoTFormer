@@ -4,9 +4,16 @@ Scope
 -----
 Addresses SQ1 residual-stream diagnostics and serves as the RQ6
 pre-check. CPU-only post-processor over Protocol A's residual cache.
-For each (layer, repeat) site it computes three per-token
-quantities (mean L2 norm, per-token L2 variance, L_inf norm) and
-produces three plots with 21 mid-layer curves indexed by repeat.
+For each (layer, repeat) site it computes per-token quantities
+(mean L2 norm, per-token L2 variance, L_inf norm), the top-2-PC
+variance fraction, and the mean cosine similarity between block
+input and block output (residual entering layer L at repeat R
+versus residual entering layer L+1 at repeat R; the boundary cells
+at the last mid-layer are emitted as NaN because the residual
+flow there crosses an optional ``ln_mid`` block and/or the
+``h_end`` stack, conflating single-block cosine drift with
+multi-block drift). Produces curve plots across repeats plus an
+optional cosine-sim heatmap.
 
 Falsifiability relevance
 ------------------------
@@ -29,8 +36,11 @@ Inputs
 ------
 Reads residuals from the workspace directory produced by a prior
 ``analysis.logit_lens`` run (which runs the collector and persists
-``residual_mid_l{L}_r{R}.npy`` and ``residual_ln_mid_r{R}.npy``
-files per §4.3 of ``docs/extend-technical.md``).
+``residual_*_l{L}_r{R}.npy`` and ``residual_ln_mid_r{R}.npy`` files
+per §4.3 of ``docs/extend-technical.md``). The ``residual_*`` group
+prefix is selected by ``--module-path``: ``residual_mid_*`` for the
+CoTFormer ``h_mid`` sub-stream (default), ``residual_flat_*`` for
+the standard ``transformer.h`` (Protocol-D Tier 1 substrate).
 """
 
 from __future__ import annotations
@@ -43,6 +53,7 @@ from typing import Any
 import numpy as np
 
 from analysis.common.plotting import palette_for_repeats, savefig, setup_figure
+from analysis.common.sites import residual_key_prefix
 
 
 def build_argparser() -> argparse.ArgumentParser:
@@ -82,6 +93,15 @@ def build_argparser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--cv-threshold", type=float, default=0.1,
         help="Within-layer CV gate for the mean-L2-constant H0 (§1.3)",
+    )
+    parser.add_argument(
+        "--module-path",
+        type=str,
+        default="model.transformer.h_mid",
+        help="Dotted module path the upstream collector hooked into; "
+             "selects the residual buffer-key prefix "
+             "(``model.transformer.h_mid`` -> residual_mid_*; "
+             "``model.transformer.h`` -> residual_flat_*).",
     )
     return parser
 
@@ -128,17 +148,164 @@ def _rogue_flag(h: np.ndarray, threshold: float) -> tuple[bool, float]:
     return bool(fraction > threshold), fraction
 
 
+def _mean_cosine_sim(h_in: np.ndarray, h_out: np.ndarray) -> float:
+    """Mean per-token cosine similarity between two ``(N_tokens, D)`` tensors.
+
+    Uses the numpy idiom ``sum(h_in * h_out, axis=-1) / (||h_in|| * ||h_out||)``
+    per token, then averages over tokens. Rows where either operand has
+    zero norm are dropped (cosine undefined); if every row is zero-norm
+    the function returns ``NaN`` to signal an uninformative cell.
+    """
+    if h_in.shape != h_out.shape:
+        return float("nan")
+    norm_in = np.linalg.norm(h_in, axis=-1)
+    norm_out = np.linalg.norm(h_out, axis=-1)
+    denom = norm_in * norm_out
+    valid = denom > 0.0
+    if not np.any(valid):
+        return float("nan")
+    dot = np.sum(h_in * h_out, axis=-1)
+    cos = dot[valid] / denom[valid]
+    return float(np.mean(cos))
+
+
+def _array_to_json_safe_list(a: np.ndarray) -> list:
+    """Convert array to nested list with NaN -> None for RFC 8259 conformance."""
+    arr = np.asarray(a, dtype=np.float64)
+    if arr.ndim == 0:
+        v = float(arr)
+        return None if not np.isfinite(v) else v
+    obj = arr.astype(object)
+    obj[~np.isfinite(arr)] = None
+    return obj.tolist()
+
+
+def _compute_block_io_cosine_sim(
+    workspace: str,
+    n_layer_mid: int,
+    n_repeat: int,
+    residual_prefix: str,
+) -> dict[tuple[int, int], float]:
+    """Mean per-token cosine similarity between block input and block output.
+
+    Cell ``(L, R)`` records cosine similarity between
+    ``<residual_prefix>_l<L>_r<R>`` (output of mid-block ``L`` =
+    input to mid-block ``L+1``) and ``<residual_prefix>_l<L+1>_r<R>``
+    (output of mid-block ``L+1``). Therefore the cell at row ``L``
+    represents the IO of mid-block ``L+1``, NOT mid-block ``L``;
+    heatmap row labels should be interpreted accordingly.
+    ``residual_prefix`` is ``"residual_mid"`` for ``h_mid`` and
+    ``"residual_flat"`` for standard ``transformer.h``.
+
+    Boundary handling at ``L = n_layer_mid - 1``
+    --------------------------------------------
+    Both intermediate-repeat (``R < n_repeat``) and last-repeat
+    (``R == n_repeat``) cells at the last mid-layer are emitted as
+    ``NaN``. For ``R < n_repeat`` the next residual flowing through
+    the network is the start of repeat ``R+1`` *after* an optional
+    ``ln_mid`` block (present in CoTFormer variants C2--C5, absent
+    in C1). For ``R == n_repeat``, the canonical Belrose-2023 target
+    residual ``residual_pre_ln_f`` is the input to ``ln_f`` -- but
+    for V3/V4 (with ``ln_mid``) the residual flow is
+    ``h_mid_last -> ln_mid -> h_end -> ln_f``, so cosine similarity
+    between ``residual_mid_l<last>_r<last>`` and
+    ``residual_pre_ln_f`` measures multi-block drift (``ln_mid +
+    h_end + ...``), NOT single-block IO. Both boundary cells are
+    emitted as ``NaN`` rather than mixing apples and oranges into
+    the summary statistics.
+
+    Returns ``{(layer, repeat): mean_cosine_sim}`` with one entry per
+    valid cell; missing residuals or shape mismatches yield ``NaN``.
+    """
+    cosine_by_cell: dict[tuple[int, int], float] = {}
+
+    for layer_idx in range(n_layer_mid):
+        for repeat_idx in range(1, n_repeat + 1):
+            h_in = _load_residual(
+                workspace, f"{residual_prefix}_l{layer_idx}_r{repeat_idx}"
+            )
+            if h_in is None:
+                cosine_by_cell[(layer_idx, repeat_idx)] = float("nan")
+                continue
+
+            if layer_idx < n_layer_mid - 1:
+                h_out = _load_residual(
+                    workspace,
+                    f"{residual_prefix}_l{layer_idx + 1}_r{repeat_idx}",
+                )
+            else:
+                # At (n_layer_mid - 1, n_repeat) the model has run h_mid_last + ln_mid
+                # (when present) + ALL of h_end + then ln_f reads its input. Cosine sim
+                # between residual_mid_l<last>_r<last> and residual_pre_ln_f therefore
+                # measures multi-block drift (ln_mid + h_end + ...), not single-block
+                # IO. Emit NaN with documented rationale rather than mix apples and
+                # oranges into the summary statistics. The intermediate-repeat
+                # boundary (R < n_repeat) is similarly undefined because of the
+                # optional ln_mid block between this residual and the next-repeat
+                # input.
+                cosine_by_cell[(layer_idx, repeat_idx)] = float("nan")
+                continue
+
+            if h_out is None:
+                cosine_by_cell[(layer_idx, repeat_idx)] = float("nan")
+                continue
+            cosine_by_cell[(layer_idx, repeat_idx)] = _mean_cosine_sim(h_in, h_out)
+
+    return cosine_by_cell
+
+
+def _plot_cosine_heatmap(
+    grid: np.ndarray,
+    n_layer_mid: int,
+    n_repeat: int,
+    output_path: str,
+) -> None:
+    """Render ``grid`` (shape ``(n_layer_mid, n_repeat)``) as a heatmap.
+
+    Skipped silently if matplotlib is unavailable; the JSON summary is
+    the authoritative artefact and the heatmap is informational.
+    """
+    try:
+        fig, axes = setup_figure(1, 1, size=(8.0, 6.0))
+    except Exception:  # noqa: BLE001 - matplotlib import is optional here
+        return
+    ax = axes
+    # Diverging colourmap centred at 0: cosine sim has natural symmetry
+    # around 0 (orthogonal). Sequential viridis biased the visual reading
+    # (cos=0 looked "low" rather than "neutral").
+    import matplotlib.colors as _mcolors
+    norm = _mcolors.TwoSlopeNorm(vmin=-1.0, vcenter=0.0, vmax=1.0)
+    im = ax.imshow(
+        grid, aspect="auto", origin="lower", cmap="RdBu_r", norm=norm,
+    )
+    ax.set_xticks(np.arange(n_repeat))
+    ax.set_xticklabels([str(r) for r in range(1, n_repeat + 1)])
+    ax.set_yticks(np.arange(n_layer_mid))
+    ax.set_yticklabels([f"L{l}" for l in range(n_layer_mid)])
+    ax.set_xlabel("Repeat index")
+    ax.set_ylabel("Mid-layer index")
+    ax.set_title("Block input/output mean cosine similarity")
+    fig.colorbar(im, ax=ax, label="cos(h_in, h_out)")
+    savefig(fig, output_path)
+
+
 def _discover_site_grid(
     workspace: str,
     max_layers: int,
     max_repeat: int,
+    residual_prefix: str,
 ) -> tuple[int, int]:
-    """Infer ``(n_layer_mid, n_repeat)`` from the workspace file layout."""
+    """Infer ``(n_layer_mid, n_repeat)`` from the workspace file layout.
+
+    ``residual_prefix`` selects between ``"residual_mid"`` (CoTFormer
+    ``h_mid``) and ``"residual_flat"`` (standard ``transformer.h``);
+    see ``analysis.common.sites.residual_key_prefix``.
+    """
     n_layer_found = 0
     n_repeat_found = 0
     for layer_idx in range(max_layers):
         for repeat_idx in range(1, max_repeat + 1):
-            key = f"residual_mid_l{layer_idx}_r{repeat_idx}"
+            key = f"{residual_prefix}_l{layer_idx}_r{repeat_idx}"
             if _load_residual(workspace, key) is None:
                 continue
             n_layer_found = max(n_layer_found, layer_idx + 1)
@@ -146,7 +313,7 @@ def _discover_site_grid(
     if n_layer_found == 0 or n_repeat_found == 0:
         raise FileNotFoundError(
             f"_discover_site_grid: workspace {workspace} has no "
-            f"residual_mid_l{{L}}_r{{R}}.npy files"
+            f"{residual_prefix}_l{{L}}_r{{R}}.npy files"
         )
     return n_layer_found, n_repeat_found
 
@@ -191,8 +358,10 @@ def main() -> None:
 
     os.makedirs(args.output_dir, exist_ok=True)
 
+    residual_prefix = residual_key_prefix(args.module_path)
+
     n_layer_mid, n_repeat = _discover_site_grid(
-        args.workspace, args.max_layers, args.max_repeat
+        args.workspace, args.max_layers, args.max_repeat, residual_prefix
     )
 
     mean_l2_grid = np.full((n_layer_mid, n_repeat), np.nan, dtype=np.float64)
@@ -204,7 +373,7 @@ def main() -> None:
     for layer_idx in range(n_layer_mid):
         for repeat_idx in range(1, n_repeat + 1):
             h = _load_residual(
-                args.workspace, f"residual_mid_l{layer_idx}_r{repeat_idx}"
+                args.workspace, f"{residual_prefix}_l{layer_idx}_r{repeat_idx}"
             )
             if h is None:
                 continue
@@ -218,6 +387,15 @@ def main() -> None:
                 rogue_flags.append(
                     {"layer": layer_idx, "repeat": repeat_idx, "top2_fraction": top2}
                 )
+
+    cosine_io_grid = np.full(
+        (n_layer_mid, n_repeat), np.nan, dtype=np.float64
+    )
+    cosine_by_cell = _compute_block_io_cosine_sim(
+        args.workspace, n_layer_mid, n_repeat, residual_prefix
+    )
+    for (layer_idx, repeat_idx), value in cosine_by_cell.items():
+        cosine_io_grid[layer_idx, repeat_idx - 1] = value
 
     baseline_mean_l2: float | None = None
     h_begin = _load_residual(args.workspace, "residual_h_begin")
@@ -261,6 +439,44 @@ def main() -> None:
         output_path=os.path.join(args.output_dir,
                                  "residual_diagnostics_linf.png"),
     )
+    _plot_cosine_heatmap(
+        cosine_io_grid, n_layer_mid, n_repeat,
+        output_path=os.path.join(args.output_dir,
+                                 "residual_cosine_sim_io.png"),
+    )
+
+    finite_cos = cosine_io_grid[np.isfinite(cosine_io_grid)]
+    if finite_cos.size > 0:
+        cosine_summary = {
+            "mean": float(np.mean(finite_cos)),
+            "median": float(np.median(finite_cos)),
+            "min": float(np.min(finite_cos)),
+            "max": float(np.max(finite_cos)),
+            "n_cells_with_value": int(finite_cos.size),
+            "n_cells_below_0_5": int(np.sum(finite_cos < 0.5)),
+        }
+    else:
+        cosine_summary = {
+            "mean": None,
+            "median": None,
+            "min": None,
+            "max": None,
+            "n_cells_with_value": 0,
+            "n_cells_below_0_5": 0,
+        }
+    cosine_per_cell = [
+        {
+            "layer": int(layer_idx),
+            "repeat": int(repeat_idx),
+            "mean_cosine_sim_block_input_output": (
+                None
+                if not np.isfinite(cosine_io_grid[layer_idx, repeat_idx - 1])
+                else float(cosine_io_grid[layer_idx, repeat_idx - 1])
+            ),
+        }
+        for layer_idx in range(n_layer_mid)
+        for repeat_idx in range(1, n_repeat + 1)
+    ]
 
     results = {
         "workspace": args.workspace,
@@ -269,15 +485,20 @@ def main() -> None:
         "n_repeat": int(n_repeat),
         "normalise_by_h_begin": bool(args.normalise_by_h_begin),
         "h_begin_mean_l2": baseline_mean_l2,
-        "mean_l2_grid": mean_l2_grid.tolist(),
-        "var_l2_grid": var_l2_grid.tolist(),
-        "linf_grid": linf_grid.tolist(),
-        "top2_pc_fraction_grid": top2_grid.tolist(),
+        "mean_l2_grid": _array_to_json_safe_list(mean_l2_grid),
+        "var_l2_grid": _array_to_json_safe_list(var_l2_grid),
+        "linf_grid": _array_to_json_safe_list(linf_grid),
+        "top2_pc_fraction_grid": _array_to_json_safe_list(top2_grid),
         "rogue_flags": rogue_flags,
-        "layer_cv": layer_cv.tolist(),
+        "layer_cv": _array_to_json_safe_list(layer_cv),
         "cv_threshold": args.cv_threshold,
         "n_layers_failing_cv_gate": n_cv_fail,
         "h0_reject_flat_norm": bool(n_cv_fail > 0),
+        "cosine_sim_io_grid": _array_to_json_safe_list(cosine_io_grid),
+        "cosine_sim_io_per_cell": cosine_per_cell,
+        "summary": {
+            "cosine_sim_block_input_output": cosine_summary,
+        },
     }
     with open(
         os.path.join(args.output_dir, "residual_diagnostics_results.json"), "w"

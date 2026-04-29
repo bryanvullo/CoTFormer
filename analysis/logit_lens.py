@@ -43,6 +43,7 @@ See ``analysis.common.collector`` for the workspace layout.
 from __future__ import annotations
 
 import argparse
+import copy as _copy_mod
 import json
 import os
 from contextlib import nullcontext
@@ -56,7 +57,7 @@ from analysis.common.collector import ActivationCollector
 from analysis.common.data import iterate_owt2_val
 from analysis.common.loader import load_model_from_checkpoint
 from analysis.common.plotting import palette_for_repeats, savefig, setup_figure
-from analysis.common.sites import ActivationSite
+from analysis.common.sites import ActivationSite, residual_key_prefix
 from analysis.common.stats import paired_t_test
 
 
@@ -147,6 +148,17 @@ def _metrics_at_site(
         top1_lnf = (logits_lnf.argmax(dim=-1) == targets).float().mean().item()
         top1_raw = (logits_raw.argmax(dim=-1) == targets).float().mean().item()
 
+        # Already fp32 after the upstream cast at the residual-load
+        # site + lm_head/ln_f fp32 cast in ``_run_one_batch``. This
+        # ``.float()`` is a defensive no-op (fail-safe if a future
+        # caller forgets to upcast). The bf16 matmul precision floor
+        # (~1e-3 nats) is now lifted to fp32 native by running the
+        # matmul itself in fp32 -- a prior fix only upcast logits
+        # AFTER the matmul, which left the precision floor at the
+        # bf16 matmul output and swallowed the late-repeat KL signal.
+        logits_lnf = logits_lnf.float()
+        logits_raw = logits_raw.float()
+
         log_softmax_lnf = F.log_softmax(logits_lnf, dim=-1)
         log_softmax_raw = F.log_softmax(logits_raw, dim=-1)
 
@@ -207,6 +219,13 @@ def _run_one_batch(
         cursor = getattr(cursor, name)
     n_layer_mid = len(cursor)
     n_repeat = int(getattr(model, "n_repeat", 1))
+
+    # Buffer-key prefix follows the collector's group-from-module-path
+    # convention: ``residual_mid_*`` for ``h_mid`` (CoTFormer main
+    # sub-stream), ``residual_flat_*`` for ``h`` (Protocol-D Tier 1
+    # GPT-2-large substrate). Single source of truth lives in
+    # ``analysis.common.sites.residual_key_prefix``.
+    residual_prefix = residual_key_prefix(args.module_path)
 
     # RESIDUAL_PRE_LN_F is required so the workspace carries the pre-``ln_f``
     # residual that ``analysis.tuned_lens`` consumes as its target residual
@@ -274,19 +293,42 @@ def _run_one_batch(
     ln_mid_entropy_lnf = np.full((n_repeat,), np.nan, dtype=np.float32)
     ln_mid_kl_lnf = np.full((n_repeat - 1,), np.nan, dtype=np.float32)
 
-    lm_head_eval = lm_head.to(device).eval()
-    ln_f_eval = ln_f.to(device).eval()
+    # Deep-copy the lens modules and cast to fp32 BEFORE the matmul.
+    # Prior fix upcast logits AFTER the matmul, but bf16 matmul itself
+    # has a ~1e-3 precision floor that dominates the late-repeat KL
+    # signal (sub-1e-3 nats when the model is near-converged across
+    # repeats -- exactly the regime RQ1 tests). Lifting the matmul
+    # operands to fp32 raises the precision floor to fp32 native.
+    # Deep-copy is required because ``nn.Module.to(dtype=...)`` mutates
+    # in place and would silently flip the original ``model.lm_head``
+    # / ``model.transformer.ln_f`` to fp32.
+    lm_head_eval = _copy_mod.deepcopy(lm_head).to(
+        device=device, dtype=torch.float32
+    ).eval()
+    ln_f_eval = _copy_mod.deepcopy(ln_f).to(
+        device=device, dtype=torch.float32
+    ).eval()
+    for param in lm_head_eval.parameters():
+        param.requires_grad_(False)
+    for param in ln_f_eval.parameters():
+        param.requires_grad_(False)
 
     for layer_idx in range(n_layer_mid):
         prev_ls_lnf = None
         prev_ls_raw = None
         for repeat_idx in range(1, n_repeat + 1):
-            key = f"residual_mid_l{layer_idx}_r{repeat_idx}"
+            key = f"{residual_prefix}_l{layer_idx}_r{repeat_idx}"
             try:
                 h_np = collector.buffer_for(key)
             except KeyError:
                 continue
-            h = torch.from_numpy(h_np).to(device=device, dtype=lm_head_eval.weight.dtype)
+            # Match the lens-path dtype (fp32) so the matmul itself runs
+            # at fp32, not bf16. Prior fix at this site cast h to
+            # lm_head's bf16 dtype, then upcast logits AFTER matmul --
+            # but bf16 matmul precision is ~1e-3, which dominates the
+            # late-repeat KL signal. Casting BEFORE the matmul lifts the
+            # precision floor to fp32 native.
+            h = torch.from_numpy(h_np).to(device=device, dtype=torch.float32)
             if h.shape[0] != targets_torch.shape[0]:
                 trim = min(h.shape[0], targets_torch.shape[0])
                 h = h[:trim]
@@ -316,7 +358,8 @@ def _run_one_batch(
             h_np = collector.buffer_for(key)
         except KeyError:
             continue
-        h = torch.from_numpy(h_np).to(device=device, dtype=lm_head_eval.weight.dtype)
+        # Same fp32-before-matmul contract as the mid-block site above.
+        h = torch.from_numpy(h_np).to(device=device, dtype=torch.float32)
         if h.shape[0] != targets_torch.shape[0]:
             trim = min(h.shape[0], targets_torch.shape[0])
             h = h[:trim]
@@ -408,7 +451,49 @@ def _h0_verdict(aggregate: dict[str, Any]) -> dict[str, Any]:
         return {"method": "paired_t_test", "skipped_reason": "insufficient finite pairs"}
 
     t_stat, p_value = paired_t_test(last[mask], first[mask])
+
+    # Mean-monotonicity (legacy aggregate measure): average across
+    # layers FIRST, then check the (n_repeat,) curve is non-decreasing.
+    # Loses per-layer signal -- a layer that decreases between r=2 and
+    # r=3 can be hidden by other layers averaging up. Retained for
+    # backward compatibility with prior runs that key on this field.
     monotonic = bool(np.all(np.diff(np.nanmean(mean_top1_lnf, axis=0)) >= -1e-4))
+
+    # Per-layer monotonicity: each layer's own (n_repeat,) curve checked
+    # independently; the fraction of layers whose curve is non-decreasing
+    # is the per-layer falsifiability signal. ``strict_all_layers``
+    # captures the conservative reading (no layer decreases anywhere),
+    # which is the right gate when RQ1 claims monotonicity universally
+    # rather than on average.
+    per_layer_monotonic = np.zeros(n_layer_mid, dtype=bool)
+    for layer_idx in range(n_layer_mid):
+        layer_curve = mean_top1_lnf[layer_idx, :]
+        finite_mask = np.isfinite(layer_curve)
+        if int(finite_mask.sum()) < 2:
+            continue
+        layer_diffs = np.diff(layer_curve[finite_mask])
+        per_layer_monotonic[layer_idx] = bool(np.all(layer_diffs >= -1e-4))
+    # Count layers with sufficient measurements for the monotonicity
+    # check. Layers excluded for insufficient finite values must NOT
+    # inflate the denominator -- a layer that never received >=2
+    # finite top-1 measurements is not evidence against monotonicity,
+    # so the fraction must be over the measurable subset.
+    n_measured = int(sum(
+        1 for layer_idx in range(n_layer_mid)
+        if int(np.isfinite(mean_top1_lnf[layer_idx, :]).sum()) >= 2
+    ))
+    n_layers_excluded = n_layer_mid - n_measured
+
+    per_layer_monotonic_count = int(per_layer_monotonic.sum())
+    per_layer_monotonic_fraction = (
+        float(per_layer_monotonic_count / n_measured)
+        if n_measured > 0 else float("nan")
+    )
+    strict_all_layers_monotonic = bool(
+        n_measured == n_layer_mid
+        and per_layer_monotonic_count == n_measured
+    )
+
     rejects_flat = bool(p_value < 0.01 and float(np.nanmean(last) - np.nanmean(first)) > 0.0)
 
     return {
@@ -421,6 +506,10 @@ def _h0_verdict(aggregate: dict[str, Any]) -> dict[str, Any]:
         "threshold_alpha": 0.01,
         "rejects_flat": rejects_flat,
         "monotonic_non_decreasing": monotonic,
+        "per_layer_monotonic_count": per_layer_monotonic_count,
+        "per_layer_monotonic_fraction": per_layer_monotonic_fraction,
+        "strict_all_layers_monotonic": strict_all_layers_monotonic,
+        "n_layers_excluded_for_no_measurement": n_layers_excluded,
     }
 
 
