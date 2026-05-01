@@ -8,12 +8,13 @@
 
 #SBATCH --job-name=base_cotformer_12L_15R
 #SBATCH --nodes=1
-#SBATCH -p l4               # partition
+#SBATCH --account=ecsstudents
+#SBATCH --partition=ecsstudents_l4 # partition
 #SBATCH --gres=gpu:1        # request 1 GPU
-#SBATCH --mem=128G          # use 20GB memory
-#SBATCH --time=60:00:00     # max wall time is 60 hrs
+#SBATCH --mem=120G          # use 120GB memory
+#SBATCH --time=24:00:00     # max wall time is 60 hrs
 #SBATCH --ntasks=1
-#SBATCH --cpus-per-task=4
+#SBATCH --cpus-per-task=16
 #SBATCH --output=slurm_%j.out
 
 # --- Activate your env ---

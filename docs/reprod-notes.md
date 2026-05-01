@@ -83,6 +83,8 @@
   - [B12. RQ9 counting sub-stream is not a Chang and Bisk reproduction](#b12-rq9-counting-sub-stream-is-not-a-chang-and-bisk-reproduction)
   - [B13. Chang and Bisk `max_grad_norm = 0.3` is dead code](#b13-chang-and-bisk-max_grad_norm--03-is-dead-code)
   - [B14. Pilot 1 Chang and Bisk-exact results (stub)](#b14-pilot-1-chang-and-bisk-exact-results-stub)
+  - [B15. RNG State Restoration on Single-GPU Resume (Case CoT) — Resolved](#b15-rng-state-restoration-on-single-gpu-resume-case-cot--resolved)
+  - [B16. Host-RAM OOM via `--data_in_ram` (Case CoT) — Mitigated](#b16-host-ram-oom-via---data_in_ram-case-cot--mitigated)
 - [Part C: Original Bugs and Mistakes](#part-c-original-bugs-and-mistakes)
   - [C1. Orphan MoDBlock: 5 Allocated, 4 Used](#c1-orphan-modblock-5-allocated-4-used)
     - [What the code does](#what-the-code-does)
@@ -1382,6 +1384,163 @@ fair-comparison results are reported in a separate section to be
 added at synthesis time.
 
 `TODO: filled by code-wave orch post-Pilot-1 execution.`
+
+## B15. RNG State Restoration on Single-GPU Resume (Case CoT) — Resolved
+
+**Impact:** Crashes the resume path on single-GPU runs that use a
+`RandomSampler`-derived generator state. No effect on the DDP
+trajectories of any [Part A](#part-a-successful-replications)
+variant, which all use `DistributedSampler` and therefore never
+persist a real sampler RNG.
+**Status:** Resolved. Added the `.type(torch.ByteTensor)` cast for
+`train_sampler_state` at `main.py:185-191`.
+
+### Background
+
+The checkpoint resume path in `main.py:175-184` casts every saved
+`torch.Generator` byte tensor back to `ByteTensor` before
+`set_state(...)` --- the same pattern documented in
+[§B4](#b4-rng-state-restoration-on-ddp-resume-adm--resolved). Three
+of four sibling fields received the cast (`cpu_rng_state`,
+`gpu_rng_state`, `gpu_rng_states[i]`); a fourth,
+`train_sampler_state`, did not. The omission was harmless under
+DDP because `DistributedSampler.set_epoch(...)` causes
+`optim/base.py:38` to set `sampler_state_before_iter = None`
+before the save call --- the saved value is `None`, the load-side
+guard short-circuits, and no cast is needed.
+
+### Why it surfaces only on single-GPU
+
+The 12L x 15-repeat Case CoT runs (`iridis/base-train/job3.sh`,
+paper Fig. 2 / Fig. 3) were the first reproduction queued without
+DDP. `RandomSampler`, the single-GPU default selected by
+`data/utils.py:63-67`, does not implement `set_epoch`, so
+`sampler_state_before_iter` retains a real `torch.Generator` byte
+tensor at every save call. On resume,
+`torch.load(..., map_location=...)` demotes the legacy `ByteTensor`
+subtype to a plain `torch.uint8` Tensor;
+`Generator.set_state(...)` rejects this with
+`TypeError: RNG state must be a torch.ByteTensor` before the first
+training step.
+
+The bug had been latent since the team's first RNG-restore commit
+(`commit 657de47`) and the per-rank refactor (`commit 29b9690`) ---
+neither commit landed the fourth cast --- but had no observable
+effect because every prior reproduction (Tables 1 / 2, ADM,
+LN-CoT) ran under DDP.
+
+### Fix
+
+A single conditional cast at `main.py:185-191`, symmetric with the
+existing [§B4](#b4-rng-state-restoration-on-ddp-resume-adm--resolved)
+cast block:
+
+```python
+if "train_sampler_state" in rng_state_dict and rng_state_dict["train_sampler_state"] is not None:
+    rng_state_dict["train_sampler_state"] = rng_state_dict["train_sampler_state"].cpu().type(torch.ByteTensor)
+```
+
+The `is not None` guard preserves correctness on the DDP resume
+path (which still saves `None` and must short-circuit). The fix
+adds no new control flow.
+
+### Affected files
+
+1. `main.py:185-191` (cast added).
+
+### Practical impact
+
+Single-GPU resumes --- used for Case CoT pilot runs and any future
+debugging session that pulls one L4 --- now restore the sampler
+RNG identically to a continuous run. DDP trajectories are
+unchanged because they still skip the sampler-state branch at
+save time. Existing `ckpt_*.pt` files saved before the fix remain
+compatible: the cast is idempotent on `uint8` payloads.
+
+## B16. Host-RAM OOM via `--data_in_ram` (Case CoT) — Mitigated
+
+**Impact:** Job 893189 (run_1) was OOM-killed at step ~2530 after
+14 h 52 m of training. The 12L x 15-repeat Case CoT config has the
+largest cumulative DataLoader RAM footprint of any
+[Part A](#part-a-successful-replications) variant on the
+single-rank path and exceeds the 128 GB cgroup budget listed in
+[§B3](#b3-micro-batch-size-hardware-constrained).
+**Status:** Mitigated. `--data_in_ram` removed from
+`iridis/base-train/job3.sh` with an explanatory inline comment.
+The root-cause int64-upcast pipeline in `data/utils.py` is
+unchanged but unreachable from this script.
+
+### Background
+
+`--data_in_ram` materialises the full uint16 OpenWebText2 token
+array (~32 GB) into host memory. `data/utils.py` then upcasts
+each sampled batch from `uint16` to `int64` per worker (an 8 x
+per-token expansion). With `num_workers=4` (the team's DataLoader
+default), each worker holds an independent fork-COW view of the
+cached slice plus its own int64 working buffer. Empirical
+steady-state RSS on Job 893189 climbed to **292.58 GB** (228 % of
+the 128 GB cgroup), at which point the SLURM cgroup OOM-killer
+terminated the process. The kernel SIGKILL is uncatchable, so no
+Python traceback was emitted in the job's `*.err` --- only the
+SLURM `*** CANCELLED ... DUE to SIGNAL Terminated ***` line and
+the post-mortem
+`Memory Utilized: 292.58 GB / 228.58% of 128.00 GB`.
+
+### Why this surfaces only on the 12L x 15-repeat config
+
+Earlier reproductions (the Table-1 / Table-2 entries and the
+[§A2](#a2-ln-cotformer-perplexity-table-2-40k-steps) /
+[§A6](#a6-adm-perplexity-section-42-figure-4-60k-steps)
+LN-CoTFormer and ADM 60k runs) trained under 2-GPU DDP, which
+halves the per-rank workload and effectively splits the
+DataLoader-worker fanout across two process trees. The 12L x
+15-repeat run on a single rank concentrates all four worker copies
+plus the in-RAM array in one process; the per-process RSS is
+roughly twice the DDP-per-rank figure, which is enough to cross
+the cgroup boundary. Run_0 (Job 893149) was killed at 49 s during
+the same `np.array(memmap)` materialisation step before peak
+allocation, with only 21.92 GB visible at the post-mortem
+checkpoint --- a different proximate trigger but the same
+root-cause family.
+
+### Fix
+
+`--data_in_ram` is commented out in
+`iridis/base-train/job3.sh:164-169` with an inline reference back
+to this section. The script falls back to memmap reads from
+`$DATA_DIR/openwebtext2/train.bin` on the Lustre scratch
+filesystem.
+
+The root-cause int64 upcast in `data/utils.py:39,42` is **not
+patched** in this fix. Every other reproduction variant exercises
+it under DDP without incident, so removing the upcast would be a
+non-local change with broad blast radius. Removing the flag at
+the script level is the minimal, script-scoped change consistent
+with the rest of this document's "subtract before you add"
+disposition.
+
+### Affected files
+
+1. `iridis/base-train/job3.sh:164-169` (`--data_in_ram` removed;
+   multi-line explanatory comment added that points back to this
+   section).
+
+### Practical impact
+
+Resubmitting `job3.sh` after this fix is expected to complete the
+40k-step run within the 128 GB cgroup, regardless of whether the
+run uses 1 GPU or 2 GPUs. The script also flips back to 2-GPU DDP
+(`--gres=gpu:2`, `N_GPUS=2`), which cuts wall time roughly in
+half (from ~233 h to ~115 h, in line with the
+[§A2a](#a2a-ln-cotformer-perplexity-section-5-60k-steps) /
+[§A6](#a6-adm-perplexity-section-42-figure-4-60k-steps) 60k DDP
+envelope) and provides a second layer of defence against the OOM
+by halving per-rank dataset materialisation.
+
+A future cleanup of `data/utils.py` to keep the int64 upcast out
+of the DataLoader-worker copy path would let `--data_in_ram` be
+re-enabled safely on this config, but that is out of scope for
+the Case CoT pilot.
 
 ---
 

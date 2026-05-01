@@ -182,6 +182,13 @@ def main(args):
                 s.cpu().type(torch.ByteTensor) if isinstance(s, torch.Tensor) else s
                 for s in rng_state_dict["gpu_rng_states"]
             ]
+        # Same ByteTensor coercion for the sampler RNG: torch.load demotes the
+        # legacy ByteTensor subtype to plain uint8, which optim/base.py:35
+        # train_sampler.generator.set_state() rejects on resume. The DDP path
+        # saves None here (DistributedSampler has set_epoch), so the guard
+        # short-circuits and DDP resumes still work.
+        if "train_sampler_state" in rng_state_dict and rng_state_dict["train_sampler_state"] is not None:
+            rng_state_dict["train_sampler_state"] = rng_state_dict["train_sampler_state"].cpu().type(torch.ByteTensor)
 
         model.load_state_dict(model_state_dict)
         opt.load_state_dict(optimizer_state_dict)

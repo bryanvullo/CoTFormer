@@ -5,16 +5,18 @@
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=16
-#SBATCH --gres=gpu:1
+#SBATCH --gres=gpu:2
 #SBATCH --mem=128G
 #SBATCH --time=24:00:00
 # ========================= CONFIGURATION ======================================
-# Change these two variables to select which Table 1 entry to train.
-# Then resubmit: cd ~/CoTFormer && bash iridis/base-train/job-template.sh
+# This script trains the 12L x 15-repeat CoTFormer (paper Fig. 2 / Fig. 3 model).
+# For Table 1 entries (12L or 24L x {2, 3, 5}) use iridis/base-train/job-template.sh.
+# To resubmit (auto-resumes from latest ckpt):
+#   cd ~/CoTFormer && bash iridis/base-train/job3.sh
 
-N_GPUS=1            # Must match --gres=gpu:N above (max 2 on ecsstudents_l4)
+N_GPUS=2            # Must match --gres=gpu:N above (max 2 on ecsstudents_l4)
 N_LAYER=12          # 12 or 24 (paper Table 1 rows)
-N_REPEAT=15          # 2, 3, or 5 (paper Table 1 columns)
+N_REPEAT=15         # Paper Fig. 2 / Fig. 3 (deeper than Table 1's {2, 3, 5})
 ITERATIONS=40000    # Paper: 40k steps for all Table 1 entries
 BATCH_SIZE=8        # Per-GPU micro-batch (safe for all configs on L4 24GB)
 ACC_STEPS=16        # Gradient accumulation steps
@@ -159,7 +161,12 @@ TRAIN_ARGS=(
     --iterations "$ITERATIONS"
     --dataset owt2
     --data_dir "$DATA_DIR"
-    --data_in_ram
+    # --data_in_ram is DISABLED on this script -- see docs/reprod-notes.md
+    # section B16 ("Host-RAM OOM via --data_in_ram") for the full story.
+    # Summary: the ~32 GB uint16 OWT2 array, combined with per-batch int64
+    # upcast inside 4 DataLoader workers, OOM-killed run_1 (RSS 292 GB vs
+    # the 128 GB cgroup). Memmap reads from $DATA_DIR/openwebtext2/train.bin
+    # on Lustre are fast enough; do NOT re-enable on ecsstudents_l4.
     --lr 1e-3
     --weight_decay 0.1
     --warmup_percent 0.2
