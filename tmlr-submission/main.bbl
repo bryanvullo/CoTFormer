@@ -1,0 +1,64 @@
+\begin{thebibliography}{7}
+\providecommand{\natexlab}[1]{#1}
+\providecommand{\url}[1]{\texttt{#1}}
+\expandafter\ifx\csname urlstyle\endcsname\relax
+  \providecommand{\doi}[1]{doi: #1}\else
+  \providecommand{\doi}{doi: \begingroup \urlstyle{rm}\Url}\fi
+
+\bibitem[Chang \& Bisk(2025)Chang and Bisk]{chang2025counting}
+Yingshan Chang and Yonatan Bisk.
+\newblock Language models need inductive biases to count inductively.
+\newblock In \emph{International Conference on Learning Representations
+  (ICLR)}, 2025.
+
+\bibitem[Dehghani et~al.(2019)Dehghani, Gouws, Vinyals, Uszkoreit, and
+  Kaiser]{dehghani2019universal}
+Mostafa Dehghani, Stephan Gouws, Oriol Vinyals, Jakob Uszkoreit, and {\L}ukasz
+  Kaiser.
+\newblock Universal transformers.
+\newblock In \emph{International Conference on Learning Representations
+  (ICLR)}, 2019.
+\newblock arXiv:1807.03819.
+
+\bibitem[Gao et~al.(2020)Gao, Biderman, Black, Golding, Hoppe, Foster, Phang,
+  He, Thite, Nabeshima, Presser, and Leahy]{gao2020pile}
+Leo Gao, Stella Biderman, Sid Black, Laurence Golding, Travis Hoppe, Charles
+  Foster, Jason Phang, Horace He, Anish Thite, Noa Nabeshima, Shawn Presser,
+  and Connor Leahy.
+\newblock The {Pile}: An 800{GB} dataset of diverse text for language modeling.
+\newblock \emph{arXiv preprint arXiv:2101.00027}, 2020.
+\newblock OpenWebText2 is released as part of the Pile.
+
+\bibitem[Kaiser \& Sutskever(2016)Kaiser and Sutskever]{kaiser2016neural}
+{\L}ukasz Kaiser and Ilya Sutskever.
+\newblock Neural gpus learn algorithms.
+\newblock In \emph{International Conference on Learning Representations
+  (ICLR)}, 2016.
+\newblock arXiv:1511.08228.
+
+\bibitem[Mohtashami et~al.(2025)Mohtashami, Pagliardini, and Jaggi]{cotformer}
+Amirkeivan Mohtashami, Matteo Pagliardini, and Martin Jaggi.
+\newblock Cotformer: A chain-of-thought driven architecture with
+  budget-adaptive computation cost at inference.
+\newblock In \emph{The Thirteenth International Conference on Learning
+  Representations (ICLR)}, 2025.
+\newblock URL \url{https://openreview.net/forum?id=7igPXQFupX}.
+
+\bibitem[Saunshi et~al.(2025)Saunshi, Dikkala, Li, Kumar, and
+  Reddi]{saunshi2025reasoning}
+Nikunj Saunshi, Nishanth Dikkala, Zhiyuan Li, Sanjiv Kumar, and Sashank~J.
+  Reddi.
+\newblock Reasoning with latent thoughts: On the power of looped transformers.
+\newblock In \emph{International Conference on Learning Representations
+  (ICLR)}, 2025.
+\newblock arXiv:2502.17416.
+
+\bibitem[Vaswani et~al.(2017)Vaswani, Shazeer, Parmar, Uszkoreit, Jones, Gomez,
+  Kaiser, and Polosukhin]{vaswani2017attention}
+Ashish Vaswani, Noam Shazeer, Niki Parmar, Jakob Uszkoreit, Llion Jones,
+  Aidan~N. Gomez, {\L}ukasz Kaiser, and Illia Polosukhin.
+\newblock Attention is all you need.
+\newblock In \emph{Advances in Neural Information Processing Systems
+  (NeurIPS)}, 2017.
+
+\end{thebibliography}

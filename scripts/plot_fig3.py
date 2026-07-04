@@ -28,9 +28,21 @@ import os
 COLOR_BUT = "#1f77b4"
 COLOR_COT = "#2ca02c"
 MARKER = "o"
-LINEWIDTH = 1.6
+LINEWIDTH = 2.4
 MARKERSIZE = 6
 FIG_SIZE = (4.5, 3.4)
+
+# Legibility params (font/tick/label/legend sizes) tuned so text remains
+# readable when the figure is shrunk to ~1.6in (~0.24 textwidth) in the
+# paper. figsize and data pipeline are unchanged. Sizes are capped below the
+# point where matplotlib's bbox_inches="tight" (which intersects, but never
+# expands, the tight bbox against the raw figsize canvas) would clip long
+# label text; the MACs ylabel is wrapped onto two lines for the same reason.
+LABEL_FONTSIZE = 16
+XTICK_FONTSIZE = 13
+YTICK_FONTSIZE = 16
+LEGEND_FONTSIZE = 13
+CAPTION_FONTSIZE = 14  # matches scripts/plot_fig2.py (a)/(b) panel-label convention
 
 # Canonical sequence-length axis from the schema
 SEQ_LENGTHS = [128, 256, 512, 1024, 2048, 4096, 8192, 12288]
@@ -87,6 +99,7 @@ def main() -> None:
 
     plt.rcParams["font.family"] = "serif"
     plt.rcParams["mathtext.fontset"] = "cm"
+    plt.rcParams["font.size"] = YTICK_FONTSIZE
 
     with open(args.macs, "r") as fh:
         macs_data = json.load(fh)
@@ -125,21 +138,40 @@ def main() -> None:
     # Canonical x-ticks at the paper's sequence-length grid
     all_x = sorted(set(but_x) | set(cot_x))
     ax.set_xticks(all_x)
-    ax.set_xticklabels([str(v) for v in all_x], rotation=45, fontsize=7)
-    ax.tick_params(axis="y", labelsize=8)
+    ax.set_xticklabels([str(v) for v in all_x], rotation=45, fontsize=XTICK_FONTSIZE)
+    ax.tick_params(axis="y", labelsize=YTICK_FONTSIZE)
 
-    ax.set_xlabel("Sequence Length", fontsize=9)
-    ax.set_ylabel("Multiply-Accumulate Operations", fontsize=9)
+    ax.set_xlabel("Sequence Length", fontsize=LABEL_FONTSIZE)
+    # Wrapped onto two lines: rotated 90 deg, the single-line form is taller
+    # than the figure canvas height at legibility-target font sizes, which
+    # matplotlib's bbox_inches="tight" silently clips (see fig2 note above).
+    ax.set_ylabel("Multiply-Accumulate\nOperations", fontsize=LABEL_FONTSIZE)
 
-    # Legend top-left (matches screenshot)
-    ax.legend(fontsize=7.5, loc="upper left")
+    # Legend placed ABOVE the axes rather than "upper left" (which matched
+    # the paper screenshot at the original small font): at legibility-target
+    # font size the wider legend box overlaps the CoTFormer/BUT curves near
+    # their upper-right (high seq-len) end. Anchoring above the axes avoids
+    # this regardless of curve shape; bbox_inches="tight" grows the saved
+    # image to include it.
+    ax.legend(fontsize=LEGEND_FONTSIZE, loc="lower center", bbox_to_anchor=(0.5, 1.02))
     ax.grid(False)
+
+    # Panel label, matching scripts/plot_fig2.py's (a)/(b) fig.text convention:
+    # figure-fraction coordinates on the same base FIG_SIZE canvas as fig2,
+    # centered below the axes, same fontsize, no explicit fontweight (fig2
+    # doesn't set one either, so both default to normal weight).
+    fig.text(
+        0.5, -0.04,
+        "(c)",
+        ha="center",
+        fontsize=CAPTION_FONTSIZE,
+    )
 
     plt.tight_layout()
 
     for ext in ("png", "pdf"):
         out = os.path.join(args.output_dir, f"fig3.{ext}")
-        plt.savefig(out, dpi=200, bbox_inches="tight")
+        plt.savefig(out, dpi=300, bbox_inches="tight")
         print(f"Written: {out}")
     plt.close()
 

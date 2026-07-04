@@ -21,6 +21,20 @@ import os
 import numpy as np
 
 
+# ---------------------------------------------------------------------------
+# Legibility params (font/tick/legend sizes, linewidth) tuned so text remains
+# readable when the figure is shrunk to ~1.6in (~0.24 textwidth) in the
+# paper -- same convention as scripts/plot_fig2.py / scripts/plot_fig3.py,
+# scaled up for this figure's larger canvas (6x4.5in vs their 4.5x3.4in).
+# figsize and data pipeline are unchanged.
+# ---------------------------------------------------------------------------
+LABEL_FONTSIZE = 18
+TICK_FONTSIZE = 15
+LEGEND_FONTSIZE = 13
+LINEWIDTH = 3.0
+MARKERSIZE = 8
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="Plot Figure 4: Perplexity vs MACs at inference",
@@ -64,24 +78,26 @@ def main():
         fixed_ppl.append(stats["val_perplexity"])
 
     # -- Plot (matching paper Figure 4 style) --
+    plt.rcParams["font.size"] = TICK_FONTSIZE
     fig, ax = plt.subplots(figsize=(6, 4.5))
 
     # Paper colors: green circles for Router, orange triangles for Fixed Depth
     ax.plot(router_macs, router_ppl, "o-",
             color="#2ca02c", label="LN-CoTFormer (Router)",
-            markersize=7, linewidth=1.8, zorder=3)
+            markersize=MARKERSIZE, linewidth=LINEWIDTH, zorder=3)
     ax.plot(fixed_macs, fixed_ppl, "^-",
             color="#ff7f0e", label="LN-CoTFormer (Fixed Depth)",
-            markersize=7, linewidth=1.8, zorder=3)
+            markersize=MARKERSIZE, linewidth=LINEWIDTH, zorder=3)
 
-    ax.set_xlabel(r"Multiply-Accumulate Operations ($\times 10^9$)", fontsize=11)
-    ax.set_ylabel("Perplexity", fontsize=11)
-    ax.legend(fontsize=10, loc="upper right")
+    ax.set_xlabel(r"Multiply-Accumulate Operations ($\times 10^9$)", fontsize=LABEL_FONTSIZE)
+    ax.set_ylabel("Perplexity", fontsize=LABEL_FONTSIZE)
+    ax.tick_params(axis="both", which="major", labelsize=TICK_FONTSIZE)
+    ax.legend(fontsize=LEGEND_FONTSIZE, loc="upper right")
     ax.grid(True, alpha=0.3)
 
     plt.tight_layout()
     output = args.output or os.path.join(ckpt, "figure4_pareto.png")
-    plt.savefig(output, dpi=150, bbox_inches="tight")
+    plt.savefig(output, dpi=300, bbox_inches="tight")
     print(f"Figure 4 saved: {output}")
     print("Note: 'LN-Block Universal (Router)' curve omitted -- requires a separate trained model.")
     plt.close()

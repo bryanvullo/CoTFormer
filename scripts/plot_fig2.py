@@ -34,9 +34,24 @@ import os
 COLOR_BUT = "#1f77b4"
 COLOR_COT = "#2ca02c"
 MARKER = "o"
-LINEWIDTH = 1.6
+LINEWIDTH = 2.4
 MARKERSIZE = 6
 FIG_SIZE = (4.5, 3.4)
+
+# Legibility params (font/tick/label/legend sizes) tuned so text remains
+# readable when the figure is shrunk to ~1.6in (~0.24 textwidth) in the
+# paper. figsize and data pipeline are unchanged. Sizes are capped below the
+# point where matplotlib's bbox_inches="tight" (which intersects, but never
+# expands, the tight bbox against the raw figsize canvas) would clip long
+# label text; the MACs xlabel is wrapped onto two lines for the same reason.
+LABEL_FONTSIZE = 14  # 16pt xlabel overran the canvas right edge (axes sit
+                     # right-of-centre under the wide ylabel); 14pt measures
+                     # 3.02in vs the 4.5in canvas, safe on both sides.
+TICK_FONTSIZE = 14
+XTICK_FONTSIZE_LOG = 11  # smaller x-tick font for fig2a's dense log-scale axis
+LEGEND_FONTSIZE = 12
+ANNOTATION_FONTSIZE = 11
+CAPTION_FONTSIZE = 14
 
 
 # ---------------------------------------------------------------------------
@@ -147,22 +162,56 @@ def _plot_subplot(
     # Per-point labels rendered in BLACK (not line color) for legibility — the
     # line color is reserved for the marker; text reads against the page bg.
     for x, y, lbl in zip(but_x, but_y, but_labels):
-        ax.annotate(lbl, (x, y), xytext=(0, 4), textcoords="offset points",
-                    fontsize=7, color="black", ha="center", va="bottom")
-    for x, y, lbl in zip(cot_x, cot_y, cot_labels):
-        ax.annotate(lbl, (x, y), xytext=(0, 4), textcoords="offset points",
-                    fontsize=7, color="black", ha="center", va="bottom")
+        ax.annotate(lbl, (x, y), xytext=(0, 6), textcoords="offset points",
+                    fontsize=ANNOTATION_FONTSIZE, color="black", ha="center", va="bottom")
+    # CoTFormer labels placed BELOW their markers (not above, like BUT): at
+    # legibility-target font size the BUT/CoTFormer 12x2 (and 24x2) markers
+    # sit close enough in y that two above-marker labels collide. CoTFormer
+    # PPL is lower than BUT's at every plotted (n_layer, n_repeat) config, so
+    # anchoring its label below the marker moves it away from BUT's label
+    # without touching the data, axis ranges, or curve rendering.
+    for i, (x, y, lbl) in enumerate(zip(cot_x, cot_y, cot_labels)):
+        if i == len(cot_x) - 1:
+            # Final (lowest, rightmost) point: label above-left, as in the
+            # original figure, so it stays inside both axis edges.
+            ax.annotate(lbl, (x, y), xytext=(-4, 8), textcoords="offset points",
+                        fontsize=ANNOTATION_FONTSIZE, color="black", ha="right", va="bottom")
+        else:
+            ax.annotate(lbl, (x, y), xytext=(0, -6), textcoords="offset points",
+                        fontsize=ANNOTATION_FONTSIZE, color="black", ha="center", va="top")
+
+    # Extra margins so the below-marker label of the lowest/rightmost point
+    # (12x15 / 24x5) stays inside the axes at legibility-target font sizes.
+    ax.margins(x=0.07, y=0.14)
 
     if xlog:
         ax.set_xscale("log")
 
+    # Wrapped onto two lines: at legibility-target font sizes the single-line
+    # form is wider than the figure canvas, which matplotlib's
+    # bbox_inches="tight" silently clips (it never expands past figsize).
     ax.set_xlabel(
-        r"Multiply-Accumulate Operations ($\times 10^9$)", fontsize=9
+        "Multiply-Accumulate Operations\n" r"($\times 10^9$)", fontsize=LABEL_FONTSIZE
     )
-    ax.set_ylabel("Perplexity", fontsize=9)
-    ax.legend(fontsize=8, loc="upper right")
+    ax.set_ylabel("Perplexity", fontsize=LABEL_FONTSIZE)
+    # Legend placed ABOVE the axes (outside the data area) rather than in any
+    # in-plot corner: at legibility-target font size the legend box is wide
+    # enough that every in-plot corner ("upper right", "lower left", "best")
+    # ends up overlapping either a curve or a point-label for at least one of
+    # the two n_layer configs. Anchoring above the axes guarantees zero
+    # overlap regardless of curve shape; bbox_inches="tight" simply grows the
+    # saved image to include it.
+    ax.legend(fontsize=LEGEND_FONTSIZE, loc="lower center", bbox_to_anchor=(0.5, 1.02))
     ax.grid(False)
-    ax.tick_params(labelsize=8)
+    ax.tick_params(axis="y", labelsize=TICK_FONTSIZE)
+    if xlog:
+        # Log-scale minor ticks (2x/3x/4x/6x within a decade) collide at
+        # legibility-target font sizes; rotate to match fig3's convention for
+        # dense tick axes instead of shrinking below a readable size.
+        # which="both" is required -- most of these labels are minor ticks.
+        ax.tick_params(axis="x", which="both", labelsize=XTICK_FONTSIZE_LOG, rotation=45)
+    else:
+        ax.tick_params(axis="x", labelsize=TICK_FONTSIZE)
 
 
 # ---------------------------------------------------------------------------
@@ -199,6 +248,7 @@ def main() -> None:
 
     plt.rcParams["font.family"] = "serif"
     plt.rcParams["mathtext.fontset"] = "cm"
+    plt.rcParams["font.size"] = TICK_FONTSIZE
 
     with open(args.results, "r") as fh:
         results = json.load(fh)
@@ -223,12 +273,12 @@ def main() -> None:
         0.5, -0.04,
         r"(a) $n_{\mathrm{layer}} = 12$ (x-axis is in log scale)",
         ha="center",
-        fontsize=8,
+        fontsize=CAPTION_FONTSIZE,
     )
     plt.tight_layout()
     for ext in ("png", "pdf"):
         out = os.path.join(args.output_dir, f"fig2a.{ext}")
-        plt.savefig(out, dpi=200, bbox_inches="tight")
+        plt.savefig(out, dpi=300, bbox_inches="tight")
         print(f"Written: {out}")
     plt.close()
 
@@ -247,12 +297,12 @@ def main() -> None:
         0.5, -0.04,
         r"(b) $n_{\mathrm{layer}} = 24$",
         ha="center",
-        fontsize=8,
+        fontsize=CAPTION_FONTSIZE,
     )
     plt.tight_layout()
     for ext in ("png", "pdf"):
         out = os.path.join(args.output_dir, f"fig2b.{ext}")
-        plt.savefig(out, dpi=200, bbox_inches="tight")
+        plt.savefig(out, dpi=300, bbox_inches="tight")
         print(f"Written: {out}")
     plt.close()
 
