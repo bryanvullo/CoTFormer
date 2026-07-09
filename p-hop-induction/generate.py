@@ -195,7 +195,7 @@ class InductionHopsFinalAnswerTask:
         for idx in range(self.seq_len):
             choices = chars
             if self.avoid_adjacent_repeats and idx > 0:
-                choices = [char for char in chars if char != seq[-1]]
+                choices = [char for char in chars if char != seq[-1]]   # TODO we need to evaluate later on wether avoid adjacent repeats is actually a good idea. the plateau might be do to this
             seq.append(self.rng.choice(choices))
         return seq
 
@@ -233,6 +233,8 @@ class InductionHopsFinalAnswerTask:
         """
         if hops == 0:
             seq = self._sample_char_sequence()
+            print(f"seq: {seq}")
+            print(f"[(self.seq_len - 1, seq[-1])] {[(self.seq_len - 1, seq[-1])]}")
             return seq, [(self.seq_len - 1, seq[-1])]
 
         # Need one current position and one previous-occurrence position per hop.
@@ -244,11 +246,13 @@ class InductionHopsFinalAnswerTask:
             )
 
         chars = list(self.char_token_map.keys())
+        print(f"chars: {chars}")
         for _ in range(self.max_resample_attempts):
             max_base = self.seq_len - hops - 2
             base_positions = sorted(
                 self.rng.choice(np.arange(1, max_base + 1), size=hops, replace=False)
             )
+            print(f"base_positions: {base_positions}")
             ascending_currents = [
                 int(position + offset)
                 for offset, position in enumerate(base_positions)

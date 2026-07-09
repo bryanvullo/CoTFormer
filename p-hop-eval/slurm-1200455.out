@@ -1,0 +1,58 @@
+Running SLURM prolog script on ecsai06
+===============================================================================
+Job started on Wed Jul  8 16:42:10 BST 2026
+Job ID          : 1200455
+Job name        : phop_eval
+WorkDir         : /iridisfs/home/tak1e25/CoTFormer/p-hop-eval
+Command         : /iridisfs/home/tak1e25/CoTFormer/p-hop-eval/job.sh
+Partition       : ecsstudents_l4
+Num hosts       : 1
+Num cores       : 4
+Num of tasks    : 1
+Hosts allocated : ecsai06
+Job Output Follows ...
+===============================================================================
+WARNING: REPO_DIR not set -- falling back to /home/tak1e25/CoTFormer
+=========================================
+ p-hop Evaluation
+ User:          tak1e25
+ Node:          ecsai06
+ CPUs:          4
+ GPUs:          1
+ Job ID:        1200455
+ Task:          phop_p32_seq256_a4_final
+ Eval splits:   val_constructive test_constructive
+ Checkpoint:    /scratch/ab3u21/exps/p-hop/phop_p32_seq256_a4_final/fixed_cot_attn/phop_phop_p32_seq256_a4_final_fixed_cot_attn_0-1x8-0_8eff_d128_h8_bs32x4_seed0
+ Ckpt file:     auto
+ Data root:     /scratch/ab3u21/datasets/p-hop
+ Data dir:      /scratch/ab3u21/datasets/p-hop/phop_p32_seq256_a4_final
+ Output JSON:   /scratch/ab3u21/exps/p-hop/evals/phop_eval_summary.json
+ Output JSONL:  /scratch/ab3u21/exps/p32-hop/evals/phop_eval_examples.jsonl
+ Run dir:       /scratch/ab3u21/job-outputs/tak1e25-1200455-phop_eval
+ Started:       Wed Jul  8 16:42:26 BST 2026
+=========================================
+
+GPU Info:
+0, NVIDIA L4, 23034 MiB, 590.48.01
+
+ERROR: Missing /home/tak1e25/CoTFormer/p-hop-induction/phop_eval.py
+==============================================================================
+Running epilogue script on ecsai06.
+
+Submit time  : 2026-07-08T16:42:08
+Start time   : 2026-07-08T16:42:10
+End time     : 2026-07-08T16:42:26
+Elapsed time : 00:00:16 (Timelimit=02:00:00)
+
+Job ID: 1200455
+Cluster: iridis_x
+User/Group: tak1e25/fp
+State: FAILED (exit code 1)
+Nodes: 1
+Cores per node: 4
+CPU Utilized: 00:00:05
+CPU Efficiency: 7.81% of 00:01:04 core-walltime
+Job Wall-clock time: 00:00:16
+Memory Utilized: 14.13 MB
+Memory Efficiency: 0.09% of 16.00 GB (16.00 GB/node)
+
